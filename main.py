@@ -21,6 +21,8 @@ from .service import PluginOperations, PluginTarget
 USAGE = (
     "插件管家（仅限 AstrBot 管理员）\n"
     "/pm list\n"
+    "/pm cmds [页码]\n"
+    "/pm tools [页码]\n"
     "/pm help\n"
     "/pm info <插件名或目录名>\n"
     "/pm add <仓库地址>\n"
@@ -105,7 +107,8 @@ class Main(Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
-        "pm", desc="管理员插件管理：list/help/info/add/enable/disable/reload/remove。"
+        "pm",
+        desc="管理员插件管理：list/cmds/tools/help/info/add/enable/disable/reload/remove。",
     )
     async def plugin(
         self, event: AstrMessageEvent, arguments: GreedyStr
@@ -116,6 +119,7 @@ class Main(Star):
             event: The platform event initiating the request.
             arguments: A subcommand followed by its explicit arguments.
         """
+        action = None
         try:
             if not await self.authorize(event):
                 yield
@@ -134,6 +138,21 @@ class Main(Star):
                 if args:
                     raise ValueError("用法：/pm list（不接受页码或其他参数）。")
                 await self.reply(event, self.service.list_plugins())
+                yield
+                return
+            if action in {"cmds", "tools"}:
+                usage = f"用法：/pm {action} [页码]；页码必须为正整数。"
+                if len(args) > 1 or (
+                    args and (not args[0].isascii() or not args[0].isdecimal())
+                ):
+                    raise ValueError(usage)
+                try:
+                    page = int(args[0]) if args else 1
+                except ValueError:
+                    raise ValueError(usage) from None
+                if page < 1:
+                    raise ValueError(usage)
+                await self.reply(event, self.service.list_catalog(action, page))
                 yield
                 return
             if action == "info":
@@ -177,7 +196,9 @@ class Main(Star):
                         )
                         yield
                         return
-                    verb = {"enable": "启用", "disable": "停用", "reload": "重载"}[action]
+                    verb = {"enable": "启用", "disable": "停用", "reload": "重载"}[
+                        action
+                    ]
                     await self.reply(event, f"正在{verb}插件 {target.name}。")
                     yield
                     if action == "disable":
@@ -201,7 +222,9 @@ class Main(Star):
             self.logger.exception("Plugin management operation failed.")
             await self.reply(
                 event,
-                "操作失败，可能已发生部分变更；请检查 AstrBot 日志，并通过 WebUI 检查或恢复插件。",
+                "查询失败，请检查 AstrBot 日志。"
+                if action in {"list", "cmds", "tools", "info"}
+                else "操作失败，可能已发生部分变更；请检查 AstrBot 日志，并通过 WebUI 检查或恢复插件。",
             )
             yield
         finally:

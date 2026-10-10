@@ -33,6 +33,8 @@ async def test_pm_is_the_only_registered_entry_point(env):
         "/pm",
         "/pm help",
         "/pm list",
+        "/pm cmds",
+        "/pm tools",
         "/pm info demo",
         "/pm add https://example.com/repo",
         "/pm enable demo",
@@ -54,6 +56,8 @@ async def test_all_commands_require_admin_in_real_pipeline(env, command):
     [
         "",
         "list",
+        "cmds",
+        "tools",
         "help",
         "info bad",
         "add bad",
@@ -88,7 +92,16 @@ async def test_bare_entry_shows_help_without_calling_model(env, command):
         if line.startswith("/pm ")
     }
     assert commands == {
-        "list", "help", "info", "add", "enable", "disable", "reload", "remove"
+        "list",
+        "cmds",
+        "tools",
+        "help",
+        "info",
+        "add",
+        "enable",
+        "disable",
+        "reload",
+        "remove",
     }
     assert event.is_stopped() and not env.model_calls
 
@@ -100,6 +113,7 @@ async def test_bare_entry_shows_help_without_calling_model(env, command):
         "get https://github.com/owner/repo",
         "on demo_directory",
         "off demo_directory",
+        "commands",
     ],
 )
 async def test_old_subcommand_names_are_rejected_without_side_effects(
@@ -160,8 +174,7 @@ async def test_list_includes_all_disabled_and_failed_plugins_without_pagination(
     await env.scheduler.execute(event)
     listing = output(event)
     assert listing.startswith(
-        "插件列表（共 25 个）\n"
-        "状态：✅ 已启用 · ⏸️ 已停用 · ❌ 加载失败\n\n"
+        "插件列表（共 25 个）\n状态：✅ 已启用 · ⏸️ 已停用 · ❌ 加载失败\n\n"
     )
     assert "✅ plugin_00" in listing.splitlines()
     assert "⏸️ demo_plugin" in listing.splitlines()
@@ -177,9 +190,7 @@ async def test_list_includes_all_disabled_and_failed_plugins_without_pagination(
     assert event.is_stopped() and not env.model_calls
 
 
-@pytest.mark.parametrize(
-    "active,status", [(True, "✅"), (False, "⏸️")]
-)
+@pytest.mark.parametrize("active,status", [(True, "✅"), (False, "⏸️")])
 async def test_list_places_reserved_marker_after_status_emoji(env, active, status):
     env.add_target(name="astrbot", active=active, reserved=True)
     event = env.event("/pm list")
@@ -226,9 +237,7 @@ async def test_info_uses_real_full_command_names_aliases_and_disabled_state(
     assert event.is_stopped() and not env.model_calls
 
 
-@pytest.mark.parametrize(
-    "active,status", [(True, "✅ 已启用"), (False, "⏸️ 已停用")]
-)
+@pytest.mark.parametrize("active,status", [(True, "✅ 已启用"), (False, "⏸️ 已停用")])
 async def test_info_reports_plugin_status_with_emoji(env, active, status):
     target = env.add_target(active=active)
     event = env.event(f"/pm info {target.name}")
@@ -273,11 +282,7 @@ async def test_conflicting_active_namespace_fails_initialization_and_runtime(env
         handler.event_filters = [CommandGroupFilter("pm")]
     else:
         command_filter = CommandFilter(
-            "other"
-            if kind == "alias"
-            else "pm reload"
-            if kind == "child"
-            else "pm",
+            "other" if kind == "alias" else "pm reload" if kind == "child" else "pm",
             None,
             handler,
         )

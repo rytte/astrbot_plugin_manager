@@ -40,6 +40,7 @@ from astrbot.dashboard.services.plugin_service import PluginService
 
 main = importlib.import_module("astrbot_plugin_manager.main")
 service_module = importlib.import_module("astrbot_plugin_manager.service")
+catalog_module = importlib.import_module("astrbot_plugin_manager.catalog")
 ORIGINAL_HANDLERS = [
     item for item in star_handlers_registry if item.handler_module_path == main.__name__
 ]
@@ -71,6 +72,7 @@ async def env(monkeypatch, tmp_path, request):
     owners = {main.__name__: metadata}
     for module_name in (
         "astrbot_plugin_manager.service",
+        "astrbot_plugin_manager.catalog",
         "astrbot.core.star.star_handler",
         "astrbot.core.star.register.star_handler",
         "astrbot.core.pipeline.waking_check.stage",
@@ -198,7 +200,9 @@ async def env(monkeypatch, tmp_path, request):
     monkeypatch.setattr(PluginService, "remove_plugin_install_source", AsyncMock())
     plugin_config = AstrBotConfig(
         config_path=str(tmp_path / "manager_config.json"),
-        schema=json.loads((PLUGIN_DIR / "_conf_schema.json").read_text(encoding="utf-8")),
+        schema=json.loads(
+            (PLUGIN_DIR / "_conf_schema.json").read_text(encoding="utf-8")
+        ),
     )
     plugin_config.update(getattr(request, "param", {}))
     plugin = main.Main(context, plugin_config)
@@ -301,6 +305,7 @@ async def env(monkeypatch, tmp_path, request):
         plugin=plugin,
         main=main,
         service_module=service_module,
+        catalog=catalog_module,
         context=context,
         owners=owners,
         registry=registry,

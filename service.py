@@ -10,14 +10,16 @@ from astrbot.api.star import Context
 from astrbot.core import sp
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
-from astrbot.core.star.filter.permission import PermissionType, PermissionTypeFilter
 from astrbot.core.star.star import StarMetadata
 from astrbot.core.star.star_handler import star_handlers_registry
 from astrbot.dashboard.services.plugin_service import PluginService
 
 from .bytecode import clear_plugin_bytecode
+from .catalog import command_entries, tool_entries
+from .redaction import redact
 
 PLUGIN_NAME_PREFIX = "astrbot_plugin_"
+CATALOG_PAGE_SIZE = 20
 
 
 @dataclass(frozen=True)
@@ -217,7 +219,10 @@ class PluginOperations:
             )
         plugin = target.plugin
         if plugin is not None:
-            if plugin.module_path == self.owner_module and action in {"disable", "remove"}:
+            if plugin.module_path == self.owner_module and action in {
+                "disable",
+                "remove",
+            }:
                 raise ValueError("不能通过插件管家停用或卸载自身，请使用 WebUI。")
             if (
                 not plugin.module_path
@@ -261,19 +266,49 @@ class PluginOperations:
             + "\n\n使用 /pm info <插件名或目录名> 查看详情。"
         )
 
+    def list_catalog(self, kind: str, page: int) -> str:
+        """Page through registered commands or model tools without invoking them."""
+        if kind not in {"cmds", "tools"}:
+            raise ValueError("未知目录类型。")
+        if page < 1:
+            raise ValueError("页码必须为正整数。")
+        plugins = self.context.get_all_stars()
+        entries = (
+            command_entries(plugins)
+            if kind == "cmds"
+            else tool_entries(self.context.get_llm_tool_manager(), plugins)
+        )
+        title = "命令目录" if kind == "cmds" else "模型工具目录"
+        pages = max(1, (len(entries) + CATALOG_PAGE_SIZE - 1) // CATALOG_PAGE_SIZE)
+        if page > pages:
+            raise ValueError(f"页码超出范围，共 {pages} 页。")
+        selected = entries[(page - 1) * CATALOG_PAGE_SIZE : page * CATALOG_PAGE_SIZE]
+        parts = [
+            f"{title}｜共 {len(entries)} 项｜第 {page}/{pages} 页",
+            "状态来自全局注册信息；会话权限、其他过滤条件及实际请求仍需另行判定。",
+            *(entry.render() for entry in selected),
+        ]
+        if not selected:
+            parts.append("当前没有已注册的条目。")
+        if page < pages:
+            parts.append(f"下一页：/pm {kind} {page + 1}")
+        return "\n\n".join(parts)
+
     def plugin_info(self, identifier: str) -> str:
-        """Describe a plugin and its currently registered command names.
-
-        Args:
-            identifier: An exact metadata name or directory name.
-
-        Returns:
-            Plain text including disabled command and alias information.
-        """
+        """Describe a resolved plugin and the commands and tools it owns."""
         target = self.resolve(identifier)
         if target.plugin is None:
             return f"插件目录：{target.name}\n状态：❌ 加载失败\n请通过 WebUI 查看错误详情或恢复；可使用 /pm remove {target.name} 卸载。"
         plugin = target.plugin
+        plugins = self.context.get_all_stars()
+        commands = [
+            entry for entry in command_entries(plugins) if entry.owner is plugin
+        ]
+        tools = [
+            entry
+            for entry in tool_entries(self.context.get_llm_tool_manager(), plugins)
+            if entry.owner is plugin
+        ]
         parts = [
             f"插件：{plugin.name}",
             f"目录：{plugin.root_dir_name}",
@@ -285,30 +320,21 @@ class PluginOperations:
             "",
             "已注册指令：",
         ]
-        commands = []
-        for handler in star_handlers_registry:
-            if handler.handler_module_path != plugin.module_path:
-                continue
-            admin = any(
-                isinstance(item, PermissionTypeFilter)
-                and item.permission_type == PermissionType.ADMIN
-                for item in handler.event_filters
+        parts.extend(entry.render(compact=True) for entry in commands)
+        if not commands:
+            parts.append("无已注册指令。")
+        parts.extend(("", "模型工具："))
+        parts.extend(entry.render(compact=True) for entry in tools)
+        if not tools:
+            parts.append(
+                "当前没有已注册的模型工具。"
+                if plugin.activated
+                else "插件已停用；当前没有可用的模型工具注册信息。"
             )
-            for command_filter in handler.event_filters:
-                if not isinstance(command_filter, CommandFilter | CommandGroupFilter):
-                    continue
-                names = command_filter.get_complete_command_names()
-                state = (
-                    "；已停用" if not handler.enabled or not plugin.activated else ""
-                )
-                permission = "管理员" if admin else "按插件权限过滤器判断"
-                aliases = "；别名：" + "、".join(names[1:]) if len(names) > 1 else ""
-                commands.append(
-                    f"- {names[0]}（{permission}{state}{aliases}）：{handler.desc or '无说明'}"
-                )
-        parts.extend(sorted(set(commands)) or ["无已注册指令。"])
-        parts.append("\n触发前缀以 AstrBot 配置为准；更多说明请查看插件仓库 README。")
-        return "\n".join(parts)
+        parts.append(
+            "\n触发前缀以 AstrBot 配置为准；工具会话可用性按请求决定；更多说明请查看插件仓库 README。"
+        )
+        return redact("\n".join(parts))
 
     def validated_directory(self, target: PluginTarget) -> Path:
         """Verify that destructive operations address a direct storage child.
