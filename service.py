@@ -237,23 +237,35 @@ class PluginOperations:
         """List all registered and failed plugins.
 
         Returns:
-            Plain text containing state, names and directory identifiers.
+            Plain text containing display names, state and exact identifiers.
         """
         entries = []
         for plugin in self.context.get_all_stars():
             status = "✅" if plugin.activated else "⏸️"
             reserved = " [保留插件]" if plugin.reserved else ""
+            name = (
+                f"{plugin.display_name}（{plugin.name}）"
+                if plugin.display_name
+                else plugin.name
+            )
             entries.append(
                 (
                     plugin.name or plugin.root_dir_name or "无名称",
-                    f"{status}{reserved} {plugin.name}\n  目录：{plugin.root_dir_name}；版本：{plugin.version or '未声明'}\n  {plugin.desc or '无说明'}",
+                    f"{status}{reserved} {name}\n  目录：{plugin.root_dir_name}；版本：{plugin.version or '未声明'}\n  {plugin.desc or '无说明'}",
                 )
             )
-        for directory in self.manager.failed_plugin_dict:
+        for directory, record in self.manager.failed_plugin_dict.items():
+            if not isinstance(record, dict):
+                raise RuntimeError("加载失败插件记录格式无效，必须是字典。")
+            name = (
+                f"{record['display_name']}（{directory}）"
+                if record.get("display_name")
+                else directory
+            )
             entries.append(
                 (
                     directory,
-                    f"❌ {directory}\n  请通过 WebUI 查看错误或恢复；可使用 remove 卸载。",
+                    f"❌ {name}\n  请通过 WebUI 查看错误或恢复；可使用 remove 卸载。",
                 )
             )
         entries.sort(key=lambda item: item[0])
@@ -298,7 +310,13 @@ class PluginOperations:
         """Describe a resolved plugin and the commands and tools it owns."""
         target = self.resolve(identifier)
         if target.plugin is None:
-            return f"插件目录：{target.name}\n状态：❌ 加载失败\n请通过 WebUI 查看错误详情或恢复；可使用 /pm remove {target.name} 卸载。"
+            record = target.failure
+            return redact(
+                f"显示名称：{record.get('display_name') or '未声明'}\n"
+                f"插件名：{record.get('name') or '未声明'}\n"
+                f"插件目录：{target.name}\n状态：❌ 加载失败\n"
+                f"请通过 WebUI 查看错误详情或恢复；可使用 /pm remove {target.name} 卸载。"
+            )
         plugin = target.plugin
         plugins = self.context.get_all_stars()
         commands = [
@@ -310,7 +328,8 @@ class PluginOperations:
             if entry.owner is plugin
         ]
         parts = [
-            f"插件：{plugin.name}",
+            f"显示名称：{plugin.display_name or '未声明'}",
+            f"插件名：{plugin.name}",
             f"目录：{plugin.root_dir_name}",
             f"状态：{'✅ 已启用' if plugin.activated else '⏸️ 已停用'}",
             f"版本：{plugin.version or '未声明'}",

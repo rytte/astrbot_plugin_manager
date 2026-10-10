@@ -110,7 +110,7 @@ async def test_all_named_commands_accept_prefix_omission_in_real_pipeline(env, a
     event = env.event(f"/pm {action} demo")
     await env.scheduler.execute(event)
     expected = {
-        "info": f"插件：{target.name}",
+        "info": f"插件名：{target.name}",
         "enable": "已启用",
         "disable": "已停用",
         "reload": "已重载",

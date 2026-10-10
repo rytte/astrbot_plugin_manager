@@ -199,6 +199,39 @@ async def test_list_places_reserved_marker_after_status_emoji(env, active, statu
     assert event.is_stopped() and not env.model_calls
 
 
+@pytest.mark.parametrize("active,status", [(True, "✅"), (False, "⏸️")])
+@pytest.mark.parametrize("reserved", [False, True])
+async def test_list_displays_plugin_display_name_with_identifier(
+    env, active, status, reserved
+):
+    target = env.add_target(active=active, reserved=reserved)
+    target.display_name = "示例插件"
+    event = env.event("/pm list")
+    await env.scheduler.execute(event)
+    marker = " [保留插件]" if reserved else ""
+    assert f"{status}{marker} 示例插件（{target.name}）" in output(event).splitlines()
+    assert f"目录：{target.root_dir_name}" in output(event)
+    assert event.is_stopped() and not env.model_calls
+
+
+async def test_list_displays_failed_plugin_display_name_with_directory_identifier(env):
+    env.manager.failed_plugin_dict["broken_directory"] = {
+        "reserved": False,
+        "name": "astrbot_plugin_broken",
+        "display_name": "损坏插件",
+    }
+    event = env.event("/pm list")
+    await env.scheduler.execute(event)
+    assert "❌ 损坏插件（broken_directory）" in output(event).splitlines()
+    assert event.is_stopped() and not env.model_calls
+
+
+async def test_list_rejects_invalid_failed_plugin_records(env):
+    env.manager.failed_plugin_dict["broken_directory"] = "invalid record"
+    with pytest.raises(RuntimeError, match="加载失败插件记录格式无效，必须是字典"):
+        env.plugin.service.list_plugins()
+
+
 async def test_list_reports_an_empty_registry(env):
     env.owners.clear()
     assert env.plugin.service.list_plugins() == "没有已注册或加载失败的插件。"
@@ -211,7 +244,7 @@ async def test_help_with_a_plugin_name_is_rejected_with_info_usage(env, identifi
     await env.scheduler.execute(event)
     assert "用法" in output(event)
     assert "/pm info <插件名或目录名>" in output(event)
-    assert f"插件：{target.name}" not in output(event)
+    assert f"插件名：{target.name}" not in output(event)
     assert event.is_stopped() and not env.model_calls
 
 
@@ -246,10 +279,69 @@ async def test_info_reports_plugin_status_with_emoji(env, active, status):
     assert event.is_stopped() and not env.model_calls
 
 
-async def test_info_reports_failed_plugins_and_their_removal_command(env):
-    env.manager.failed_plugin_dict["broken_directory"] = {"reserved": False}
+@pytest.mark.parametrize("identifier", ["demo_plugin", "demo_directory"])
+async def test_info_displays_display_name_separately_from_plugin_identifier(
+    env, identifier
+):
+    target = env.add_target()
+    target.display_name = "示例插件"
+    event = env.event(f"/pm info {identifier}")
+    await env.scheduler.execute(event)
+    assert "显示名称：示例插件" in output(event).splitlines()
+    assert f"插件名：{target.name}" in output(event).splitlines()
+    assert f"目录：{target.root_dir_name}" in output(event).splitlines()
+    assert event.is_stopped() and not env.model_calls
+
+
+@pytest.mark.parametrize("display_name", [None, ""])
+async def test_unset_display_name_is_not_substituted_in_plugin_info(env, display_name):
+    target = env.add_target()
+    target.display_name = display_name
+    listing = env.plugin.service.list_plugins()
+    assert f"✅ {target.name}" in listing.splitlines()
+    event = env.event(f"/pm info {target.name}")
+    await env.scheduler.execute(event)
+    assert "显示名称：未声明" in output(event).splitlines()
+    assert f"插件名：{target.name}" in output(event).splitlines()
+    assert event.is_stopped() and not env.model_calls
+
+
+async def test_display_names_do_not_change_plugin_identifiers(env):
+    first = env.add_target(name="first_plugin", directory="first_directory")
+    second = env.add_target(name="second_plugin", directory="second_directory")
+    for target in (first, second):
+        target.display_name = "同名插件"
+        assert env.plugin.service.resolve(target.name).plugin is target
+        assert env.plugin.service.resolve(target.root_dir_name).plugin is target
+    with pytest.raises(ValueError, match="未找到插件"):
+        env.plugin.service.resolve("同名插件")
+    listing = env.plugin.service.list_plugins()
+    for target in (first, second):
+        assert f"✅ 同名插件（{target.name}）" in listing.splitlines()
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {},
+        {"display_name": None},
+        {"display_name": ""},
+        {"name": "astrbot_plugin_broken", "display_name": "损坏插件"},
+    ],
+)
+async def test_info_reports_failed_plugins_and_their_removal_command(env, metadata):
+    env.manager.failed_plugin_dict["broken_directory"] = {
+        "reserved": False,
+        **metadata,
+    }
     event = env.event("/pm info broken_directory")
     await env.scheduler.execute(event)
+    assert (
+        f"显示名称：{metadata.get('display_name') or '未声明'}"
+        in output(event).splitlines()
+    )
+    assert f"插件名：{metadata.get('name') or '未声明'}" in output(event).splitlines()
+    assert "插件目录：broken_directory" in output(event).splitlines()
     assert "状态：❌ 加载失败\n" in output(event)
     assert "/pm remove broken_directory" in output(event)
     assert event.is_stopped() and not env.model_calls
