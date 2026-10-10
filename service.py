@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
 from astrbot.api.star import Context
 from astrbot.core import sp
+from astrbot.core.repository import parse_repository_url
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.star import StarMetadata
 from astrbot.core.star.star_handler import star_handlers_registry
-from astrbot.dashboard.services.plugin_service import PluginService
+from astrbot.dashboard.services.plugin_service import PluginService, PluginServiceError
 
 from .bytecode import clear_plugin_bytecode
 from .catalog import command_entries, tool_entries
@@ -20,6 +23,20 @@ from .redaction import redact
 
 PLUGIN_NAME_PREFIX = "astrbot_plugin_"
 CATALOG_PAGE_SIZE = 20
+MARKET_PAGE_SIZE = 10
+INSTALL_USAGE = (
+    "用法：/pm add <仓库地址或市场ID>；市场 ID 为作者/插件技术名，"
+    "含空格时请用引号包住完整 ID。"
+)
+MARKET_ID_PATTERN = re.compile(r"[^/\x00-\x1f\x7f]+/[^/\x00-\x1f\x7f]+")
+SCP_REPOSITORY_PATTERN = re.compile(r"[^/@\s:]+@[^/:\s]+:[^\s]+")
+
+
+def is_market_id(identifier: str) -> bool:
+    """Validate a command-safe identity without changing its author or name."""
+    return bool(MARKET_ID_PATTERN.fullmatch(identifier)) and all(
+        part == part.strip() for part in identifier.split("/")
+    )
 
 
 @dataclass(frozen=True)
@@ -384,11 +401,69 @@ class PluginOperations:
             raise ValueError("插件目录存在路径越界或链接，拒绝操作。")
         return candidate
 
-    async def install(self, repository: str) -> str:
-        """Install through the WebUI service without bypassing version checks.
+    async def search_market(self, keyword: str, page: int) -> str:
+        """Search the official registry and render copyable install commands."""
+        keyword = " ".join(keyword.split())
+        if not keyword or page < 1:
+            raise ValueError("关键词不能为空，页码必须为正整数。")
+        data, notice = await self.web.get_online_plugins(
+            custom_registry=None, force_refresh=False
+        )
+        entries = []
+        for identifier, entry in self.web.iter_market_plugin_entries(data):
+            if not is_market_id(identifier):
+                continue
+            fields = (
+                identifier,
+                entry.get("display_name"),
+                entry.get("name"),
+                entry.get("author"),
+                entry.get("desc"),
+                entry.get("tags"),
+            )
+            searchable = " ".join(
+                " ".join(str(field or "").split()) for field in fields
+            ).casefold()
+            if keyword.casefold() in searchable:
+                entries.append((identifier, entry))
+        entries.sort(key=lambda item: item[0].casefold())
+        pages = max(1, (len(entries) + MARKET_PAGE_SIZE - 1) // MARKET_PAGE_SIZE)
+        if page > pages:
+            raise ValueError(f"页码超出范围，共 {pages} 页。")
+        parts = [
+            f"官方插件市场｜{redact(keyword)}｜共 {len(entries)} 项｜第 {page}/{pages} 页"
+        ]
+        if notice:
+            parts.append(f"提示：{redact(notice)}")
+        offset = (page - 1) * MARKET_PAGE_SIZE
+        selected = entries[offset : offset + MARKET_PAGE_SIZE]
+        for index, (identifier, entry) in enumerate(selected, offset + 1):
+            title = " ".join(
+                str(
+                    redact(entry.get("display_name") or entry.get("name") or identifier)
+                ).split()
+            )[:80]
+            version = " ".join(str(redact(entry.get("version") or "未声明")).split())[
+                :40
+            ]
+            description = " ".join(
+                str(redact(entry.get("desc") or "暂无简介")).split()
+            )[:160]
+            parts.append(
+                f"{index}. {title}｜{version}\n市场 ID：{identifier}\n"
+                f"简介：{description}\n安装：/pm add {shlex.quote(identifier)}"
+            )
+        if not selected:
+            parts.append("没有找到匹配的插件，换个关键词试试。")
+        if page < pages:
+            parts.append(f"下一页：/pm market {keyword} --page {page + 1}")
+        return "\n\n".join(parts)
+
+    async def install(self, identifier: str) -> str:
+        """Install a repository or exact market ID through the official service.
 
         Args:
-            repository: The explicitly supplied repository address.
+            identifier: A complete repository address or exact market ID.
 
         Returns:
             A completion message identifying the registered plugin.
@@ -397,9 +472,22 @@ class PluginOperations:
             RuntimeError: The service did not register a complete plugin.
         """
         self.ensure_writable()
-        info, _ = await self.web.install_plugin(
-            {"url": repository, "ignore_version_check": False}
-        )
+        payload = {"ignore_version_check": False}
+        if "://" in identifier or SCP_REPOSITORY_PATTERN.fullmatch(identifier):
+            try:
+                parse_repository_url(identifier)
+            except ValueError:
+                raise ValueError("仓库地址无效，请填写完整的 Git 仓库地址。") from None
+            payload["url"] = identifier
+        elif is_market_id(identifier):
+            payload.update(
+                install_method="market",
+                registry_url=None,
+                market_plugin_id=identifier,
+            )
+        else:
+            raise ValueError(INSTALL_USAGE)
+        info, _ = await self.web.install_plugin(payload)
         name = info.get("name")
         if not name:
             raise RuntimeError("安装服务未返回已注册插件名称。")
@@ -408,6 +496,15 @@ class PluginOperations:
             target.plugin.activated and target.plugin.star_cls is None
         ):
             raise RuntimeError("安装后插件未完成注册和初始化。")
+        if payload.get("install_method") == "market":
+            installed_id = self.web.get_market_plugin_id(
+                {"author": target.plugin.author, "name": target.name}
+            )
+            if installed_id != identifier:
+                raise PluginServiceError(
+                    "Installed plugin identity does not match the marketplace request.",
+                    public_message="安装包的作者或插件名与市场 ID 不一致，可能已产生部分变更",
+                )
         return f"插件 {target.name} 已安装（{'已启用' if target.plugin.activated else '已停用'}）。"
 
     async def disable(self, target: PluginTarget) -> str:

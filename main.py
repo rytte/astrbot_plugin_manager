@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -16,7 +17,7 @@ from astrbot.dashboard.services.plugin_service import (
     PluginServiceWarning,
 )
 
-from .service import PluginOperations, PluginTarget
+from .service import INSTALL_USAGE, PluginOperations, PluginTarget
 from .transfer_web import TransferWeb
 from .transfers import TransferService
 
@@ -25,14 +26,16 @@ USAGE = (
     "/pm list\n"
     "/pm cmds [页码]\n"
     "/pm tools [页码]\n"
+    "/pm market <关键词> [--page <页码>]\n"
     "/pm help\n"
     "/pm info <插件名或目录名>\n"
-    "/pm add <仓库地址>\n"
+    "/pm add <仓库地址或市场ID>\n"
     "/pm enable <插件名或目录名>\n"
     "/pm disable <插件名或目录名>\n"
     "/pm reload <插件名或目录名>\n"
     "/pm remove <插件名或目录名> [--all]\n"
     "卸载仅限私聊；60 秒内以相同参数追加 confirm 确认。\n"
+    "市场 ID 为作者/插件技术名；只查官方市场，不省略前缀。\n"
     "--all 同时删除配置与数据；默认保留。"
 )
 CONFIRM_SECONDS = 60
@@ -114,7 +117,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
         "pm",
-        desc="管理员插件管理：list/cmds/tools/help/info/add/enable/disable/reload/remove。",
+        desc="管理员插件管理：list/cmds/tools/market/help/info/add/enable/disable/reload/remove。",
     )
     async def plugin(
         self, event: AstrMessageEvent, arguments: GreedyStr
@@ -167,6 +170,32 @@ class Main(Star):
                 await self.reply(event, self.service.plugin_info(args[0]))
                 yield
                 return
+            if action == "market":
+                usage = "用法：/pm market <关键词> [--page <页码>]；页码必须为正整数。"
+                page = 1
+                if "--page" in args:
+                    if (
+                        len(args) < 3
+                        or args[-2] != "--page"
+                        or args.count("--page") != 1
+                        or not args[-1].isascii()
+                        or not args[-1].isdecimal()
+                    ):
+                        raise ValueError(usage)
+                    try:
+                        page = int(args[-1])
+                    except ValueError:
+                        raise ValueError(usage) from None
+                    args = args[:-2]
+                if not args or page < 1 or any(arg.startswith("--") for arg in args):
+                    raise ValueError(usage)
+                await self.reply(event, "正在查询官方插件市场，请稍候。")
+                yield
+                await self.reply(
+                    event, await self.service.search_market(" ".join(args), page)
+                )
+                yield
+                return
             if action not in {"add", "enable", "disable", "reload", "remove"}:
                 raise ValueError("未知子命令，请使用 /pm help 查看用法。")
             async with self._operations:
@@ -175,9 +204,16 @@ class Main(Star):
                     async for result in self.remove(event, args):
                         yield result
                     return
+                if action == "add":
+                    try:
+                        args = shlex.split(arguments)[1:]
+                    except ValueError:
+                        raise ValueError(INSTALL_USAGE) from None
                 if len(args) != 1 or args[0].startswith("--"):
                     raise ValueError(
-                        f"用法：/pm {action} <{'仓库地址' if action == 'add' else '插件名或目录名'}>。"
+                        INSTALL_USAGE
+                        if action == "add"
+                        else f"用法：/pm {action} <插件名或目录名>。"
                     )
                 if action == "add":
                     await self.reply(event, "正在安装插件，请稍候。")
@@ -221,7 +257,10 @@ class Main(Star):
         except (PluginServiceError, PluginServiceWarning) as exc:
             self.logger.exception("Plugin management service rejected an operation.")
             await self.reply(
-                event, f"操作未完成：{exc.public_message}。请检查 WebUI 中的插件状态。"
+                event,
+                f"市场查询未完成：{exc.public_message}。"
+                if action == "market"
+                else f"操作未完成：{exc.public_message}。请检查 WebUI 中的插件状态。",
             )
             yield
         except Exception:
@@ -229,7 +268,7 @@ class Main(Star):
             await self.reply(
                 event,
                 "查询失败，请检查 AstrBot 日志。"
-                if action in {"list", "cmds", "tools", "info"}
+                if action in {"list", "cmds", "tools", "info", "market"}
                 else "操作失败，可能已发生部分变更；请检查 AstrBot 日志，并通过 WebUI 检查或恢复插件。",
             )
             yield
