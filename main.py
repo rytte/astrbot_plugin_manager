@@ -17,6 +17,8 @@ from astrbot.dashboard.services.plugin_service import (
 )
 
 from .service import PluginOperations, PluginTarget
+from .transfer_web import TransferWeb
+from .transfers import TransferService
 
 USAGE = (
     "插件管家（仅限 AstrBot 管理员）\n"
@@ -63,12 +65,16 @@ class Main(Star):
         self.ready = False
         self._operations = asyncio.Lock()
         self._removals: dict[tuple[str, str], PendingRemoval] = {}
+        self.transfers = TransferService(self.service, self._operations)
+        self.transfer_web = TransferWeb(context, self.transfers)
 
     async def initialize(self) -> None:
         """Reject conflicting command names before serving requests."""
         conflicts = self.service.command_conflicts()
         if conflicts:
             raise RuntimeError("插件管家命令冲突：" + "、".join(conflicts))
+        await self.transfers.initialize()
+        self.transfer_web.register()
         self.ready = True
 
     async def reply(self, event: AstrMessageEvent, text: str) -> None:
@@ -302,3 +308,4 @@ class Main(Star):
         """Invalidate pending requests and confirmations when unloading."""
         self.ready = False
         self._removals.clear()
+        await self.transfer_web.close()

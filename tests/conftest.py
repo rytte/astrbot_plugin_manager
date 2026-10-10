@@ -98,6 +98,7 @@ async def env(monkeypatch, tmp_path, request):
     config["provider_settings"]["enable"] = True
     tools = SimpleNamespace(func_list=[], iter_builtin_tools=lambda: [])
     context = Context.__new__(Context)
+    context.registered_web_apis = []
     context.provider_manager = SimpleNamespace(llm_tools=tools)
     context.get_config = lambda umo=None: config
     context.get_all_stars = lambda: list(owners.values())
@@ -324,3 +325,82 @@ async def env(monkeypatch, tmp_path, request):
         model_calls=model_calls,
         root=tmp_path,
     )
+
+
+@pytest.fixture
+async def transfer_env(env, monkeypatch):
+    """Seed canonical metadata and isolated per-plugin KV for transfer tests."""
+    import yaml
+    from astrbot_plugin_manager import transfers
+
+    values = {}
+    terminated = {}
+
+    def make_plugin(name="demo_plugin", directory="demo_directory", active=False):
+        target = env.add_target(name=name, directory=directory, active=active)
+        target.display_name = "示例插件"
+        code = Path(env.manager.plugin_store_path) / directory
+        metadata = {
+            "name": name,
+            "display_name": target.display_name,
+            "author": target.author,
+            "version": target.version,
+            "desc": target.desc,
+            "astrbot_version": ">=4.27,<5",
+        }
+        (code / "metadata.yaml").write_text(
+            yaml.safe_dump(metadata, allow_unicode=True), encoding="utf-8"
+        )
+        (code / "main.py").write_text(
+            "raise RuntimeError('plugin code must not execute during transfer')\n",
+            encoding="utf-8",
+        )
+        (code / "_conf_schema.json").write_text(
+            json.dumps({"enabled": {"type": "bool", "default": True}}), encoding="utf-8"
+        )
+        return target
+
+    async def read_range(scope, scope_id):
+        return [
+            SimpleNamespace(key=key, value={"val": copy.deepcopy(value)})
+            for key, value in values.get((scope, scope_id), {}).items()
+        ]
+
+    async def clear(scope, scope_id):
+        values[(scope, scope_id)] = {}
+
+    async def put(scope, scope_id, key, value):
+        values.setdefault((scope, scope_id), {})[key] = copy.deepcopy(value)
+
+    async def terminate(target):
+        assert env.manager._pm_lock.locked()
+        terminated[target.module_path] = copy.copy(target)
+        env.actions.append("terminate")
+
+    async def load(*, specified_module_path):
+        assert env.manager._pm_lock.locked()
+        restored = copy.copy(terminated[specified_module_path])
+        restored.activated = True
+        restored.star_cls = object()
+        env.owners[specified_module_path] = restored
+        env.actions.append("load")
+        return True, None
+
+    env.preferences.range_get_async.side_effect = read_range
+    env.preferences.flush = AsyncMock()
+    env.preferences.clear_async = AsyncMock(side_effect=clear)
+    env.preferences.put_async = AsyncMock(side_effect=put)
+    env.manager._terminate_plugin.side_effect = terminate
+    env.manager.load.side_effect = load
+    monkeypatch.setattr(
+        env.manager, "_iter_plugin_llm_tools", lambda module: [], raising=False
+    )
+    monkeypatch.setattr(
+        transfers.shutil, "disk_usage", lambda path: SimpleNamespace(free=1 << 40)
+    )
+    env.context.get_config()["dashboard"]["jwt_secret"] = (
+        "transfer-test-secret-with-at-least-32-bytes"
+    )
+    env.make_transfer_plugin = make_plugin
+    env.kv_values = values
+    return env
