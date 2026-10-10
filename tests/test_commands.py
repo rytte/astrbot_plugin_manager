@@ -159,15 +159,32 @@ async def test_list_includes_all_disabled_and_failed_plugins_without_pagination(
     event = env.event("/pm list")
     await env.scheduler.execute(event)
     listing = output(event)
-    assert "插件列表（共 25 个）" in listing
-    assert "已停用" in listing and "加载失败" in listing
-    assert "broken_directory" in listing
+    assert listing.startswith(
+        "插件列表（共 25 个）\n"
+        "状态：✅ 已启用 · ⏸️ 已停用 · ❌ 加载失败\n\n"
+    )
+    assert "✅ plugin_00" in listing.splitlines()
+    assert "⏸️ demo_plugin" in listing.splitlines()
+    assert "❌ broken_directory" in listing.splitlines()
+    for status in ("已启用", "已停用", "加载失败"):
+        assert listing.count(status) == 1
     for target in env.context.get_all_stars():
         assert f" {target.name}\n" in listing
         assert f"目录：{target.root_dir_name}" in listing
     assert "页" not in listing
     assert "/pm info <插件名或目录名>" in listing
     assert sum(bool(message) for message in event.sent) == 1
+    assert event.is_stopped() and not env.model_calls
+
+
+@pytest.mark.parametrize(
+    "active,status", [(True, "✅"), (False, "⏸️")]
+)
+async def test_list_places_reserved_marker_after_status_emoji(env, active, status):
+    env.add_target(name="astrbot", active=active, reserved=True)
+    event = env.event("/pm list")
+    await env.scheduler.execute(event)
+    assert f"{status} [保留插件] astrbot" in output(event).splitlines()
     assert event.is_stopped() and not env.model_calls
 
 
@@ -209,11 +226,22 @@ async def test_info_uses_real_full_command_names_aliases_and_disabled_state(
     assert event.is_stopped() and not env.model_calls
 
 
+@pytest.mark.parametrize(
+    "active,status", [(True, "✅ 已启用"), (False, "⏸️ 已停用")]
+)
+async def test_info_reports_plugin_status_with_emoji(env, active, status):
+    target = env.add_target(active=active)
+    event = env.event(f"/pm info {target.name}")
+    await env.scheduler.execute(event)
+    assert f"状态：{status}\n" in output(event)
+    assert event.is_stopped() and not env.model_calls
+
+
 async def test_info_reports_failed_plugins_and_their_removal_command(env):
     env.manager.failed_plugin_dict["broken_directory"] = {"reserved": False}
     event = env.event("/pm info broken_directory")
     await env.scheduler.execute(event)
-    assert "加载失败" in output(event)
+    assert "状态：❌ 加载失败\n" in output(event)
     assert "/pm remove broken_directory" in output(event)
     assert event.is_stopped() and not env.model_calls
 

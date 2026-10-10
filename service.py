@@ -236,26 +236,27 @@ class PluginOperations:
         """
         entries = []
         for plugin in self.context.get_all_stars():
-            status = "已启用" if plugin.activated else "已停用"
-            reserved = "；保留插件" if plugin.reserved else ""
+            status = "✅" if plugin.activated else "⏸️"
+            reserved = " [保留插件]" if plugin.reserved else ""
             entries.append(
                 (
                     plugin.name or plugin.root_dir_name or "无名称",
-                    f"[{status}{reserved}] {plugin.name}\n  目录：{plugin.root_dir_name}；版本：{plugin.version or '未声明'}\n  {plugin.desc or '无说明'}",
+                    f"{status}{reserved} {plugin.name}\n  目录：{plugin.root_dir_name}；版本：{plugin.version or '未声明'}\n  {plugin.desc or '无说明'}",
                 )
             )
         for directory in self.manager.failed_plugin_dict:
             entries.append(
                 (
                     directory,
-                    f"[加载失败] {directory}\n  请通过 WebUI 查看错误或恢复；可使用 remove 卸载。",
+                    f"❌ {directory}\n  请通过 WebUI 查看错误或恢复；可使用 remove 卸载。",
                 )
             )
         entries.sort(key=lambda item: item[0])
         if not entries:
             return "没有已注册或加载失败的插件。"
         return (
-            f"插件列表（共 {len(entries)} 个）\n\n"
+            f"插件列表（共 {len(entries)} 个）\n"
+            "状态：✅ 已启用 · ⏸️ 已停用 · ❌ 加载失败\n\n"
             + "\n\n".join(text for _, text in entries)
             + "\n\n使用 /pm info <插件名或目录名> 查看详情。"
         )
@@ -271,12 +272,12 @@ class PluginOperations:
         """
         target = self.resolve(identifier)
         if target.plugin is None:
-            return f"插件目录：{target.name}\n状态：加载失败\n请通过 WebUI 查看错误详情或恢复；可使用 /pm remove {target.name} 卸载。"
+            return f"插件目录：{target.name}\n状态：❌ 加载失败\n请通过 WebUI 查看错误详情或恢复；可使用 /pm remove {target.name} 卸载。"
         plugin = target.plugin
         parts = [
             f"插件：{plugin.name}",
             f"目录：{plugin.root_dir_name}",
-            f"状态：{'已启用' if plugin.activated else '已停用'}",
+            f"状态：{'✅ 已启用' if plugin.activated else '⏸️ 已停用'}",
             f"版本：{plugin.version or '未声明'}",
             f"作者：{plugin.author or '未声明'}",
             f"说明：{plugin.desc or '无说明'}",
