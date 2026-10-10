@@ -4,6 +4,7 @@ import asyncio
 import copy
 import functools
 import importlib
+import json
 import os
 import sys
 import tempfile
@@ -19,6 +20,7 @@ sys.path.insert(0, str(ASTRBOT_SOURCE))
 sys.path.insert(0, str(PLUGIN_DIR.parent))
 os.environ["ASTRBOT_ROOT"] = tempfile.mkdtemp(prefix="plugin-manager-tests-")
 
+from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import Node, Nodes, Plain
 from astrbot.core.config.default import DEFAULT_CONFIG
@@ -57,7 +59,7 @@ def message_text(components):
 
 
 @pytest.fixture
-async def env(monkeypatch, tmp_path):
+async def env(monkeypatch, tmp_path, request):
     """Isolate all lifecycle side effects in temporary directories."""
     registry = StarHandlerRegistry()
     metadata = StarMetadata(
@@ -194,7 +196,12 @@ async def env(monkeypatch, tmp_path):
     sync = AsyncMock()
     monkeypatch.setattr(PluginService, "sync_skills_after_plugin_change", sync)
     monkeypatch.setattr(PluginService, "remove_plugin_install_source", AsyncMock())
-    plugin = main.Main(context)
+    plugin_config = AstrBotConfig(
+        config_path=str(tmp_path / "manager_config.json"),
+        schema=json.loads((PLUGIN_DIR / "_conf_schema.json").read_text(encoding="utf-8")),
+    )
+    plugin_config.update(getattr(request, "param", {}))
+    plugin = main.Main(context, plugin_config)
     metadata.star_cls = plugin
     for original in ORIGINAL_HANDLERS:
         handler = copy.copy(original)
@@ -298,6 +305,7 @@ async def env(monkeypatch, tmp_path):
         owners=owners,
         registry=registry,
         config=config,
+        plugin_config=plugin_config,
         tools=tools,
         manager=manager,
         event=event,

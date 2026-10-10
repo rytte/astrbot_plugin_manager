@@ -7,6 +7,7 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
+from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 from astrbot.core.star.filter.command import GreedyStr
@@ -41,9 +42,22 @@ class PendingRemoval:
 
 
 class Main(Star):
-    def __init__(self, context: Context) -> None:
+    def __init__(self, context: Context, config: AstrBotConfig) -> None:
         super().__init__(context)
-        self.service = PluginOperations(context, self.__class__.__module__)
+        unknown = set(config) - {"allow_prefix_omission"}
+        if unknown:
+            raise ValueError("未知插件管家配置项：" + "、".join(sorted(unknown)))
+        if "allow_prefix_omission" not in config:
+            raise ValueError("缺少配置项 allow_prefix_omission，请检查插件配置。")
+        allow_prefix_omission = config["allow_prefix_omission"]
+        if not isinstance(allow_prefix_omission, bool):
+            raise ValueError("配置项 allow_prefix_omission 必须是布尔值。")
+        self.config = config
+        self.service = PluginOperations(
+            context,
+            self.__class__.__module__,
+            allow_prefix_omission=allow_prefix_omission,
+        )
         self.ready = False
         self._operations = asyncio.Lock()
         self._removals: dict[tuple[str, str], PendingRemoval] = {}

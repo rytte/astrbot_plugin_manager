@@ -17,6 +17,8 @@ from astrbot.dashboard.services.plugin_service import PluginService
 
 from .bytecode import clear_plugin_bytecode
 
+PLUGIN_NAME_PREFIX = "astrbot_plugin_"
+
 
 @dataclass(frozen=True)
 class PluginTarget:
@@ -59,9 +61,12 @@ class PluginTarget:
 
 
 class PluginOperations:
-    def __init__(self, context: Context, owner_module: str) -> None:
+    def __init__(
+        self, context: Context, owner_module: str, *, allow_prefix_omission: bool
+    ) -> None:
         self.context = context
         self.owner_module = owner_module
+        self.allow_prefix_omission = allow_prefix_omission
         self.manager = context._star_manager
         if self.manager is None:
             raise RuntimeError("插件管理器不可用，无法初始化插件管理命令。")
@@ -128,10 +133,10 @@ class PluginOperations:
         return sorted(conflicts)
 
     def resolve(self, identifier: str) -> PluginTarget:
-        """Resolve a metadata name or directory without guessing.
+        """Resolve exact names and the explicitly enabled prefix omission.
 
         Args:
-            identifier: An exact metadata name or plugin directory name.
+            identifier: A metadata name or directory, optionally without its prefix.
 
         Returns:
             A snapshot bound to a registered instance or failed-plugin record.
@@ -140,9 +145,12 @@ class PluginOperations:
             ValueError: The target is missing, ambiguous or incomplete.
             RuntimeError: The core exposes an invalid failed-plugin record.
         """
+        identifiers = {identifier}
+        if self.allow_prefix_omission and not identifier.startswith(PLUGIN_NAME_PREFIX):
+            identifiers.add(PLUGIN_NAME_PREFIX + identifier)
         matches = []
         for plugin in self.context.get_all_stars():
-            if identifier == plugin.name or identifier == plugin.root_dir_name:
+            if plugin.name in identifiers or plugin.root_dir_name in identifiers:
                 if not plugin.name:
                     raise ValueError("插件元数据缺少名称，请在 WebUI 中检查。")
                 state = (
@@ -156,12 +164,13 @@ class PluginOperations:
                 matches.append(
                     PluginTarget(identifier, plugin.name, plugin, None, state)
                 )
-        if identifier in self.manager.failed_plugin_dict:
-            record = self.manager.failed_plugin_dict[identifier]
+        for directory, record in self.manager.failed_plugin_dict.items():
+            if directory not in identifiers:
+                continue
             if not isinstance(record, dict):
                 raise RuntimeError("加载失败插件记录格式无效，必须是字典。")
             state = tuple((key, repr(value)) for key, value in sorted(record.items()))
-            matches.append(PluginTarget(identifier, identifier, None, record, state))
+            matches.append(PluginTarget(identifier, directory, None, record, state))
         if not matches:
             raise ValueError(f"未找到插件 {identifier}。")
         if len(matches) != 1:

@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import json
 import os
 import shutil
 import sys
@@ -131,15 +132,24 @@ class Main(Star):
     assert not env.model_calls
 
 
+@pytest.mark.parametrize("allow_prefix_omission", [True, False])
 @pytest.mark.parametrize("broken_revision", [False, True])
 async def test_manager_reloads_itself_and_clears_confirmations(
-    live_env, broken_revision
+    live_env, broken_revision, allow_prefix_omission
 ):
     env = live_env
     source_root = (await asyncio.to_thread(Path(env.main.__file__).resolve)).parent
     directory = env.live_root / "astrbot_plugin_manager"
-    for source in [*source_root.glob("*.py"), source_root / "metadata.yaml"]:
+    for source in [
+        *source_root.glob("*.py"),
+        source_root / "metadata.yaml",
+        source_root / "_conf_schema.json",
+    ]:
         shutil.copy2(source, directory / source.name)
+    config_path = Path(env.live_manager.plugin_config_path) / f"{directory.name}_config.json"
+    config_path.write_text(
+        json.dumps({"allow_prefix_omission": allow_prefix_omission}), encoding="utf-8"
+    )
     main_path = directory / "main.py"
     original_source = main_path.read_text(encoding="utf-8")
     main_path.write_text(original_source + "\nREVISION = 1\n", encoding="utf-8")
@@ -151,6 +161,7 @@ async def test_manager_reloads_itself_and_clears_confirmations(
     assert success, error
     original = env.context.get_registered_star(directory.name)
     previous = original.star_cls
+    assert previous.service.allow_prefix_omission is allow_prefix_omission
     previous._removals[("session", "admin")] = object()
     old_main = sys.modules[original.module_path]
     old_service = sys.modules["data.plugins.astrbot_plugin_manager.service"]
@@ -172,6 +183,7 @@ async def test_manager_reloads_itself_and_clears_confirmations(
         return
     current = env.context.get_registered_star(directory.name)
     assert current.star_cls is not previous and current.star_cls.ready
+    assert current.star_cls.service.allow_prefix_omission is allow_prefix_omission
     assert not current.star_cls._removals
     assert sys.modules[current.module_path] is not old_main
     assert sys.modules[current.module_path].REVISION == 2

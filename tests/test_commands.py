@@ -329,7 +329,7 @@ async def test_demo_mode_forbids_every_mutation(env, monkeypatch, arguments):
 async def test_missing_manager_and_missing_core_interfaces_fail_fast(env):
     env.context._star_manager = None
     with pytest.raises(RuntimeError, match="不可用"):
-        env.main.Main(env.context)
+        env.main.Main(env.context, env.plugin_config)
     env.context._star_manager = object()
     with pytest.raises(RuntimeError, match="必要"):
-        env.main.Main(env.context)
+        env.main.Main(env.context, env.plugin_config)
