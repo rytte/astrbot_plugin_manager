@@ -1,0 +1,1 @@
+"""AstrBot administrator plugin management."""

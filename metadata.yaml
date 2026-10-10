@@ -1,0 +1,6 @@
+name: astrbot_plugin_manager
+display_name: 插件管家
+desc: 管理员插件管理，支持查询、安装、启停、定向重载与确认卸载。
+version: 0.1.0
+author: rytte
+astrbot_version: ">=4.27,<5"
