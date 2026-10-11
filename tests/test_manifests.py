@@ -1,4 +1,4 @@
-"""Exercise manifest validation and real staged ZIP installs without executing code."""
+"""Exercise manifest previews and the shared official installation workflow."""
 
 import asyncio
 import copy
@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 import yaml
+from astrbot.core.star.star_manager import PluginVersionUnsupportedError
 from astrbot_plugin_manager.manifests import (
     MANIFEST_FORMAT,
     ManifestService,
@@ -70,20 +71,17 @@ def write_archive(path, *, name=NAME, author=AUTHOR, version="2.0.0", requiremen
 
 
 @pytest.fixture
-def market_mock(env, monkeypatch):
+def market_mock(env, monkeypatch, core_installs):
     data = registry()
     fetch = AsyncMock(side_effect=lambda **kwargs: (copy.deepcopy(data), None))
     monkeypatch.setattr(env.plugin.service.web, "get_online_plugins", fetch)
 
-    async def download(url, path):
-        assert url == data[ID]["download_url"]
-        write_archive(path)
-
-    downloader = AsyncMock(side_effect=download)
-    monkeypatch.setattr(
-        "astrbot_plugin_manager.manifests.download_market_archive", downloader
-    )
-    return data, fetch, downloader
+    core_installs[data[ID]["download_url"]] = {
+        "name": NAME,
+        "author": AUTHOR,
+        "version": "2.0.0",
+    }
+    return data, fetch, env.manager.install_plugin
 
 
 @pytest.mark.parametrize(
@@ -109,10 +107,12 @@ def test_manifest_rejects_unknown_fields_arbitrary_downloads_and_other_sources(
         validate_manifest(value)
 
 
-async def test_manifest_install_writes_disabled_code_and_real_core_source_only(
-    env, market_mock
+async def test_manifest_install_uses_official_pipeline_and_reports_loaded_state(
+    env, market_mock, core_installs
 ):
-    data, fetch, downloader = market_mock
+    data, fetch, installer = market_mock
+    directory = NAME + "_source"
+    core_installs[data[ID]["download_url"]]["directory"] = directory
     service = env.plugin.manifests
     preview = await service.preview("admin", manifest())
     assert preview["plugins"][0]["sources"][0]["status"] == "install"
@@ -124,22 +124,76 @@ async def test_manifest_install_writes_disabled_code_and_real_core_source_only(
     job = env.plugin.transfers.get_job(preview["job"]["id"], "admin")
     assert job["status"] == "completed", job
     assert job["results"][0]["status"] == "installed"
-    assert job["reload_required"]
-    assert len(job["installed_artifacts"][0]["sha256"]) == 64
-    code = Path(env.manager.plugin_store_path) / NAME
+    assert not job.get("reload_required")
+    assert job["results"][0]["enabled"] is True
+    assert "已启用" in job["results"][0]["message"]
+    assert job["installed_artifacts"][0]["version"] == "2.0.0"
+    code = Path(env.manager.plugin_store_path) / directory
     assert (code / "main.py").is_file()
-    assert f"data.plugins.{NAME}.main" in env.prefs["inactivated_plugins"]
-    assert env.prefs["plugin_install_sources"][NAME]["market_plugin_id"] == ID
-    assert (await env.plugin.sources.detail(NAME))["provenance"][
-        "evidence"
-    ] == "manager_operation"
-    env.manager.load.assert_not_awaited()
-    env.manager.install_plugin.assert_not_awaited()
-    downloader.assert_awaited_once()
-    assert fetch.await_count == 2
+    assert not env.prefs.get("inactivated_plugins")
+    assert env.prefs["plugin_install_sources"][directory]["market_plugin_id"] == ID
+    record = await env.plugin.sources.detail(directory)
+    assert record["provenance"]["evidence"] == "manager_operation"
+    assert record["local"]["status"] == "enabled"
+    assert record["history"][-1]["actor"] == "admin"
+    installer.assert_awaited_once_with(
+        data[ID]["repo"],
+        "",
+        ignore_version_check=False,
+        download_url=data[ID]["download_url"],
+    )
+    assert env.context.get_registered_star(NAME).activated
+    env.sync.assert_awaited_once()
+    assert fetch.await_count == 3
     restarted = TransferService(env.plugin.service, env.plugin._operations)
     await restarted.initialize()
     assert restarted.history("admin")[0]["status"] == "completed"
+
+
+async def test_market_without_archive_url_uses_official_repository_fallback(
+    env, market_mock, core_installs
+):
+    data, _, installer = market_mock
+    package = core_installs.pop(data[ID]["download_url"])
+    data[ID]["download_url"] = ""
+    core_installs[data[ID]["repo"]] = package
+    preview = await env.plugin.manifests.preview("admin", manifest())
+    assert preview["plugins"][0]["sources"][0]["status"] == "install"
+    await env.plugin.manifests.start(
+        "admin", preview["job"]["id"], [{"id": "0", "source": "market"}], True
+    )
+    await env.plugin.transfers.task
+    assert (
+        env.plugin.transfers.get_job(preview["job"]["id"], "admin")["status"]
+        == "completed"
+    )
+    installer.assert_awaited_once_with(
+        data[ID]["repo"], "", ignore_version_check=False, download_url=""
+    )
+
+
+@pytest.mark.parametrize("failure", ["missing_metadata", "uninitialized"])
+async def test_incomplete_core_registration_is_never_reported_as_installed(
+    env, market_mock, failure
+):
+    original = env.manager.install_plugin.side_effect
+
+    async def install(*args, **kwargs):
+        info = await original(*args, **kwargs)
+        if failure == "missing_metadata":
+            return {}
+        env.context.get_registered_star(info["name"]).star_cls = None
+        return info
+
+    env.manager.install_plugin.side_effect = install
+    preview = await env.plugin.manifests.preview("admin", manifest())
+    await env.plugin.manifests.start(
+        "admin", preview["job"]["id"], [{"id": "0", "source": "market"}], True
+    )
+    await env.plugin.transfers.task
+    job = env.plugin.transfers.get_job(preview["job"]["id"], "admin")
+    assert job["results"][0]["status"] == "failed"
+    assert not job.get("installed_artifacts")
 
 
 async def test_existing_same_identity_is_skipped_and_conflicting_identity_blocked(
@@ -155,10 +209,10 @@ async def test_existing_same_identity_is_skipped_and_conflicting_identity_blocke
     env.manager.install_plugin.assert_not_awaited()
 
 
-async def test_remote_change_after_preview_stops_item_before_downloading(
+async def test_remote_change_after_preview_stops_item_before_installing(
     env, market_mock
 ):
-    data, fetch, download = market_mock
+    data, fetch, installer = market_mock
     preview = await env.plugin.manifests.preview("admin", manifest())
     data[ID]["version"] = "3.0.0"
     await env.plugin.manifests.start(
@@ -168,7 +222,7 @@ async def test_remote_change_after_preview_stops_item_before_downloading(
     job = env.plugin.transfers.get_job(preview["job"]["id"], "admin")
     assert job["results"][0]["status"] == "failed"
     assert "变化" in job["results"][0]["message"]
-    download.assert_not_awaited()
+    installer.assert_not_awaited()
     assert not (Path(env.manager.plugin_store_path) / NAME).exists()
 
 
@@ -176,18 +230,32 @@ async def test_remote_change_after_preview_stops_item_before_downloading(
     "changes",
     [
         {"author": "impostor"},
-        {"version": "1.0.0"},
-        {"requirement": "definitely-missing-plugin-manager-dependency==99.0"},
+        {"name": NAME + "_changed"},
     ],
 )
-async def test_invalid_download_identity_or_dependencies_never_reach_live_directory(
-    env, market_mock, monkeypatch, changes
+async def test_core_install_identity_mismatch_is_reported_as_partial_failure(
+    env, market_mock, core_installs, changes
 ):
-    async def download(url, path):
-        write_archive(path, **changes)
+    data, _, _ = market_mock
+    core_installs[data[ID]["download_url"]].update(changes)
+    preview = await env.plugin.manifests.preview("admin", manifest())
+    await env.plugin.manifests.start(
+        "admin", preview["job"]["id"], [{"id": "0", "source": "market"}], True
+    )
+    await env.plugin.transfers.task
+    job = env.plugin.transfers.get_job(preview["job"]["id"], "admin")
+    assert job["results"][0]["status"] == "failed"
+    assert "不一致" in job["results"][0]["message"]
+    assert "部分变更" in job["results"][0]["message"]
+    assert (Path(env.manager.plugin_store_path) / changes.get("name", NAME)).exists()
 
-    monkeypatch.setattr(
-        "astrbot_plugin_manager.manifests.download_market_archive", download
+
+async def test_official_version_failure_is_visible_and_never_ignored(
+    env, market_mock, core_installs
+):
+    data, _, installer = market_mock
+    core_installs[data[ID]["download_url"]] = PluginVersionUnsupportedError(
+        "unsupported version"
     )
     preview = await env.plugin.manifests.preview("admin", manifest())
     await env.plugin.manifests.start(
@@ -196,8 +264,9 @@ async def test_invalid_download_identity_or_dependencies_never_reach_live_direct
     await env.plugin.transfers.task
     job = env.plugin.transfers.get_job(preview["job"]["id"], "admin")
     assert job["results"][0]["status"] == "failed"
+    assert "AstrBot 版本" in job["results"][0]["message"]
+    assert installer.await_args.kwargs["ignore_version_check"] is False
     assert not (Path(env.manager.plugin_store_path) / NAME).exists()
-    env.manager.load.assert_not_awaited()
 
 
 async def test_preview_ownership_confirmation_expiry_and_replay(env, market_mock):
@@ -242,12 +311,11 @@ async def test_export_shares_display_name_and_associated_sources(env, market_moc
 
 
 @pytest.mark.parametrize("failure", ["core_source", "local_history"])
-async def test_install_source_write_failure_restores_new_directory_and_preferences(
+async def test_source_write_failure_keeps_core_installed_plugin_and_reports_warning(
     env, market_mock, monkeypatch, failure
 ):
     env.prefs["inactivated_plugins"] = ["data.plugins.other.main"]
     env.prefs["plugin_install_sources"] = {"other": {"install_method": "upload"}}
-    original = copy.deepcopy(env.prefs)
     if failure == "core_source":
         service = env.plugin.service.web
         saved = service.save_plugin_install_sources
@@ -274,16 +342,21 @@ async def test_install_source_write_failure_restores_new_directory_and_preferenc
     await env.plugin.transfers.task
     job = env.plugin.transfers.get_job(preview["job"]["id"], "admin")
     assert job["status"] == "completed_with_warning", job
-    assert job["results"][0]["status"] == "failed"
-    assert "已恢复" in job["results"][0]["message"]
-    assert not (Path(env.manager.plugin_store_path) / NAME).exists()
-    assert env.prefs == original
+    assert job["results"][0]["status"] == (
+        "failed" if failure == "core_source" else "installed"
+    )
+    expected_message = "部分变更" if failure == "core_source" else "来源历史保存失败"
+    assert expected_message in job["results"][0]["message"]
+    assert (Path(env.manager.plugin_store_path) / NAME / "main.py").exists()
+    assert env.context.get_registered_star(NAME).activated
+    assert env.prefs["inactivated_plugins"] == ["data.plugins.other.main"]
+    assert env.prefs["plugin_install_sources"]["other"] == {"install_method": "upload"}
     assert "pending_install" not in job
     assert NAME not in env.plugin.sources._store()["plugins"]
 
 
 async def test_one_failed_package_does_not_prevent_other_selected_installs(
-    env, market_mock, monkeypatch
+    env, market_mock, core_installs
 ):
     data, _, _ = market_mock
     second = NAME + "_second"
@@ -296,15 +369,12 @@ async def test_one_failed_package_does_not_prevent_other_selected_installs(
     value = manifest()
     value["plugins"].append({**value["plugins"][0], "market_plugin_id": second_id})
 
-    async def download(url, path):
-        if url == data[ID]["download_url"]:
-            write_archive(path, author="impostor")
-        else:
-            write_archive(path, name=second)
-
-    monkeypatch.setattr(
-        "astrbot_plugin_manager.manifests.download_market_archive", download
-    )
+    core_installs[data[ID]["download_url"]] = RuntimeError("dependency install failed")
+    core_installs[data[second_id]["download_url"]] = {
+        "name": second,
+        "author": AUTHOR,
+        "version": "2.0.0",
+    }
     preview = await env.plugin.manifests.preview("admin", value)
     await env.plugin.manifests.start(
         "admin",
@@ -320,29 +390,32 @@ async def test_one_failed_package_does_not_prevent_other_selected_installs(
     assert (Path(env.manager.plugin_store_path) / second / "main.py").exists()
 
 
-async def test_failed_automatic_recovery_preserves_journal_and_stops_task(
-    env, market_mock, monkeypatch
-):
-    monkeypatch.setattr(
-        env.plugin.sources,
-        "observe_install",
-        AsyncMock(side_effect=OSError("write failure")),
-    )
-    monkeypatch.setattr(
-        env.plugin.sources,
-        "restore_sources",
-        AsyncMock(side_effect=OSError("recovery failure")),
-    )
+async def test_shutdown_waits_for_official_install_to_finish_loading(env, market_mock):
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = env.manager.install_plugin.side_effect
+
+    async def install(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    env.manager.install_plugin.side_effect = install
     preview = await env.plugin.manifests.preview("admin", manifest())
     await env.plugin.manifests.start(
         "admin", preview["job"]["id"], [{"id": "0", "source": "market"}], True
     )
-    await env.plugin.transfers.task
+    await entered.wait()
     job = env.plugin.transfers.get_job(preview["job"]["id"], "admin")
-    assert job["status"] == "rollback_failed", job
     assert job["pending_install"]["market_plugin_id"] == ID
-    assert job["results"][0]["status"] == "failed"
-    assert "后续" in job["error"]
+    closing = asyncio.create_task(env.plugin.transfers.close())
+    await asyncio.sleep(0)
+    assert not closing.done()
+    release.set()
+    await closing
+    job = env.plugin.transfers.get_job(preview["job"]["id"], "admin")
+    assert job["status"] == "completed", job
+    assert "pending_install" not in job
+    assert env.context.get_registered_star(NAME).activated
 
 
 @pytest.mark.parametrize(
@@ -386,7 +459,9 @@ def repository_manifest(*, with_market=False):
 
 
 @pytest.fixture
-def repository_mock(monkeypatch):
+def repository_mock(monkeypatch, core_installs):
+    core_installs[REPO] = {"name": NAME, "author": AUTHOR, "version": "2.0.0"}
+
     async def download(url, path):
         assert url == REPO
         write_archive(path)
@@ -435,7 +510,7 @@ async def test_repository_only_export_uses_existing_sources_without_market(
     fetch.assert_not_awaited()
 
 
-async def test_repository_install_uses_preview_package_and_stays_disabled(
+async def test_repository_install_uses_shared_official_workflow_and_loads(
     env, repository_mock, monkeypatch
 ):
     fetch = AsyncMock(side_effect=AssertionError("Market must not be requested"))
@@ -455,13 +530,15 @@ async def test_repository_install_uses_preview_package_and_stays_disabled(
     source = env.prefs["plugin_install_sources"][NAME]
     assert source["install_method"] == "repository"
     assert source["repo"] == REPO
-    assert source["market_plugin_id"] == ""
-    assert f"data.plugins.{NAME}.main" in env.prefs["inactivated_plugins"]
+    assert not source.get("market_plugin_id")
+    assert not env.prefs.get("inactivated_plugins")
     assert (Path(env.manager.plugin_store_path) / NAME / "main.py").exists()
     repository_mock.assert_awaited_once()
     fetch.assert_not_awaited()
-    env.manager.load.assert_not_awaited()
-    env.manager.install_plugin.assert_not_awaited()
+    assert env.context.get_registered_star(NAME).activated
+    env.manager.install_plugin.assert_awaited_once_with(
+        REPO, "", ignore_version_check=False, download_url=""
+    )
 
 
 async def test_market_failure_needs_explicit_repository_choice(
@@ -504,21 +581,21 @@ async def test_repository_identity_must_match_market_id(env, market_mock, monkey
     assert "不一致" in options[1]["problem"]
 
 
-async def test_modified_repository_preview_archive_cannot_install(env, repository_mock):
+async def test_repository_install_records_actual_version_from_official_installer(
+    env, repository_mock, core_installs
+):
     service = env.plugin.manifests
     preview = await service.preview("admin", repository_manifest())
     identifier = preview["job"]["id"]
-    (
-        env.plugin.transfers.job_directory(identifier) / "repository-0" / "download.zip"
-    ).write_bytes(b"changed")
+    core_installs[REPO]["version"] = "3.0.0"
     await service.start(
         "admin", identifier, [{"id": "0", "source": "repository"}], True
     )
     await env.plugin.transfers.task
     job = env.plugin.transfers.get_job(identifier, "admin")
-    assert job["results"][0]["status"] == "failed"
-    assert "已变化" in job["results"][0]["message"]
-    assert not (Path(env.manager.plugin_store_path) / NAME).exists()
+    assert job["results"][0]["status"] == "installed"
+    assert job["results"][0]["version"] == "3.0.0"
+    assert job["installed_artifacts"][0]["version"] == "3.0.0"
 
 
 @pytest.mark.parametrize(

@@ -6,8 +6,9 @@ import json
 import os
 import shutil
 import sys
+import zipfile
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -62,6 +63,106 @@ def live_env(env, monkeypatch):
             ("data.plugins.reload_probe", "data.plugins.astrbot_plugin_manager")
         ):
             del sys.modules[module_name]
+
+
+@pytest.mark.parametrize("entrypoint", ["command", "manifest"])
+@pytest.mark.parametrize("source", ["market", "repository"])
+async def test_chat_and_manifest_install_initialize_plugin_through_actual_core(
+    live_env, monkeypatch, entrypoint, source
+):
+    env = live_env
+    name, author, version = "reload_probe", "Probe", "1.0.0"
+    repo = "https://github.com/probe/reload_probe"
+    identifier = f"{author}/{name}"
+    url = "https://cloud.astrbot.app/packages/probe.zip"
+    files = {
+        "metadata.yaml": f"name: {name}\nauthor: {author}\ndesc: Probe\nversion: {version}\n",
+        "main.py": """from astrbot.api.star import Star
+class Main(Star):
+    def __init__(self, context):
+        self.context = context
+    async def initialize(self):
+        assert self.context.dependencies_prepared
+        self.initialized = True
+""",
+        "requirements.txt": "fake-dependency-for-install-test>=1\n",
+    }
+
+    async def download(repo_url, proxy="", *, download_url=""):
+        assert repo_url == repo
+        assert download_url == (url if source == "market" else "")
+        directory = env.live_root / name
+        directory.mkdir()
+        for filename, content in files.items():
+            (directory / filename).write_text(content, encoding="utf-8")
+        env.live_modules.append({"pname": name, "module": "main"})
+        return str(directory)
+
+    async def prepare_dependencies(plugin_path, directory):
+        assert directory == name
+        assert await asyncio.to_thread(Path(plugin_path, "requirements.txt").is_file)
+        env.context.dependencies_prepared = True
+
+    async def preview_download(repo_url, path):
+        assert repo_url == repo
+        with zipfile.ZipFile(path, "w") as archive:
+            for filename, content in files.items():
+                archive.writestr(filename, content)
+
+    env.live_manager._updater = SimpleNamespace(install=AsyncMock(side_effect=download))
+    dependencies = AsyncMock(side_effect=prepare_dependencies)
+    monkeypatch.setattr(env.live_manager, "_ensure_plugin_requirements", dependencies)
+    monkeypatch.setattr("astrbot.core.star.star_manager.Metric.upload", AsyncMock())
+    monkeypatch.setattr(
+        env.plugin.service.web,
+        "get_online_plugins",
+        AsyncMock(
+            return_value=(
+                {
+                    identifier: {
+                        "name": name,
+                        "author": author,
+                        "version": version,
+                        "repo": repo,
+                        "download_url": url,
+                    }
+                },
+                None,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        "astrbot_plugin_manager.manifests.download_repository_archive", preview_download
+    )
+    if entrypoint == "command":
+        event = env.event("/pm add " + (identifier if source == "market" else repo))
+        await env.scheduler.execute(event)
+        assert "已安装（已启用）" in "\n".join(event.sent)
+    else:
+        preview = await env.plugin.manifests.preview(
+            "admin",
+            {
+                "format": "astrbot-plugin-manager-manifest",
+                "schema_version": 1,
+                "plugins": [{"display_name": "Probe", "market_plugin_id": identifier}]
+                if source == "market"
+                else [{"display_name": "Probe", "repo_url": repo}],
+            },
+        )
+        await env.plugin.manifests.start(
+            "admin", preview["job"]["id"], [{"id": "0", "source": source}], True
+        )
+        await env.plugin.transfers.task
+        job = env.plugin.transfers.get_job(preview["job"]["id"], "admin")
+        assert job["status"] == "completed", job
+        assert job["results"][0]["enabled"] is True
+        assert not job.get("reload_required")
+    target = env.context.get_registered_star(name)
+    assert target.activated and target.star_cls.initialized
+    assert (await env.plugin.sources.detail(name))["local"]["status"] == "enabled"
+    dependencies.assert_awaited_once()
+    env.sync.assert_awaited_once()
+    assert env.prefs["plugin_install_sources"][name]["install_method"] == source
 
 
 @pytest.mark.parametrize("desktop", [False, True])

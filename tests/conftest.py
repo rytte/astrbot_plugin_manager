@@ -329,6 +329,47 @@ async def env(monkeypatch, tmp_path, request):
 
 
 @pytest.fixture
+def core_installs(env):
+    """Fake core downloads/loading while exercising the real WebUI service."""
+    import yaml
+
+    packages = {}
+
+    async def install(
+        repo_url, proxy="", *, ignore_version_check=False, download_url=""
+    ):
+        # The official core installer owns this lock; callers must not hold it.
+        assert not env.manager._pm_lock.locked()
+        async with env.manager._pm_lock:
+            package = packages[download_url or repo_url]
+            if isinstance(package, Exception):
+                raise package
+            target = env.add_target(
+                name=package["name"],
+                directory=package.get("directory", package["name"]),
+                active=package.get("active", True),
+            )
+            target.author = package["author"]
+            target.version = package["version"]
+            target.repo = repo_url
+            code = Path(env.manager.plugin_store_path) / target.root_dir_name
+            (code / "metadata.yaml").write_text(
+                yaml.safe_dump(
+                    {**package, "desc": "Installed by the fake core"},
+                    allow_unicode=True,
+                ),
+                encoding="utf-8",
+            )
+            (code / "main.py").write_text(
+                "# Core-installed test plugin\n", encoding="utf-8"
+            )
+            return {"name": target.name, "repo": repo_url}
+
+    env.manager.install_plugin.side_effect = install
+    return packages
+
+
+@pytest.fixture
 async def transfer_env(env, monkeypatch):
     """Seed canonical metadata and isolated per-plugin KV for transfer tests."""
     import yaml

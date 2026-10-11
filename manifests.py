@@ -7,23 +7,22 @@ import copy
 import json
 import time
 
-from astrbot.core.config.default import VERSION
+from astrbot.dashboard.services.plugin_service import (
+    PluginServiceError,
+    PluginServiceWarning,
+)
 
-from .market_archive import download_market_archive, unpack_market_archive
+from .market_archive import unpack_market_archive
 from .redaction import redact
 from .repository_archive import download_repository_archive
 from .service import is_market_id
-from .sources import fingerprint, now, repository_url, same_repository
+from .sources import fingerprint, repository_url, same_repository
 from .transfer_bundle import (
     MAX_CONTENT,
     MAX_JSON,
-    check_environment,
     component,
-    copy_tree,
-    digest,
     exact_keys,
     read_metadata,
-    remove_path,
     safe_path,
     write_json,
 )
@@ -124,8 +123,6 @@ class ManifestService:
             )
         }
         remote["repo"] = repository_url(remote["repo"])
-        if not remote["download_url"]:
-            raise ValueError("官方市场未提供安装包，请选择仓库来源。")
         return remote
 
     async def export(self, directories: list[str]) -> dict:
@@ -244,8 +241,6 @@ class ManifestService:
             **{field: metadata[field] for field in ("name", "author", "version")},
             "repo": url,
             "download_url": "",
-            "staged_directory": directory.name,
-            "archive_sha256": await _file_work(digest, archive),
         }
 
     async def _plan(self, job: dict, data: dict, market_problem: str) -> list[dict]:
@@ -478,8 +473,12 @@ class ManifestService:
                 for source in entry["sources"]
                 if source["kind"] == selected["source"]
             )
-            item = {**entry, **option, "source_kind": selected["source"]}
-            identifier = entry["market_plugin_id"] or entry["repo_url"]
+            item = {**entry, **option}
+            identifier = (
+                entry["market_plugin_id"]
+                if selected["source"] == "market"
+                else entry["repo_url"]
+            )
             result = {
                 "directory": option["directory"],
                 "market_plugin_id": entry["market_plugin_id"],
@@ -498,163 +497,63 @@ class ManifestService:
                     raise ValueError(
                         "目标插件或市场条目已变化，请重新预检；未覆盖现有插件。"
                     )
-                self.transfers._phase(job, "下载并校验：" + identifier)
-                await self._install_one(job, item)
+                self.transfers._phase(job, "正在安装并加载：" + identifier)
+                job["pending_install"] = {
+                    **result,
+                    "name": item["remote"]["name"],
+                    "author": item["remote"]["author"],
+                    "repo_url": item["remote"]["repo"],
+                    "installer": "astrbot",
+                }
+                self.transfers._save(job)
+                self.transfers.in_critical = True
+                try:
+                    installed = await self.operations.install_target(
+                        identifier,
+                        actor=job["owner"],
+                        expected_identity=(
+                            item["remote"]["name"],
+                            item["remote"]["author"],
+                        ),
+                    )
+                finally:
+                    self.transfers.in_critical = False
+                target = installed.target
                 result.update(
+                    directory=target.directory,
                     status="installed",
-                    message="已安装到磁盘并保持停用；重启扫描后手动启用。",
+                    message=installed.message,
+                    version=target.plugin.version,
+                    enabled=target.plugin.activated,
                 )
-                job["reload_required"] = True
+                job.setdefault("installed_artifacts", []).append(
+                    {
+                        "directory": target.directory,
+                        "name": target.name,
+                        "author": target.plugin.author,
+                        "version": target.plugin.version,
+                        "market_plugin_id": entry["market_plugin_id"]
+                        if selected["source"] == "market"
+                        else "",
+                        "source": selected["source"],
+                        "repo_url": item["remote"]["repo"],
+                    }
+                )
+                if installed.warning:
+                    job["warnings"].append(identifier + "：" + installed.warning)
             except Exception as exc:
                 result.update(
                     status="failed",
-                    message=redact(str(exc))
+                    message=redact(exc.public_message)
+                    if isinstance(exc, PluginServiceError | PluginServiceWarning)
+                    else redact(str(exc))
                     if isinstance(exc, ValueError)
-                    else "安装失败，请检查日志；本项可能留下部分变更，请勿直接重试。",
+                    else "安装流程未完成，请在 WebUI 检查插件及日志；本项可能留下部分变更，请勿直接重试。",
                 )
                 job["warnings"].append(identifier + "：" + result["message"])
             job["results"].append(result)
+            job.pop("pending_install", None)
             self.transfers._save(job)
-            if job["status"] == "rollback_failed":
-                raise ValueError(
-                    "安装项自动恢复失败，后续插件未执行；请检查任务恢复记录。"
-                )
-
-    async def _install_one(self, job: dict, item: dict) -> None:
-        directory = safe_path(
-            self.transfers.job_directory(job["id"]),
-            "install-" + item["id"],
-        )
-        directory.mkdir()
-        try:
-            await self.transfers._require_space(MAX_CONTENT + 256 * 1024 * 1024)
-            archive = safe_path(directory, "download.zip")
-            if item["source_kind"] == "market":
-                await download_market_archive(item["remote"]["download_url"], archive)
-                code = await _file_work(
-                    unpack_market_archive, archive, safe_path(directory, "checked")
-                )
-            else:
-                staged = safe_path(
-                    self.transfers.job_directory(job["id"]),
-                    item["remote"]["staged_directory"],
-                )
-                archive = safe_path(staged, "download.zip")
-                if (
-                    await _file_work(digest, archive)
-                    != item["remote"]["archive_sha256"]
-                ):
-                    raise ValueError("仓库预检安装包已变化，请重新上传清单。")
-                code = await _file_work(
-                    unpack_market_archive, archive, safe_path(directory, "checked")
-                )
-            metadata = await _file_work(read_metadata, code)
-            if any(
-                metadata[field] != item["remote"][field]
-                for field in ("name", "author", "version")
-            ):
-                raise ValueError(
-                    "安装包中的作者、名称或版本与所选来源的预检信息不一致。"
-                )
-            await _file_work(check_environment, code, VERSION)
-            # Copy only sanitized source files, discarding .git, virtualenvs and bytecode.
-            stage = safe_path(directory, "stage")
-            await _file_work(copy_tree, code, stage, code=True)
-            module = f"data.plugins.{metadata['name']}.main"
-            artifact = {
-                "directory": metadata["name"],
-                "sha256": await _file_work(digest, archive),
-                "market_plugin_id": item["market_plugin_id"],
-                "source": item["source_kind"],
-                "repo_url": item["remote"]["repo"],
-            }
-            async with self.operations.manager._pm_lock:
-                self.transfers.in_critical = True
-                installed = False
-                snapshot = None
-                try:
-                    if any(
-                        local["name"].casefold() == metadata["name"].casefold()
-                        or local["directory"].casefold() == metadata["name"].casefold()
-                        for local in await _file_work(self.sources._locals)
-                    ):
-                        raise ValueError("安装期间本机新增了同名插件，拒绝覆盖。")
-                    target = safe_path(self.sources.root, metadata["name"])
-                    if target.exists():
-                        raise ValueError("目标目录已出现，拒绝覆盖。")
-                    inactive = await self.transfers.preferences.global_get(
-                        "inactivated_plugins", []
-                    )
-                    snapshot = await self.sources.source_snapshot(
-                        metadata["name"], metadata["name"]
-                    )
-                    job["pending_install"] = {
-                        **artifact,
-                        "module_path": module,
-                        "was_inactive": module in inactive,
-                        "source_state": snapshot,
-                    }
-                    self.transfers._save(job)
-                    await self.transfers.preferences.global_put(
-                        "inactivated_plugins", list(dict.fromkeys([*inactive, module]))
-                    )
-                    # rename is same-volume and does not overwrite an existing directory.
-                    await _file_work(stage.rename, target)
-                    installed = True
-                    records = await self.operations.web.get_plugin_install_sources()
-                    records[metadata["name"]] = {
-                        "schema_version": 1,
-                        "root_dir_name": metadata["name"],
-                        "name": metadata["name"],
-                        "author": metadata["author"],
-                        "install_method": item["source_kind"],
-                        "registry_url": None,
-                        "registry_name": "Default",
-                        "market_plugin_id": item["market_plugin_id"]
-                        if item["source_kind"] == "market"
-                        else "",
-                        "repo": item["remote"]["repo"],
-                        "download_url": item["remote"]["download_url"],
-                        "installed_at": now(),
-                    }
-                    await self.operations.web.save_plugin_install_sources(records)
-                    await self.sources.observe_install(
-                        metadata["name"], item["source_kind"], job["owner"]
-                    )
-                    job.setdefault("installed_artifacts", []).append(artifact)
-                    job.pop("pending_install", None)
-                except Exception as exc:
-                    if snapshot is not None:
-                        try:
-                            if installed:
-                                await _file_work(target.rename, stage)
-                            await self.sources.restore_sources(snapshot)
-                            current = await self.transfers.preferences.global_get(
-                                "inactivated_plugins", []
-                            )
-                            restored = [value for value in current if value != module]
-                            if module in inactive:
-                                restored.append(module)
-                            await self.transfers.preferences.global_put(
-                                "inactivated_plugins", restored
-                            )
-                            job.pop("pending_install", None)
-                        except Exception:
-                            job["status"] = "rollback_failed"
-                            job["reload_required"] = True
-                            raise ValueError(
-                                "安装失败且自动恢复未完成；已停止后续安装，请检查任务恢复记录。"
-                            ) from exc
-                        raise ValueError(
-                            "本项安装失败，已恢复目录、来源和停用偏好。"
-                        ) from exc
-                    raise
-                finally:
-                    self.transfers.in_critical = False
-        finally:
-            await _file_work(
-                remove_path, self.transfers.job_directory(job["id"]), directory.name
-            )
 
     @staticmethod
     async def download_export(path, manifest: dict) -> None:

@@ -93,6 +93,17 @@ class PluginTarget:
         )
 
 
+@dataclass(frozen=True)
+class PluginInstallResult:
+    target: PluginTarget
+    warning: str = ""
+
+    @property
+    def message(self) -> str:
+        state = "已启用" if self.target.plugin.activated else "已停用"
+        return f"插件 {self.target.name} 已安装（{state}）。" + self.warning
+
+
 class PluginOperations:
     def __init__(
         self, context: Context, owner_module: str, *, allow_prefix_omission: bool
@@ -484,13 +495,25 @@ class PluginOperations:
         return "\n\n".join(parts)
 
     async def install(self, identifier: str) -> str:
+        """Format the shared installer result for the /pm add command."""
+        return (await self.install_target(identifier)).message
+
+    async def install_target(
+        self,
+        identifier: str,
+        *,
+        actor: str = "chat",
+        expected_identity: tuple[str, str] | None = None,
+    ) -> PluginInstallResult:
         """Install a repository or exact market ID through the official service.
 
         Args:
             identifier: A complete repository address or exact market ID.
+            actor: Originator recorded in the source history.
+            expected_identity: Optional name and author from a manifest preview.
 
         Returns:
-            A completion message identifying the registered plugin.
+            The registered target and any source-history warning.
 
         Raises:
             RuntimeError: The service did not register a complete plugin.
@@ -529,17 +552,25 @@ class PluginOperations:
                     "Installed plugin identity does not match the marketplace request.",
                     public_message="安装包的作者或插件名与市场 ID 不一致，可能已产生部分变更",
                 )
-        message = f"插件 {target.name} 已安装（{'已启用' if target.plugin.activated else '已停用'}）。"
+        if (
+            expected_identity is not None
+            and (target.name, target.plugin.author) != expected_identity
+        ):
+            raise PluginServiceError(
+                "Installed plugin identity does not match the preview.",
+                public_message="安装后的作者或插件名与预检信息不一致，请在 WebUI 检查；可能已产生部分变更。",
+            )
+        warning = ""
         if hasattr(self, "sources"):
             try:
                 await self.sources.observe_install(
                     target.directory,
                     payload.get("install_method", "repository"),
-                    "chat",
+                    actor,
                 )
             except Exception:
-                message += "来源历史保存失败，请在插件页面检查；安装已完成。"
-        return message
+                warning = "来源历史保存失败，请在插件页面检查；安装已完成。"
+        return PluginInstallResult(target, warning)
 
     async def disable(self, target: PluginTarget) -> str:
         """Disable using the core service and verify the resulting state.

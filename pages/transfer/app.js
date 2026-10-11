@@ -990,7 +990,7 @@ function renderManifest() {
       return saveManifestDraft();
     });
     locator.append(select, sourceAddress("plugin-detail manifest-locator", source.kind === "market" ? plugin.market_plugin_id : plugin.repo_url));
-    status.append(node("div", source.status === "blocked" ? "plugin-error" : "plugin-detail", {install: "可安装 · 保持停用", skip: "本机已有 · 跳过", blocked: "无法安装"}[source.status]), node("div", "plugin-detail", source.problem || "安装前核对包内身份与依赖"));
+    status.append(node("div", source.status === "blocked" ? "plugin-error" : "plugin-detail", {install: "可安装 · 自动加载", skip: "本机已有 · 跳过", blocked: "无法安装"}[source.status]), node("div", "plugin-detail", source.problem || "由 AstrBot 处理依赖并加载插件"));
     row.append(choice, title, locator, status); body.append(row);
   }
   const warnings = manifestPreview.job.warnings || [];
@@ -1035,7 +1035,7 @@ function bindManagementEvents() {
   elements["install-manifest"].addEventListener("click", () => runRequest(async () => {
     if (!manifestPreview || manifestDraftSaving || manifestDraftError || manifestPreviewExpired() || !installChoices.size) return;
     const selected = manifestPreview.plugins.filter(plugin => installChoices.has(plugin.id));
-    if (!await confirmOperation("安装 " + selected.length + " 个新插件", selected.map(plugin => {const source = selectedManifestSource(plugin); return {...source, display_name: plugin.display_name, description: (source.kind === "market" ? "官方市场 · " + plugin.market_plugin_id : "代码仓库 · " + plugin.repo_url) + " · 版本 " + source.version};}), "按所选来源安装新插件，不覆盖已有插件，不自动安装依赖或启用。单项失败会记录结果；安装后请重启扫描并手动启用。")) return;
+    if (!await confirmOperation("安装 " + selected.length + " 个新插件", selected.map(plugin => {const source = selectedManifestSource(plugin); return {...source, display_name: plugin.display_name, description: (source.kind === "market" ? "官方市场 · " + plugin.market_plugin_id : "代码仓库 · " + plugin.repo_url) + " · 预览版本 " + source.version};}), "与 /pm add 使用相同安装流程，由 AstrBot 下载安装包、处理依赖并加载插件，会执行插件代码。清单不锁定版本，实际版本以安装结果为准。已有插件不覆盖；单项失败会记录结果，请在 WebUI 检查可能留下的变更。")) return;
     await managementPost("manifest-install", {id: manifestPreview.job.id, selections: selected.map(plugin => ({id: plugin.id, source: selectedManifestSource(plugin).kind})), acknowledged: true});
     clearManifestPreview(); busy = true;
     showTab("history-panel"); await pollJobs(); message("清单安装任务已启动，请在任务记录查看逐项结果。", false, {task: true});

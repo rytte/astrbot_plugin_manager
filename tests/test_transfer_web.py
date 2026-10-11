@@ -20,11 +20,12 @@ from fastapi.responses import JSONResponse
 
 
 async def test_manifest_repository_upload_poll_and_selective_install(
-    web_client, monkeypatch
+    web_client, monkeypatch, core_installs
 ):
     env, client = web_client
     name = "astrbot_plugin_repository_share"
     url = "https://github.com/alice/repository_share"
+    core_installs[url] = {"name": name, "author": "Alice", "version": "1.0"}
 
     async def download(source, path):
         assert source == url
@@ -130,7 +131,11 @@ async def test_manifest_repository_upload_poll_and_selective_install(
         json={"csrf": state["csrf"], "id": identifier},
     )
     assert replay.status_code == 400
-    env.manager.load.assert_not_awaited()
+    env.manager.install_plugin.assert_awaited_once_with(
+        url, "", ignore_version_check=False, download_url=""
+    )
+    assert env.context.get_registered_star(name).activated
+    assert not env.plugin.transfers.get_job(identifier, "admin").get("reload_required")
     manifest["schema_version"] = 2
     unsupported = await client.post(
         management_endpoint("manifest-upload/" + state["csrf"]),
