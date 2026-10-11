@@ -51,6 +51,34 @@ def endpoint(action):
     return "/api/v1/plugins/extensions/astrbot_plugin_manager/transfer/" + action
 
 
+async def test_page_state_and_storage_statistics_are_separate(web_client):
+    env, client = web_client
+    target = env.make_transfer_plugin()
+    env.kv_values[("plugin", target.plugin_id)] = {"secret": "private fixture"}
+    response = await client.get(endpoint("state"))
+    assert response.status_code == 200
+    basic = next(
+        item
+        for item in response.json()["data"]["plugins"]
+        if item["directory"] == target.root_dir_name
+    )
+    assert basic["statistics_status"] == "pending"
+    assert basic["code_size"] is None and basic["kv_count"] is None
+    env.preferences.range_get_async.assert_not_awaited()
+
+    response = await client.get(endpoint("statistics"))
+    assert response.status_code == 200, response.text
+    detailed = next(
+        item
+        for item in response.json()["data"]["plugins"]
+        if item["directory"] == target.root_dir_name
+    )
+    assert detailed["statistics_status"] == "ready"
+    assert detailed["code_size"] > 0 and detailed["kv_count"] == 1
+    assert "private fixture" not in response.text
+    assert "logo" not in detailed
+
+
 async def test_plugin_icons_use_native_file_tokens_and_refresh_after_consumption(
     web_client,
 ):
@@ -165,8 +193,9 @@ async def test_state_rules_and_csrf_through_real_extension_router(web_client):
         {"username": "admin", "exp": 1},
     ],
 )
+@pytest.mark.parametrize("action", ["state", "statistics"])
 async def test_asset_api_key_and_expired_credentials_cannot_access_files(
-    web_client, claims
+    web_client, claims, action
 ):
     env, client = web_client
     payload = {"exp": time.time() + 3600, **claims}
@@ -174,7 +203,7 @@ async def test_asset_api_key_and_expired_credentials_cannot_access_files(
         payload, env.context.get_config()["dashboard"]["jwt_secret"], algorithm="HS256"
     )
     response = await client.get(
-        endpoint("state"), headers={"Authorization": "Bearer " + token}
+        endpoint(action), headers={"Authorization": "Bearer " + token}
     )
     assert response.status_code in {401, 403}, response.text
 

@@ -34,7 +34,13 @@
         </section>
         <details class="card guide" data-zip-only>
           <summary>备份说明</summary>
-          <ol><li><strong>插件代码</strong><span>始终包含实际安装目录，保留本地修改。</span></li><li><strong>数据与配置</strong><span>可分别选择；标准数据包含插件数据目录及专属键值记录。</span></li><li><strong>恢复备份</strong><span>导入前预检，覆盖前创建恢复资料，完成后保持停用。</span></li></ol>
+          <ol>
+            <li><strong>插件代码</strong><span>始终包含实际安装目录，保留本地修改。代码目录内的运行数据也可能一起导出。</span></li>
+            <li><strong>数据与配置</strong><span>可分别选择；标准数据包含插件数据目录及专属键值记录。</span></li>
+            <li><strong>备份范围</strong><span>不包含全局配置、共享目录或外置数据库。</span></li>
+            <li><strong>敏感信息</strong><span>配置与数据可能含密钥、Cookie 和用户记录。</span></li>
+            <li><strong>恢复备份</strong><span>导入前预检，覆盖前创建恢复资料，完成后保持停用。</span></li>
+          </ol>
         </details>
       </aside>
       <div class="content">
@@ -46,7 +52,6 @@
             <div class="bulk-options" data-zip-only><span class="muted">批量附带</span><label><input id="bulk-data" type="checkbox" aria-label="所选插件附带标准数据">标准数据</label><label><input id="bulk-config" type="checkbox" aria-label="所选插件附带当前配置">当前配置</label></div>
           </div>
           <div class="table-scroll"><table><thead><tr><th class="check-cell"><input id="select-all" type="checkbox" aria-label="选择当前筛选中的全部可选插件" title="仅选择当前筛选中的可选插件，不影响筛选外的选择。" disabled></th><th>插件</th><th data-zip-only>附带标准数据</th><th data-zip-only>附带当前配置</th><th class="numeric" data-zip-only>代码大小</th><th title="当前绑定的更新来源；安装记录可在来源管理中查看。">更新来源</th></tr></thead><tbody id="plugin-list"><tr><td colspan="6" class="empty">正在读取插件…</td></tr></tbody></table></div>
-          <details id="export-notice" class="help-details"><summary>备份范围与注意事项</summary><p>插件自行写在代码目录内的运行数据可能随代码导出。不包含全局配置、共享目录或外置数据库。配置与数据可能含密钥、Cookie 和用户记录。</p></details>
         </section>
         <section id="import-panel" class="card panel" hidden>
           <div class="panel-heading"><div><h2>导入备份或插件清单</h2><p class="muted">上传后预检，确认后执行。</p></div></div><label class="format-label" for="import-format">导入内容</label><select id="import-format" class="format-select"><option value="zip">插件包 ZIP · 恢复备份</option><option value="manifest">插件清单 JSON · 从市场安装</option></select><div id="bundle-import">
@@ -63,7 +68,38 @@
     </div>
     <footer>插件管家 · 仅限 WebUI 管理员　<span id="limits-label">包 256 MiB / 解压 1 GiB / 单文件 128 MiB / 20,000 文件及目录</span></footer>
   </main>
-  <dialog id="source-dialog"><div class="dialog-heading"><h2 id="source-title">插件来源</h2><button id="close-source" class="text-button">关闭</button></div><div id="source-message" class="message" role="status" hidden></div><div id="source-summary"></div><h3>已关联来源</h3><div id="binding-list"></div><form id="binding-form"><h3>关联另一个来源</h3><label>来源类型<select id="binding-kind"><option value="market">官方市场 ID</option><option value="repository">HTTPS Git 仓库</option></select></label><label>来源地址或市场 ID<input id="binding-value" type="text" maxlength="2048" placeholder="作者/astrbot_plugin_example" required></label><button id="preview-binding" type="submit" class="button secondary">校验身份</button></form><div id="binding-preview" class="notice" hidden></div><label class="check"><input id="activate-binding" type="checkbox">同时设为当前更新源（同步到 AstrBot）</label><button id="save-binding" class="button primary" disabled>确认并保存关联</button><h3>来源操作记录</h3><div id="source-history"></div></dialog>
+  <dialog id="source-dialog" aria-labelledby="source-dialog-title" aria-describedby="source-title">
+    <header class="source-dialog-heading">
+      <div class="source-dialog-title"><div class="source-title-line"><h2 id="source-dialog-title">来源管理</h2><p id="source-title" class="dialog-subtitle">插件来源</p></div><p id="source-identity" class="source-identity"></p></div>
+      <button id="close-source" class="button secondary source-close" type="button" aria-label="关闭来源管理">关闭</button>
+    </header>
+    <div class="source-body">
+      <div id="source-message" class="message" role="status" aria-live="polite" hidden></div>
+      <section class="source-overview" aria-labelledby="current-source-title">
+        <div class="source-section-heading"><h3 id="current-source-title">当前更新源</h3><span id="source-current-kind" class="source-type"></span></div>
+        <div id="source-summary"></div>
+      </section>
+      <section class="source-section" aria-labelledby="binding-list-title">
+        <div class="source-section-heading"><h3 id="binding-list-title">已关联来源</h3><span id="binding-count" class="counter">0</span></div>
+        <div id="binding-list"></div>
+      </section>
+      <section class="source-section source-add" aria-labelledby="binding-form-title">
+        <form id="binding-form">
+          <h3 id="binding-form-title">关联新来源</h3>
+          <p class="source-description">填写市场 ID 或 HTTPS Git 仓库，校验后保存关联。</p>
+          <div class="binding-fields">
+            <label class="binding-kind-field" for="binding-kind">来源类型<select id="binding-kind"><option value="market">官方市场</option><option value="repository">Git 仓库</option></select></label>
+            <label class="binding-value-field" for="binding-value"><span id="binding-value-label">市场 ID</span><input id="binding-value" type="text" maxlength="2048" placeholder="作者/astrbot_plugin_example" required></label>
+            <button id="preview-binding" type="submit" class="button secondary">校验身份</button>
+          </div>
+          <div id="binding-preview" class="binding-preview" aria-live="polite" hidden></div>
+          <div class="binding-save-row"><label class="check"><input id="activate-binding" type="checkbox"><span>同时设为当前更新源<small>同步到 AstrBot</small></span></label><button id="save-binding" type="button" class="button primary" disabled>保存关联</button></div>
+        </form>
+      </section>
+      <details id="source-install-details" class="source-details"><summary>安装记录<span id="source-install-method" class="source-detail-summary"></span></summary><dl id="source-provenance" class="source-facts"></dl></details>
+      <details id="source-history-details" class="source-details"><summary>操作记录<span id="source-history-count" class="counter">0</span></summary><div id="source-history"></div></details>
+    </div>
+  </dialog>
   <dialog id="confirmation"><form id="confirmation-form"><h2 id="confirmation-title">确认操作</h2><div id="confirmation-list" class="confirmation-list"></div><div id="confirmation-notices" class="notice warning"></div><label class="acknowledgement"><input id="acknowledged" type="checkbox" required><span>我已核对来源和操作范围，理解本次操作的影响。</span></label><div class="dialog-actions"><button id="confirmation-cancel" class="button secondary" type="button">返回检查</button><button class="button primary" type="submit">确认继续</button></div></form></dialog>
 </body>
 </html>

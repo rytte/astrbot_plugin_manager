@@ -49,15 +49,32 @@ async function main() {
   };
   const unbound = structuredClone(record); unbound.local.directory = "unknown_dir"; unbound.local.name = "unknown"; unbound.bindings = []; unbound.active_binding_id = null; unbound.provenance.method = "unknown";
   const management = {csrf: "source-token", busy: false, plugins: [record, unbound], jobs: []};
-  const plugin = {...record.local, logo: "/api/file/icon-token", blocked: "", ranges: [], data_available: true, config_available: true, code_size: 1024, config_size: 32, data_size: 2048, kv_count: 1};
+  const plugin = {...record.local, plugin_id: "Alice/demo", logo: "/api/file/icon-token", blocked: "", ranges: [], data_available: true, config_available: true, code_size: 1024, config_size: 32, data_size: 2048, kv_count: 1};
   const state = {csrf: "zip-token", busy: false, plugins: [plugin, {...plugin, ...unbound.local, logo: null}], jobs: [], rule: {updated_at: null, selections: []}, limits: {archive_bytes: 268435456}};
   const posts = [], downloads = [], uploads = [];
+  const statisticsRequests = [], managementRequests = [];
+  let delayStatistics = true, delayManagement = true, failStatistics = false, failManagement = false;
   let delayedPreview, failPreview = false;
   const bridge = {
     async ready() {}, onContext(handler) {handler({isDark: true});},
     async apiGet(endpoint) {
-      if (endpoint === "manage/state") return structuredClone(management);
-      if (endpoint === "transfer/state") return structuredClone(state);
+      if (endpoint === "manage/state") {
+        if (failManagement) throw new Error("source unavailable");
+        const response = structuredClone(management);
+        if (delayManagement) return new Promise((resolve, reject) => managementRequests.push({resolve, reject, response}));
+        return response;
+      }
+      if (endpoint === "transfer/state") {
+        const response = structuredClone(state);
+        for (const entry of response.plugins) Object.assign(entry, {statistics_status: entry.blocked ? "unavailable" : "pending", code_size: null, config_size: null, data_size: null, kv_count: null});
+        return response;
+      }
+      if (endpoint === "transfer/statistics") {
+        if (failStatistics) throw new Error("statistics unavailable");
+        const response = {plugins: state.plugins.map(entry => ({...structuredClone(entry), statistics_status: entry.blocked ? "unavailable" : "ready"}))};
+        if (delayStatistics) return new Promise((resolve, reject) => statisticsRequests.push({resolve, reject, response}));
+        return response;
+      }
       if (endpoint === "transfer/jobs") return {busy: state.busy, jobs: structuredClone(state.jobs)};
       throw new Error("Unexpected endpoint " + endpoint);
     },
@@ -94,9 +111,33 @@ async function main() {
   assert.ok(!source.includes("page-entry"));
   vm.runInContext(source.slice(0, source.lastIndexOf("initialize();")) + "globalThis.boot = initialize();", context);
   await context.boot;
+  async function refresh() {await vm.runInContext("loadState(true)", context); await settle();}
   assert.equal(elements["boot-error"].hidden, true, elements["boot-error"].textContent);
   assert.equal(document.documentElement.dataset.theme, "dark");
   assert.ok(elements["plugin-list"].textContent.includes(record.local.display_name));
+
+  // A slow storage scan or source lookup cannot delay the list or its controls.
+  assert.match(elements["plugin-list"].textContent, /统计中/);
+  assert.match(elements["plugin-list"].textContent, /来源读取中/);
+  assert.equal(elements["manifest-file"].disabled, true);
+  elements["select-all"].checked = true; await elements["select-all"].trigger("change");
+  assert.equal(elements["selected-count"].textContent, "2");
+  assert.equal(elements["selected-size"].textContent, "统计中…");
+  assert.equal(elements["save-rule"].disabled, false);
+  elements.search.value = "unknown"; await elements.search.trigger("input");
+  assert.equal(elements["plugin-list"].children.length, 1);
+  elements.search.value = ""; await elements.search.trigger("input");
+  managementRequests[0].resolve(managementRequests[0].response); await settle();
+  assert.equal(elements["manifest-file"].disabled, false);
+  assert.match(elements["plugin-list"].textContent, /统计中/);
+  const initialIcon = descendants(elements["plugin-list"]).find(element => element.tagName === "img");
+  statisticsRequests[0].resolve(statisticsRequests[0].response); await settle();
+  assert.doesNotMatch(elements["plugin-list"].textContent, /统计中/);
+  assert.equal(elements["selected-count"].textContent, "2");
+  assert.equal(elements["selected-size"].textContent, "2.0 KiB");
+  assert.equal(descendants(elements["plugin-list"]).find(element => element.tagName === "img"), initialIcon);
+  await elements["clear-selection"].trigger("click");
+  delayStatistics = false; delayManagement = false;
   assert.match(elements["plugin-list"].children[0].children.at(-1).textContent, /官方市场/);
   assert.match(elements["plugin-list"].children[1].children.at(-1).textContent, /未绑定更新源/);
   const icon = descendants(elements["plugin-list"]).find(element => element.tagName === "img");
@@ -130,10 +171,10 @@ async function main() {
   assert.equal(elements["selection-label"].textContent, "已选 1 个插件");
   elements.search.value = ""; await elements.search.trigger("input");
   assert.equal(elements["select-all"].indeterminate, true);
-  state.plugins[1].blocked = "无法导出"; await vm.runInContext("loadState(true)", context);
+  state.plugins[1].blocked = "无法导出"; await refresh();
   elements["select-all"].checked = true; await elements["select-all"].trigger("change");
   assert.equal(elements["selected-count"].textContent, "1");
-  state.plugins[1].blocked = ""; await vm.runInContext("loadState(true)", context);
+  state.plugins[1].blocked = ""; await refresh();
   await elements["clear-selection"].trigger("click");
   assert.equal(elements["selected-count"].textContent, "0");
   assert.equal(elements["select-all"].indeterminate, false);
@@ -253,7 +294,7 @@ async function main() {
   assert.deepEqual(downloads.slice(1).map(args => [args[0], args[1].kind || "manifest"]), [["transfer/download", "package"], ["transfer/download", "rollback"], ["manage/manifest-download", "manifest"]]);
   // If the official association disappears, stale sharing selections are cleared.
   record.bindings = [];
-  await vm.runInContext("loadState(true)", context);
+  await refresh();
   elements["export-format"].value = "manifest"; await elements["export-format"].trigger("change");
   assert.equal(elements["selected-count"].textContent, "0");
   assert.equal(elements.export.disabled, true);
@@ -261,15 +302,15 @@ async function main() {
   // Source labels use the active binding, independently of installation history.
   record.provenance.method = "upload";
   record.bindings = [{...binding, kind: "repository"}]; record.active_binding_id = binding.id;
-  await vm.runInContext("loadState(true)", context);
+  await refresh();
   const sourceLabel = elements["plugin-list"].children[0].children.at(-1).children[0];
   assert.equal(sourceLabel.textContent, "Git 仓库");
   assert.ok(sourceLabel.title.includes(binding.repo_url));
   assert.ok(sourceLabel.title.includes("上传安装"));
   record.bindings = [{...binding, registry_url: "https://registry.example/plugins.json"}];
-  await vm.runInContext("loadState(true)", context);
+  await refresh();
   assert.match(elements["plugin-list"].children[0].children.at(-1).textContent, /自定义市场/);
-  record.active_binding_id = null; await vm.runInContext("loadState(true)", context);
+  record.active_binding_id = null; await refresh();
   assert.match(elements["plugin-list"].children[0].children.at(-1).textContent, /未绑定更新源/);
 
   // Task execution locks selection controls without changing saved UI choices.
@@ -282,5 +323,52 @@ async function main() {
   elements["select-all"].checked = false; await elements["select-all"].trigger("change");
   await elements["clear-selection"].trigger("click");
   assert.equal(vm.runInContext("JSON.stringify(selections())", context), beforeBusy);
+
+  // Refreshes may finish out of order; older details must not replace newer data.
+  state.busy = false; delayStatistics = true; delayManagement = true;
+  await refresh();
+  const oldStatistics = statisticsRequests.at(-1), oldManagement = managementRequests.at(-1);
+  state.plugins[0].code_size = 4096;
+  record.bindings = [{...binding, kind: "repository"}]; record.active_binding_id = binding.id;
+  await refresh();
+  const latestStatistics = statisticsRequests.at(-1), latestManagement = managementRequests.at(-1);
+  latestStatistics.resolve(latestStatistics.response); latestManagement.resolve(latestManagement.response); await settle();
+  assert.equal(elements["plugin-list"].children[0].children[4].textContent, "4.0 KiB");
+  assert.match(elements["plugin-list"].children[0].children.at(-1).textContent, /Git 仓库/);
+  oldStatistics.resolve(oldStatistics.response); oldManagement.resolve(oldManagement.response); await settle();
+  assert.equal(elements["plugin-list"].children[0].children[4].textContent, "4.0 KiB");
+  assert.match(elements["plugin-list"].children[0].children.at(-1).textContent, /Git 仓库/);
+
+  // An identity change during the scan cannot attach sizes to a different plugin.
+  await refresh();
+  const changed = statisticsRequests.at(-1);
+  changed.response.plugins[0].plugin_id = "Someone/else";
+  changed.resolve(changed.response);
+  managementRequests.at(-1).resolve(managementRequests.at(-1).response); await settle();
+  assert.match(elements["plugin-list"].textContent, /插件信息已变化，请刷新状态/);
+  assert.equal(elements["plugin-list"].children[0].children[4].textContent, "—");
+
+  // Failure keeps the list usable and never presents unknown statistics as zero.
+  delayStatistics = false; delayManagement = false; failStatistics = true; failManagement = true;
+  await refresh();
+  assert.equal(elements["boot-error"].hidden, true);
+  assert.match(elements["plugin-list"].textContent, /统计失败/);
+  assert.equal(elements["plugin-list"].children[0].children[4].textContent, "统计失败");
+  assert.match(elements["plugin-list"].children[0].children.at(-1).children[0].title, /来源刷新失败/);
+  await elements["clear-selection"].trigger("click");
+  elements["select-all"].checked = true; await elements["select-all"].trigger("change");
+  assert.equal(elements["selected-count"].textContent, "2");
+  assert.equal(elements["selected-size"].textContent, "暂不可用");
+  assert.equal(elements["save-rule"].disabled, false);
+  vm.runInContext("managementState = {plugins: []}", context);
+  await refresh();
+  assert.match(elements["plugin-list"].textContent, /来源读取失败/);
+  assert.equal(elements["manifest-file"].disabled, true);
+  // A successful retry fills in values without discarding the current selection.
+  failStatistics = false; failManagement = false;
+  await refresh();
+  assert.doesNotMatch(elements["plugin-list"].textContent, /统计失败|统计中/);
+  assert.equal(elements["selected-count"].textContent, "2");
+  assert.equal(elements["selected-size"].textContent, "9.0 KiB");
 }
 main().catch(error => {console.error(error); process.exitCode = 1;});

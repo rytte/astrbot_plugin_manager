@@ -296,7 +296,7 @@ class TransferService:
             )
         )
 
-    def _inspect(self, directory: str) -> dict:
+    def _inspect(self, directory: str, *, statistics: bool = False) -> dict:
         entry = {
             "directory": directory,
             "name": directory,
@@ -307,10 +307,11 @@ class TransferService:
             "blocked": "",
             "data_available": False,
             "config_available": False,
-            "code_size": 0,
-            "config_size": 0,
-            "data_size": 0,
-            "kv_count": 0,
+            "code_size": None,
+            "config_size": None,
+            "data_size": None,
+            "kv_count": None,
+            "statistics_status": "pending",
             "ranges": [],
         }
         try:
@@ -327,26 +328,36 @@ class TransferService:
                 config_available=source["config_path"].is_file(),
                 data_available=not self._is_self(source),
             )
-            entry["code_size"] = sum(
-                path.stat().st_size for path in tree_files(source["code"], code=True)
-            )
-            if entry["config_available"]:
-                entry["config_size"] = source["config_path"].stat().st_size
             if source["data_path"].exists() and entry["data_available"]:
-                entry["data_size"] = sum(
-                    path.stat().st_size for path in tree_files(source["data_path"])
-                )
                 entry["ranges"].append(f"plugin_data/{metadata['name']}")
             if entry["data_available"]:
                 entry["ranges"].append("专属 KV：" + metadata["plugin_id"])
             else:
                 entry["ranges"].append("管家自身数据不可导出，避免递归备份和页面暂停。")
+            if statistics:
+                entry["code_size"] = sum(
+                    path.stat().st_size
+                    for path in tree_files(source["code"], code=True)
+                )
+                entry["config_size"] = (
+                    source["config_path"].stat().st_size
+                    if entry["config_available"]
+                    else 0
+                )
+                entry["data_size"] = (
+                    sum(path.stat().st_size for path in tree_files(source["data_path"]))
+                    if source["data_path"].exists() and entry["data_available"]
+                    else 0
+                )
+                entry["kv_count"] = 0
+                entry["statistics_status"] = "ready"
         except (ValueError, OSError) as exc:
             entry["blocked"] = redact(str(exc))
+            entry["statistics_status"] = "unavailable"
         return entry
 
-    async def inventory(self) -> list[dict]:
-        """Inspect canonical code and storage; never import modules or infer paths."""
+    async def inventory(self, *, statistics: bool = False) -> list[dict]:
+        """List identities first; inspect file trees and KV only when requested."""
         directories = {
             item.root_dir_name
             for item in self.operations.context.get_all_stars()
@@ -363,10 +374,13 @@ class TransferService:
             )
         )
         result = await asyncio.to_thread(
-            lambda: [self._inspect(directory) for directory in sorted(directories)]
+            lambda: [
+                self._inspect(directory, statistics=statistics)
+                for directory in sorted(directories)
+            ]
         )
         for entry in result:
-            if entry["data_available"] and not entry["blocked"]:
+            if statistics and entry["data_available"] and not entry["blocked"]:
                 records = await self.preferences.range_get_async(
                     "plugin", entry["plugin_id"]
                 )

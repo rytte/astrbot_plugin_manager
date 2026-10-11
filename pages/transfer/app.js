@@ -3,6 +3,7 @@
 const elements = Object.fromEntries(Array.from(document.querySelectorAll("[id]")).map(element => [element.id, element]));
 let bridge;
 let state;
+let stateRequest = 0;
 let choices = new Map();
 const pluginIcons = new Map();
 let preview = null;
@@ -11,7 +12,8 @@ let busy = false;
 let requesting = false;
 let previousBusy = false;
 let confirmationResolve = null;
-let managementState;
+let managementState = {plugins: []};
+let managementStatus = "loading", managementRequest = 0;
 let selectedRecord = null, bindingPreview = null, manifestPreview = null;
 let manifestSelections = new Set(), installChoices = new Set();
 const sourceLabels = {market: "插件市场", repository: "代码仓库", upload: "上传安装", bundle: "迁移包导入", unknown: "来源未知", builtin: "AstrBot 内置"};
@@ -24,10 +26,18 @@ function node(tag, className, text) {
 }
 
 function formatSize(bytes) {
+  if (!Number.isFinite(bytes)) return "—";
   if (bytes < 1024) return bytes + " B";
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KiB";
   if (bytes < 1024 * 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MiB";
   return (bytes / 1024 / 1024 / 1024).toFixed(2) + " GiB";
+}
+
+function statisticSize(plugin, field) {
+  if (plugin.statistics_status === "pending") return "统计中…";
+  if (plugin.statistics_status === "failed") return "统计失败";
+  if (plugin.statistics_status === "unavailable") return "—";
+  return formatSize(plugin[field]);
 }
 
 function message(text, error = false) {
@@ -59,6 +69,21 @@ function active(record) {return record.bindings.find(binding => binding.id === r
 function official(record) {return record && record.bindings.some(binding => binding.kind === "market" && binding.registry_url === null);}
 function eligible(record) {return record && !record.local.reserved && !record.local.problem && !record.identity_changed && official(record);}
 function sourceText(binding) {return binding ? (binding.kind === "market" ? (binding.registry_url ? "自定义市场 / " : "官方市场 / ") + binding.market_plugin_id : binding.repo_url) : "未绑定更新源";}
+function sourceKind(binding) {return !binding ? "未绑定" : binding.kind === "market" ? (binding.registry_url ? "自定义市场" : "官方市场") : "Git 仓库";}
+function sourceTime(value) {
+  if (!value) return "未知";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value.replace(/-/g, "/");
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("zh-CN", {year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false});
+}
+function sourceAddress(className, value) {
+  const element = node("p", className), parts = String(value || "").split("/");
+  parts.forEach((part, index) => {
+    element.append(document.createTextNode(part + (index < parts.length - 1 ? "/" : "")));
+    if (index < parts.length - 1) element.append(node("wbr"));
+  });
+  return element;
+}
 function button(text, action, disabled = false) {
   const element = node("button", "button secondary source-action", text);
   element.disabled = requesting || busy || disabled;
@@ -160,18 +185,20 @@ function renderPlugins() {
     const dataCell = node("td"); dataCell.dataset.zipOnly = "";
     const dataCheck = checkbox("附带 " + plugin.name + " 的标准数据", choice.data, !choice.selected || !plugin.data_available || Boolean(plugin.blocked), checked => {choice.data = checked; renderSummary();});
     dataCheck.append(document.createTextNode(plugin.data_available ? "标准数据" : "不可用"));
-    dataCell.append(dataCheck, node("div", "range-label", plugin.data_available ? "文件 " + formatSize(plugin.data_size) : "归属未知或自身数据"));
+    dataCell.append(dataCheck, node("div", "range-label", plugin.data_available ? "文件 " + statisticSize(plugin, "data_size") : "归属未知或自身数据"));
     dataCell.title = (plugin.ranges || []).join("\n");
-    if (plugin.data_available) dataCell.title += (dataCell.title ? "\n" : "") + "键值存储：" + plugin.kv_count + " 条记录（随标准数据备份）";
+    if (plugin.data_available) dataCell.title += (dataCell.title ? "\n" : "") + "键值存储：" + (Number.isFinite(plugin.kv_count) ? plugin.kv_count + " 条记录（随标准数据备份）" : plugin.statistics_status === "pending" ? "统计中…" : "未完成统计，请刷新状态重试。");
     const configCell = node("td"); configCell.dataset.zipOnly = "";
     const configCheck = checkbox("附带 " + plugin.name + " 的当前配置", choice.config, !choice.selected || !plugin.config_available || Boolean(plugin.blocked), checked => {choice.config = checked; renderSummary();});
     configCheck.append(document.createTextNode(plugin.config_available ? "当前配置" : "无已保存配置"));
     configCell.append(configCheck);
-    const sizeCell = node("td", "numeric", formatSize(plugin.code_size)); sizeCell.dataset.zipOnly = "";
+    const sizeCell = node("td", "numeric", statisticSize(plugin, "code_size")); sizeCell.dataset.zipOnly = "";
+    sizeCell.title = plugin.statistics_error || plugin.blocked || "";
     const sourceCell = node("td", "plugin-source");
     const binding = record && active(record);
-    const sourceLabel = node("span", "source-label" + (binding ? "" : " unbound"), binding ? (binding.kind === "market" ? (binding.registry_url ? "自定义市场" : "官方市场") : "Git 仓库") : record ? "未绑定更新源" : "来源待读取");
-    sourceLabel.title = sourceText(binding) + (record ? "\n安装记录：" + (sourceLabels[record.provenance.method] || record.provenance.method) : "\n尚未读取来源记录，请刷新页面。");
+    const sourceLabel = node("span", "source-label" + (binding ? "" : " unbound"), binding ? (binding.kind === "market" ? (binding.registry_url ? "自定义市场" : "官方市场") : "Git 仓库") : record ? "未绑定更新源" : managementStatus === "failed" ? "来源读取失败" : managementStatus === "loading" ? "来源读取中…" : "暂无来源记录");
+    sourceLabel.title = record ? sourceText(binding) + "\n安装记录：" + (sourceLabels[record.provenance.method] || record.provenance.method) : managementStatus === "failed" ? "来源读取失败，请刷新状态重试。" : managementStatus === "loading" ? "正在读取来源记录。" : "该插件暂无来源记录。";
+    if (record && managementStatus === "failed") sourceLabel.title += "\n来源刷新失败，当前显示上次读取的记录。";
     const manageButton = button("来源管理", () => openSource(plugin.directory), !record);
     manageButton.className = "text-button source-manage";
     manageButton.setAttribute("aria-label", "管理 " + plugin.name + " 的插件来源");
@@ -198,7 +225,8 @@ function renderSummary() {
   elements["clear-selection"].disabled = busy || requesting || !selected.length;
   elements["data-count"].textContent = selected.filter(selection => selection.data).length + " 个";
   elements["config-count"].textContent = selected.filter(selection => selection.config).length + " 个";
-  elements["selected-size"].textContent = formatSize(selectedPlugins.reduce((total, plugin) => total + plugin.code_size + (choices.get(plugin.directory).data ? plugin.data_size : 0) + (choices.get(plugin.directory).config ? plugin.config_size : 0), 0));
+  const sizes = selectedPlugins.flatMap(plugin => [plugin.code_size, ...(choices.get(plugin.directory).data ? [plugin.data_size] : []), ...(choices.get(plugin.directory).config ? [plugin.config_size] : [])]);
+  elements["selected-size"].textContent = selectedPlugins.some(plugin => plugin.statistics_status === "pending") ? "统计中…" : sizes.every(Number.isFinite) && !selectedPlugins.some(plugin => ["failed", "unavailable"].includes(plugin.statistics_status)) ? formatSize(sizes.reduce((total, size) => total + size, 0)) : "暂不可用";
   elements["rule-status"].textContent = dirty ? "有未保存改动 · 请先保存规则" : state.rule.updated_at ? "规则已保存 · " + new Date(state.rule.updated_at * 1000).toLocaleString("zh-CN") : "尚未保存导出规则";
   elements["rule-status"].classList.toggle("dirty", dirty);
   elements["save-rule"].disabled = busy || requesting || !dirty;
@@ -206,7 +234,7 @@ function renderSummary() {
   elements.export.disabled = busy || requesting || (manifestMode() ? !manifestSelections.size || Array.from(manifestSelections).some(directory => !eligible(sourceRecord(directory))) : dirty || !state.rule.selections.length);
   elements["export-format"].disabled = requesting;
   elements["import-format"].disabled = requesting;
-  elements["manifest-file"].disabled = busy || requesting;
+  elements["manifest-file"].disabled = busy || requesting || !managementState.csrf;
   elements["install-manifest"].disabled = busy || requesting || !manifestPreview || !installChoices.size;
   elements["bundle-file"].disabled = busy || requesting;
   elements["execute-import"].disabled = busy || requesting || !preview || !Array.from(importChoices.values()).some(choice => choice.code || choice.config || choice.data);
@@ -256,9 +284,11 @@ async function post(action, body = {}) {
 }
 
 async function loadState(preserve = false) {
-  const [updated, management] = await Promise.all([bridge.apiGet("transfer/state"), bridge.apiGet("manage/state")]);
+  const current = ++stateRequest;
+  const updated = await bridge.apiGet("transfer/state");
+  if (current !== stateRequest) return;
   state = updated;
-  updateManagement(management);
+  managementStatus = "loading";
   busy = state.busy;
   if (!preserve) {
     choices = new Map(state.plugins.map(plugin => [plugin.directory, {selected: false, config: false, data: false}]));
@@ -269,13 +299,42 @@ async function loadState(preserve = false) {
   for (const plugin of state.plugins) if (!choices.has(plugin.directory)) choices.set(plugin.directory, {selected: false, config: false, data: false});
   for (const selection of state.rule.selections) {
     if (!choices.has(selection.directory)) choices.set(selection.directory, {selected: false, config: false, data: false});
-    if (!state.plugins.some(plugin => plugin.directory === selection.directory)) state.plugins.push({directory: selection.directory, name: selection.name, display_name: "", version: "", status: "failed", blocked: "已保存规则中的插件不存在。请取消选择并重新保存规则。", data_available: false, config_available: false, code_size: 0, config_size: 0, data_size: 0, kv_count: 0});
+    if (!state.plugins.some(plugin => plugin.directory === selection.directory)) state.plugins.push({directory: selection.directory, name: selection.name, display_name: "", version: "", status: "failed", blocked: "已保存规则中的插件不存在。请取消选择并重新保存规则。", data_available: false, config_available: false, code_size: null, config_size: null, data_size: null, kv_count: null, statistics_status: "unavailable"});
   }
   elements["upload-limit"].textContent = "最大 " + formatSize(state.limits.archive_bytes) + " · 不接受普通插件安装 ZIP";
   renderPlugins();
   renderSummary();
   renderJobs(state.jobs);
   if (selectedRecord) renderSource();
+  // Neither storage scans nor source reads hold up the basic plugin list.
+  void loadStatistics(state);
+  void loadManagement(state).catch(() => {});
+}
+
+async function loadStatistics(snapshot) {
+  try {
+    const response = await bridge.apiGet("transfer/statistics");
+    if (state !== snapshot) return;
+    const entries = new Map(response.plugins.map(plugin => [plugin.directory, plugin]));
+    for (const plugin of snapshot.plugins) {
+      if (plugin.statistics_status !== "pending") continue;
+      const entry = entries.get(plugin.directory);
+      if (!entry || ["name", "plugin_id", "version"].some(field => plugin[field] !== entry[field])) {
+        plugin.statistics_status = "unavailable";
+        plugin.blocked = "插件信息已变化，请刷新状态。";
+        continue;
+      }
+      for (const field of ["code_size", "config_size", "data_size", "kv_count", "statistics_status", "blocked", "ranges", "data_available", "config_available"]) plugin[field] = entry[field];
+    }
+  } catch (error) {
+    if (state !== snapshot) return;
+    for (const plugin of snapshot.plugins) if (plugin.statistics_status === "pending") {
+      plugin.statistics_status = "failed";
+      plugin.statistics_error = "大小与存储统计失败，请刷新状态重试。";
+    }
+  }
+  renderPlugins();
+  renderSummary();
 }
 
 async function runRequest(operation) {
@@ -454,10 +513,23 @@ function updateManagement(updated) {
   if (!refreshed) {elements["source-dialog"].close(); selectedRecord = null; bindingPreview = null;}
   else {if (refreshed.revision !== selectedRecord.revision) bindingPreview = null; selectedRecord = refreshed;}
 }
-async function loadManagement() {
-  updateManagement(await bridge.apiGet("manage/state"));
-  renderPlugins(); renderSummary();
-  if (selectedRecord) renderSource();
+async function loadManagement(snapshot = state) {
+  const current = ++managementRequest;
+  managementStatus = "loading";
+  try {
+    const updated = await bridge.apiGet("manage/state");
+    if (state !== snapshot || current !== managementRequest) return;
+    updateManagement(updated);
+    managementStatus = "ready";
+    renderPlugins(); renderSummary();
+    if (selectedRecord) renderSource();
+  } catch (error) {
+    if (state === snapshot && current === managementRequest) {
+      managementStatus = "failed";
+      renderPlugins(); renderSummary();
+    }
+    throw error;
+  }
 }
 async function managementPost(action, body) {return bridge.apiPost("manage/" + action, {csrf: managementState.csrf, ...body});}
 async function openSource(directory) {
@@ -465,22 +537,44 @@ async function openSource(directory) {
   selectedRecord = managementState.plugins.find(record => record.local.directory === directory); bindingPreview = null;
   if (!selectedRecord) throw new Error("该插件暂无可管理的来源记录，请刷新列表。");
   elements["source-message"].hidden = true;
+  elements["source-install-details"].open = false; elements["source-history-details"].open = false;
   elements["binding-value"].value = ""; elements["activate-binding"].checked = false;
   renderSource(); elements["source-dialog"].showModal();
 }
 function renderSource() {
   if (!selectedRecord) return;
-  const record = selectedRecord, local = record.local;
+  const record = selectedRecord, local = record.local, current = active(record);
   elements["source-title"].textContent = local.display_name || local.name || local.directory;
+  elements["source-identity"].textContent = [local.name || local.directory, local.version && "v" + local.version.replace(/^v/i, ""), local.directory !== local.name && "目录：" + local.directory].filter(Boolean).join(" · ");
+  elements["source-current-kind"].textContent = sourceKind(current);
+  elements["source-current-kind"].className = "source-type" + (current ? "" : " unbound");
   const summary = elements["source-summary"]; summary.replaceChildren();
-  for (const text of [local.name + " / " + local.directory, "当前更新源：" + sourceText(active(record)), "安装记录：" + (sourceLabels[record.provenance.method] || record.provenance.method), "记录依据：" + (record.provenance.evidence === "manager_operation" ? "管家实际执行安装" : record.provenance.evidence === "core_record_observed" ? "首次观察到 AstrBot 绑定记录；不能据此还原最初安装历史" : "缺少安装证据"), "安装时间：" + (record.provenance.installed_at || "未知"), "首次观察：" + record.provenance.observed_at]) summary.append(node("p", "detail", text));
-  if (record.provenance.reported_installed_at) summary.append(node("p", "detail", "AstrBot 记录的时间：" + record.provenance.reported_installed_at + "（仅供参考）"));
+  summary.append(sourceAddress("source-current-value", current ? (current.kind === "market" ? current.market_plugin_id : current.repo_url) : "未绑定更新源"), node("p", "source-current-note", current ? "AstrBot 更新时使用此来源。" : "可在下方关联来源，并将其设为更新源。"));
   if (local.problem || record.identity_changed) summary.append(node("p", "plugin-error", local.problem || "目录身份已变化，旧来源记录已隔离。"));
+  elements["source-install-method"].textContent = sourceLabels[record.provenance.method] || record.provenance.method;
+  const provenance = elements["source-provenance"]; provenance.replaceChildren();
+  const facts = [
+    ["安装记录", sourceLabels[record.provenance.method] || record.provenance.method],
+    ["记录依据", record.provenance.evidence === "manager_operation" ? "管家实际执行安装" : record.provenance.evidence === "core_record_observed" ? "首次观察到 AstrBot 绑定记录；不能据此还原最初安装历史" : "缺少安装证据"],
+    ["安装时间", sourceTime(record.provenance.installed_at)],
+    ["首次观察", sourceTime(record.provenance.observed_at)]
+  ];
+  if (record.provenance.reported_installed_at) facts.push(["AstrBot 记录时间", sourceTime(record.provenance.reported_installed_at) + "（仅供参考）"]);
+  for (const [label, value] of facts) {const row = node("div"); row.append(node("dt", "", label), node("dd", "", value)); provenance.append(row);}
+  elements["binding-count"].textContent = record.bindings.length;
   const list = elements["binding-list"]; list.replaceChildren();
   for (const binding of record.bindings) {
-    const card = node("article", "binding-card"); card.append(node("strong", "plugin-id", sourceText(binding)), node("div", "detail", binding.verification === "identity_matched" ? "名称与作者已匹配 · " + binding.checked_at : "来自 AstrBot 的来源记录，尚未重新校验"));
-    if (binding.id === record.active_binding_id) card.append(node("span", "badge", "当前更新源"));
-    else if (binding.kind === "repository" || binding.registry_url === null) card.append(button("设为更新源", async () => {
+    const isCurrent = binding.id === record.active_binding_id;
+    const card = node("article", "binding-card" + (isCurrent ? " current" : ""));
+    const content = node("div", "binding-content"), heading = node("div", "binding-heading");
+    heading.append(node("strong", "binding-type", sourceKind(binding)));
+    if (isCurrent) heading.append(node("span", "badge", "当前更新源"));
+    content.append(heading, sourceAddress("binding-address", binding.kind === "market" ? binding.market_plugin_id : binding.repo_url));
+    if (binding.kind === "market" && binding.repo_url) content.append(sourceAddress("binding-repo", binding.repo_url));
+    const verified = binding.verification === "identity_matched";
+    content.append(node("p", "detail", verified ? "名称与作者已匹配" + (binding.checked_at ? " · " + sourceTime(binding.checked_at) : "") : "AstrBot 来源记录 · 尚未重新校验"));
+    card.append(content);
+    if (!isCurrent && (binding.kind === "repository" || binding.registry_url === null)) card.append(button("设为更新源", async () => {
       if (!await confirmOperation("切换更新源", [{name: local.name, directory: local.directory, description: sourceText(binding)}], "将重新校验该来源并同步到 AstrBot，后续原生 WebUI 更新使用此来源。最初安装记录保留。")) return;
       const result = await managementPost("source-select", {directory: local.directory, binding_id: binding.id, revision: record.revision, acknowledged: true});
       if (selectedRecord && selectedRecord.local.directory === local.directory) selectedRecord = result;
@@ -488,17 +582,28 @@ function renderSource() {
     }));
     list.append(card);
   }
-  if (!record.bindings.length) list.append(node("p", "detail", "尚无来源关联。可先校验官方市场 ID 或仓库 URL。"));
+  if (!record.bindings.length) list.append(node("p", "source-empty", "尚未关联来源，可在下方添加。"));
   const blocked = local.reserved || local.problem || record.identity_changed;
   for (const id of ["binding-value", "binding-kind", "activate-binding"]) elements[id].disabled = requesting || busy || Boolean(blocked);
   elements["preview-binding"].disabled = requesting || busy || Boolean(blocked);
   elements["save-binding"].disabled = requesting || busy || Boolean(blocked) || !bindingPreview;
+  const repository = elements["binding-kind"].value === "repository";
+  elements["binding-value-label"].textContent = repository ? "仓库地址" : "市场 ID";
+  elements["binding-value"].placeholder = repository ? "https://github.com/作者/仓库名" : "作者/astrbot_plugin_example";
   elements["binding-preview"].hidden = !bindingPreview;
-  elements["binding-preview"].textContent = bindingPreview ? "作者和插件名与本机一致：\n" + sourceText(bindingPreview.binding) + (bindingPreview.binding.kind === "market" ? "\n" + bindingPreview.binding.repo_url : "") + "\n此结果只证明元数据匹配，不证明代码安全。" + (bindingPreview.notice ? "\n" + bindingPreview.notice : "") : "";
+  elements["binding-preview"].replaceChildren();
+  if (bindingPreview) {
+    const checked = bindingPreview.binding;
+    elements["binding-preview"].append(node("strong", "", "作者与插件名一致"), sourceAddress("binding-address", sourceText(checked)));
+    if (checked.kind === "market" && checked.repo_url) elements["binding-preview"].append(sourceAddress("binding-repo", checked.repo_url));
+    elements["binding-preview"].append(node("p", "detail", "仅表示元数据匹配，不代表代码安全。"));
+    if (bindingPreview.notice) elements["binding-preview"].append(node("p", "detail", bindingPreview.notice));
+  }
   const history = elements["source-history"]; history.replaceChildren();
+  elements["source-history-count"].textContent = record.history.length;
   const labels = {installed: "管家安装", uninstalled: "管家卸载", binding_added: "保存来源关联", active_changed: "切换当前更新源", core_observed: "观察到 AstrBot 来源变更", bundle_imported: "迁移包覆盖代码，原更新源已清除"};
-  for (const event of record.history.slice().reverse()) history.append(node("div", "history-row", new Date(event.at).toLocaleString("zh-CN") + " · " + (labels[event.action] || event.action) + " · " + event.actor));
-  if (!record.history.length) history.append(node("p", "detail", "暂无管家操作记录。"));
+  for (const event of record.history.slice().reverse()) {const row = node("div", "history-row"); row.append(node("span", "history-event", labels[event.action] || event.action), node("span", "history-meta", sourceTime(event.at) + " · " + event.actor)); history.append(row);}
+  if (!record.history.length) history.append(node("p", "source-empty", "暂无管家操作记录。"));
 }
 
 async function exportManifest() {

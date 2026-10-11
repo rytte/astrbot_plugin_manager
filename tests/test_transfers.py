@@ -7,9 +7,15 @@ import time
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
-from astrbot_plugin_manager.transfer_bundle import load_json, remove_path, unpack
+from astrbot_plugin_manager.transfer_bundle import (
+    load_json,
+    remove_path,
+    tree_files,
+    unpack,
+)
 from astrbot_plugin_manager.transfers import TransferService
 
 
@@ -31,6 +37,77 @@ async def prepare(env, path):
     shutil.copyfile(path, transfers.job_directory(job["id"]) / "upload.zip")
     result = await transfers.prepare_import(job)
     return job, result
+
+
+async def test_inventory_defers_file_scans_and_kv_until_statistics(
+    transfer_env, monkeypatch
+):
+    env = transfer_env
+    target = env.make_transfer_plugin()
+    transfers = env.plugin.transfers
+    code = transfers.code_root / target.root_dir_name
+    config = transfers.config_root / (target.root_dir_name + "_config.json")
+    config.write_bytes(b'{"enabled": true}')
+    data = transfers.data_root / target.name
+    data.mkdir()
+    (data / "state.txt").write_bytes(b"saved state")
+    env.kv_values[("plugin", target.plugin_id)] = {"first": "a", "second": "b"}
+    scan = Mock(wraps=tree_files)
+    monkeypatch.setattr("astrbot_plugin_manager.transfers.tree_files", scan)
+
+    basic = next(
+        entry
+        for entry in await transfers.inventory()
+        if entry["directory"] == target.root_dir_name
+    )
+    assert basic["statistics_status"] == "pending"
+    assert basic["code_size"] is None and basic["kv_count"] is None
+    assert basic["data_available"] and basic["config_available"]
+    assert basic["plugin_id"] == target.plugin_id
+    assert not basic["blocked"]
+    scan.assert_not_called()
+    env.preferences.range_get_async.assert_not_awaited()
+
+    detailed = next(
+        entry
+        for entry in await transfers.inventory(statistics=True)
+        if entry["directory"] == target.root_dir_name
+    )
+    assert detailed["statistics_status"] == "ready"
+    assert detailed["code_size"] == sum(path.stat().st_size for path in code.iterdir())
+    assert detailed["data_size"] == len(b"saved state")
+    assert detailed["config_size"] == config.stat().st_size
+    assert detailed["kv_count"] == 2
+    assert scan.call_count == 2
+    env.preferences.range_get_async.assert_awaited_once_with("plugin", target.plugin_id)
+
+
+async def test_export_rechecks_files_after_page_statistics(transfer_env):
+    env = transfer_env
+    target = env.make_transfer_plugin()
+    transfers = env.plugin.transfers
+    assert any(
+        entry["statistics_status"] == "ready"
+        for entry in await transfers.inventory(statistics=True)
+        if entry["directory"] == target.root_dir_name
+    )
+    outside = env.root / "private.txt"
+    outside.write_text("must not be exported", encoding="utf-8")
+    linked = transfers.code_root / target.root_dir_name / "linked.txt"
+    try:
+        linked.hardlink_to(outside)
+    except OSError:
+        pytest.skip("Hardlink creation is unavailable")
+
+    rule = await transfers.save_rule(
+        [{"directory": target.root_dir_name, "config": False, "data": False}]
+    )
+    started = await transfers.start_export("admin", rule["updated_at"], True)
+    await transfers.task
+    job = transfers.get_job(started["id"], "admin")
+    assert job["status"] == "failed"
+    assert "硬链接" in job["error"]
+    assert not (transfers.job_directory(job["id"]) / "package.zip").exists()
 
 
 @pytest.mark.parametrize("fail_after_source_change", [False, True])
@@ -442,7 +519,7 @@ async def test_busy_jobs_owner_expiration_and_interruptions_are_explicit(
 
 async def test_registered_routes_are_removed_on_termination(transfer_env):
     env = transfer_env
-    assert len(env.context.registered_web_apis) == 19
+    assert len(env.context.registered_web_apis) == 20
     await env.plugin.terminate()
     assert env.context.registered_web_apis == []
     assert env.plugin.transfers.closing

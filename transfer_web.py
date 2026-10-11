@@ -26,6 +26,7 @@ class TransferWeb:
     def register(self) -> None:
         routes = {
             "state": "GET",
+            "statistics": "GET",
             "jobs": "GET",
             "job": "GET",
             "download": "GET",
@@ -124,6 +125,8 @@ class TransferWeb:
                         self.transfers.task and not self.transfers.task.done()
                     ),
                 }
+            elif action == "statistics":
+                data = {"plugins": await self.transfers.inventory(statistics=True)}
             elif action == "jobs":
                 data = {
                     "jobs": self.transfers.history(owner),
