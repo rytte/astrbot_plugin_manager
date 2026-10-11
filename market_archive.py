@@ -39,7 +39,7 @@ async def _download_market_archive(url: str, output: Path) -> None:
                 or parsed.username
                 or parsed.password
             ):
-                raise ValueError("官方市场条目的下载地址必须是无凭据 HTTPS URL。")
+                raise ValueError("插件安装包的下载地址必须是无凭据 HTTPS URL。")
             async with session.get(url, allow_redirects=False) as response:
                 if response.status in {301, 302, 303, 307, 308}:
                     location = response.headers.get("Location")
@@ -48,15 +48,15 @@ async def _download_market_archive(url: str, output: Path) -> None:
                     url = urljoin(url, location)
                     continue
                 if response.status != 200:
-                    raise ValueError(f"市场安装包下载失败：HTTP {response.status}。")
+                    raise ValueError(f"插件安装包下载失败：HTTP {response.status}。")
                 if response.content_length and response.content_length > MAX_ARCHIVE:
-                    raise ValueError("市场安装包超过 256 MiB 限制。")
+                    raise ValueError("插件安装包超过 256 MiB 限制。")
                 size = 0
                 with output.open("xb") as file:
                     async for chunk in response.content.iter_chunked(1024 * 1024):
                         size += len(chunk)
                         if size > MAX_ARCHIVE:
-                            raise ValueError("市场安装包超过 256 MiB 限制。")
+                            raise ValueError("插件安装包超过 256 MiB 限制。")
                         file.write(chunk)
                 return
         raise ValueError("安装包重定向次数过多。")
@@ -65,7 +65,7 @@ async def _download_market_archive(url: str, output: Path) -> None:
 def unpack_market_archive(archive_path: Path, destination: Path) -> Path:
     """Accept root metadata or one archive wrapper; reject ambiguous layouts."""
     if archive_path.stat().st_size > MAX_ARCHIVE:
-        raise ValueError("市场安装包超过 256 MiB 限制。")
+        raise ValueError("插件安装包超过 256 MiB 限制。")
     destination.mkdir(parents=True, exist_ok=False)
     try:
         with zipfile.ZipFile(archive_path) as archive:
@@ -74,7 +74,7 @@ def unpack_market_archive(archive_path: Path, destination: Path) -> Path:
                 len(entries) > MAX_FILES
                 or sum(item.file_size for item in entries) > MAX_CONTENT
             ):
-                raise ValueError("市场安装包的解压大小或文件数超过限制。")
+                raise ValueError("插件安装包的解压大小或文件数超过限制。")
             seen = {}
             explicit = set()
             for item in entries:
@@ -86,15 +86,15 @@ def unpack_market_archive(archive_path: Path, destination: Path) -> Path:
                     not in ({0, stat.S_IFDIR} if item.is_dir() else {0, stat.S_IFREG})
                     or item.flag_bits & 1
                 ):
-                    raise ValueError("市场安装包包含链接、特殊文件或加密条目。")
+                    raise ValueError("插件安装包包含链接、特殊文件或加密条目。")
                 if item.file_size > MAX_FILE or item.compress_type not in {
                     zipfile.ZIP_STORED,
                     zipfile.ZIP_DEFLATED,
                 }:
-                    raise ValueError("市场安装包的文件大小或压缩方式不受支持。")
+                    raise ValueError("插件安装包的文件大小或压缩方式不受支持。")
                 folded = unicodedata.normalize("NFC", relative).casefold()
                 if folded in explicit:
-                    raise ValueError("市场安装包包含重复路径。")
+                    raise ValueError("插件安装包包含重复路径。")
                 explicit.add(folded)
                 parts = relative.split("/")
                 for index in range(1, len(parts) + 1):
@@ -105,11 +105,11 @@ def unpack_market_archive(archive_path: Path, destination: Path) -> Path:
                     )
                     if key in seen and seen[key] != (path, kind):
                         raise ValueError(
-                            "市场安装包包含大小写、Unicode 或文件目录冲突。"
+                            "插件安装包包含大小写、Unicode 或文件目录冲突。"
                         )
                     seen[key] = (path, kind)
                     if len(seen) > MAX_FILES:
-                        raise ValueError("市场安装包目录数量超过限制。")
+                        raise ValueError("插件安装包目录数量超过限制。")
                 target = safe_path(destination, relative)
                 if item.is_dir():
                     target.mkdir(parents=True, exist_ok=True)
@@ -124,7 +124,7 @@ def unpack_market_archive(archive_path: Path, destination: Path) -> Path:
                         output.write(chunk)
                 os.chmod(target, 0o600)
     except (zipfile.BadZipFile, EOFError, zlib.error) as exc:
-        raise ValueError("市场安装包 ZIP 无效或已损坏。") from exc
+        raise ValueError("插件安装包 ZIP 无效或已损坏。") from exc
     if (destination / "metadata.yaml").is_file():
         return destination
     children = list(destination.iterdir())
@@ -134,4 +134,4 @@ def unpack_market_archive(archive_path: Path, destination: Path) -> Path:
         and (children[0] / "metadata.yaml").is_file()
     ):
         return children[0]
-    raise ValueError("市场安装包必须在根目录或唯一外层目录包含 metadata.yaml。")
+    raise ValueError("插件安装包必须在根目录或唯一外层目录包含 metadata.yaml。")

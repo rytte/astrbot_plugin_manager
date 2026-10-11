@@ -41,6 +41,9 @@ class ManagementWeb(TransferWeb):
             "manifest-download": "GET",
             "manifest-upload": "POST",
             "manifest-upload/<csrf_token>": "POST",
+            "manifest-preview": "GET",
+            "manifest-draft": "POST",
+            "manifest-recheck": "POST",
             "manifest-install": "POST",
         }.items():
             handler = functools.partial(self.dispatch, action.split("/")[0])
@@ -64,6 +67,8 @@ class ManagementWeb(TransferWeb):
                         self.transfers.task and not self.transfers.task.done()
                     ),
                 }
+            elif action == "manifest-preview":
+                data = self.manifests.read_preview(owner, request.query.get("id"))
             elif action == "manifest-download":
                 job = self.transfers.get_job(request.query.get("id"), owner)
                 if (
@@ -105,7 +110,7 @@ class ManagementWeb(TransferWeb):
                         object_pairs_hook=_json_pairs,
                         parse_constant=_invalid_number,
                     )
-                    data = await self.manifests.preview(owner, value)
+                    data = self.manifests.begin_preview(owner, value)
                 finally:
                     await uploaded.close()
             else:
@@ -164,10 +169,16 @@ class ManagementWeb(TransferWeb):
                         self.transfers._save(job)
                         data = self.transfers.public_job(job)
                 elif action == "manifest-install":
-                    exact_keys(body, {"csrf", "id", "ids", "acknowledged"})
+                    exact_keys(body, {"csrf", "id", "selections", "acknowledged"})
                     data = await self.manifests.start(
-                        owner, body["id"], body["ids"], body["acknowledged"]
+                        owner, body["id"], body["selections"], body["acknowledged"]
                     )
+                elif action == "manifest-draft":
+                    exact_keys(body, {"csrf", "id", "draft"})
+                    data = self.manifests.save_draft(owner, body["id"], body["draft"])
+                elif action == "manifest-recheck":
+                    exact_keys(body, {"csrf", "id"})
+                    data = self.manifests.recheck(owner, body["id"])
                 else:
                     raise ValueError("未知插件管理接口。")
             return json_response(

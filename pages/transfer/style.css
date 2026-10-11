@@ -127,6 +127,10 @@ tr.selected{background:var(--accent-bg)}
 .section-heading{display:flex;align-items:center;justify-content:space-between;margin:24px 0 12px;gap:8px}
 #execute-import{margin-top:18px;margin-bottom:8px}
 .job-list{display:grid;gap:14px}
+.manifest-source{max-width:280px;min-width:180px}
+.manifest-source-select{max-width:100%;border:1px solid var(--line);border-radius:6px;padding:5px 8px;background:var(--surface);color:var(--text);font-size:13px}
+.manifest-locator{overflow-wrap:anywhere;font-size:12px;margin-top:7px}
+#manifest-preview>.table-scroll{margin-top:12px}
 .job-card{border:1px solid var(--line);border-radius:10px;padding:16px}
 .job-heading{display:flex;gap:12px;align-items:flex-start}
 .job-heading-main{display:flex;align-items:center;flex-wrap:wrap;gap:8px 10px;min-width:0;min-height:32px}
@@ -144,7 +148,7 @@ tr.selected{background:var(--accent-bg)}
 .job-status::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0}
 .job-status.completed{--job-tone:var(--message-success)}
 .job-status.preparing,.job-status.queued,.job-status.running{--job-tone:var(--accent)}
-.job-status.preview,.job-status.completed_with_warning,.job-status.interrupted{--job-tone:var(--warning)}
+.job-status.preview,.job-status.expired,.job-status.completed_with_warning,.job-status.interrupted{--job-tone:var(--warning)}
 .job-status.failed,.job-status.rollback_failed{--job-tone:var(--danger)}
 .job-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:13px}
 .job-actions .button{font-size:13px;min-height:32px;padding:5px 10px}
@@ -162,7 +166,7 @@ dialog h2{margin:0 0 18px;font-size:22px}
 .confirmation-list{max-height:240px;overflow:auto;display:grid;gap:8px}
 .confirmation-row{padding:10px 12px;border:1px solid var(--line);border-radius:8px}
 .confirmation-row strong{font-size:14px}
-.confirmation-row p{font-size:12px;color:var(--muted)}
+.confirmation-row p{font-size:12px;color:var(--muted);overflow-wrap:anywhere}
 .acknowledgement{display:flex;align-items:flex-start;gap:9px;font-size:13px;margin:20px 0}
 .acknowledgement input{flex-shrink:0;margin-top:3px}
 .dialog-actions{display:flex;justify-content:flex-end;gap:10px}

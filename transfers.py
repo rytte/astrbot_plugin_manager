@@ -230,6 +230,19 @@ class TransferService:
             key: copy.deepcopy(value) for key, value in job.items() if key in fields
         }
         result["expired"] = TransferService._expired(job)
+        if (
+            job["kind"] == "manifest_install"
+            and not job.get("selected")
+            and job.get("manifest", {}).get("schema_version") == 1
+        ):
+            result["preview_task"] = True
+            if job["status"] == "preview":
+                deadline = job.get(
+                    "preview_expires_at", job["created_at"] + PREVIEW_TTL
+                )
+                result.update(
+                    preview_expires_at=deadline, preview_expired=time.time() > deadline
+                )
         return result
 
     def history(self, owner: str) -> list[dict]:
@@ -557,17 +570,17 @@ class TransferService:
         if self.closing or self.deleting_jobs or (self.task and not self.task.done()):
             raise ValueError("已有导入导出任务运行或管家正在关闭，请稍后重试。")
 
-    def _start(self, job: dict, operation) -> dict:
+    def _start(self, job: dict, operation, *, preview: bool = False) -> dict:
         self._ensure_idle()
         if self.jobs.get(job["id"]) is not job:
             raise ValueError("任务记录已删除，请重新创建任务。")
         job["status"] = "queued"
         self._save(job)
         self.active_job = job["id"]
-        self.task = asyncio.create_task(self._run(job, operation))
+        self.task = asyncio.create_task(self._run(job, operation, preview=preview))
         return self.public_job(job)
 
-    async def _run(self, job: dict, operation) -> None:
+    async def _run(self, job: dict, operation, *, preview: bool = False) -> None:
         try:
             async with self.operation_lock:
                 if self.closing:
@@ -577,9 +590,13 @@ class TransferService:
                 self._phase(job, "预检")
                 await operation(job)
                 job["status"] = (
-                    "completed_with_warning" if job["warnings"] else "completed"
+                    "preview"
+                    if preview
+                    else ("completed_with_warning" if job["warnings"] else "completed")
                 )
-                self._phase(job, "完成")
+                self._phase(
+                    job, "清单预检完成，等待选择插件及安装来源" if preview else "完成"
+                )
         except asyncio.CancelledError:
             job.update(
                 status="interrupted",

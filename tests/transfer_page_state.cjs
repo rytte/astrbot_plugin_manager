@@ -63,9 +63,14 @@ async function main() {
   let failState = false, failMetadataSync = false, failDelete = false;
   let pendingDownload = null;
   let delayedPreview, failPreview = false;
+  let manifestResponse = null, failDraft = false;
   const bridge = {
     async ready() {}, onContext(handler) {handler({isDark: true});},
-    async apiGet(endpoint) {
+    async apiGet(endpoint, params) {
+      if (endpoint === "manage/manifest-preview") {
+        const job = state.jobs.find(job => job.id === params.id);
+        return job && ["queued", "running"].includes(job.status) ? {ready: false, job: structuredClone(job)} : structuredClone(manifestResponse);
+      }
       if (endpoint === "manage/state") {
         if (failManagement) throw new Error("source unavailable");
         const response = structuredClone(management);
@@ -116,7 +121,21 @@ async function main() {
         state.jobs.unshift(job);
         return structuredClone(job);
       }
-      if (endpoint === "manage/manifest-install") return {id: "install-id"};
+      if (endpoint === "manage/manifest-draft") {
+        if (failDraft) throw new Error("选择保存失败");
+        manifestResponse.draft = structuredClone(body.draft); return {saved: true};
+      }
+      if (endpoint === "manage/manifest-recheck") {
+        const job = {...manifestResponse.job, id: "rechecked-id", status: "running", phase: "重新解析来源", preview_expired: false};
+        manifestResponse = {...manifestResponse, job: {...job, status: "preview"}, draft: null};
+        state.jobs.unshift(job); state.busy = true;
+        return {ready: false, job};
+      }
+      if (endpoint === "manage/manifest-install") {
+        const job = state.jobs.find(job => job.id === body.id);
+        if (job) {job.status = "completed"; job.preview_task = false;}
+        return {id: "install-id"};
+      }
       throw new Error("Unexpected endpoint " + endpoint);
     },
     async upload(endpoint) {
@@ -124,11 +143,14 @@ async function main() {
       assert.ok(!endpoint.includes("?"), "AstrBot native bridge rejects query strings in upload endpoints");
       if (endpoint === "transfer/upload/zip-token") return {job: {id: "zip-id", warnings: []}, astrbot_version: "4.27", plugins: [{...plugin, exists: false, config: true, data: true, problem: ""}]};
       assert.equal(endpoint, "manage/manifest-upload/source-token");
-      return {job: {id: "install-id", warnings: []}, expires_at: 2000000000, plugins: [
-        {market_plugin_id: "Alice/new", name: "new", directory: "new_dir", status: "install", observed_version: "1.0", version: "2.0"},
-        {market_plugin_id: "Alice/existing", name: "existing", status: "skip", observed_version: "1.0", version: "2.0"},
-        {market_plugin_id: "Alice/conflict", name: "conflict", status: "blocked", problem: "身份冲突"},
+      manifestResponse = {ready: true, job: {id: "install-id", kind: "manifest_install", status: "preview", phase: "等待选择", preview_task: true, preview_expires_at: 2000000000, created_at: 100, results: [], warnings: []}, expires_at: 2000000000, plugins: [
+        {id: "0", display_name: "新插件", market_plugin_id: "Alice/new", repo_url: "https://github.com/alice/new", default_source: "market", sources: [{kind: "market", name: "new", directory: "new_dir", status: "install", version: "2.0"}, {kind: "repository", name: "new", directory: "new_dir", status: "install", version: "2.1"}]},
+        {id: "1", display_name: "已有插件", market_plugin_id: "Alice/existing", repo_url: "", default_source: "market", sources: [{kind: "market", name: "existing", status: "skip", version: "2.0"}]},
+        {id: "2", display_name: "冲突插件", market_plugin_id: "Alice/conflict", repo_url: "", default_source: "market", sources: [{kind: "market", name: "conflict", status: "blocked", problem: "身份冲突"}]},
       ]};
+      const job = {...manifestResponse.job, status: "running", phase: "正在下载仓库包"};
+      state.jobs.unshift(job); state.busy = true;
+      return {ready: false, job};
     },
     async download(...args) {
       downloads.push(args);
@@ -324,10 +346,46 @@ async function main() {
   elements["import-format"].value = "manifest"; await elements["import-format"].trigger("change");
   elements["manifest-file"].files = [{name: "plugins.json", size: 100}];
   await elements["manifest-file"].trigger("change");
+  assert.equal(elements["manifest-progress"].hidden, false);
+  assert.match(elements["manifest-progress"].textContent, /下载仓库包/);
+  assert.equal(vm.runInContext("requesting", context), false, "Background preview must not block the page");
+  vm.runInContext("clearManifestPreview(); showTab('history-panel'); renderJobs(displayedJobs)", context);
+  const progressAction = descendants(elements["job-list"]).find(element => element.tagName === "button" && element.textContent === "查看预检进度");
+  assert.ok(progressAction);
+  assert.equal(progressAction.disabled, false, "An active background check remains readable while the instance is busy");
+  await progressAction.trigger("click");
+  assert.equal(elements["import-panel"].hidden, false);
+  assert.equal(elements["manifest-progress"].hidden, false);
+  Object.assign(state.jobs.find(job => job.id === "install-id"), manifestResponse.job); state.busy = false;
+  await vm.runInContext("pollJobs()", context);
+  assert.equal(elements["manifest-progress"].hidden, true);
   assert.equal(elements["manifest-preview"].hidden, false);
   assert.equal(vm.runInContext("installChoices.size", context), 1);
   const importChecks = descendants(elements["manifest-list"]).filter(element => element.tagName === "input");
   assert.deepEqual(importChecks.map(element => [element.checked, element.disabled]), [[true, false], [false, true], [false, true]]);
+  const sourceSelect = descendants(elements["manifest-list"]).find(element => element.tagName === "select");
+  assert.equal(sourceSelect.value, "market");
+  sourceSelect.value = "repository"; await sourceSelect.trigger("change");
+  assert.match(elements["manifest-list"].textContent, /https:\/\/github.com\/alice\/new/);
+  assert.equal(vm.runInContext("selectedManifestSource(manifestPreview.plugins[0]).version", context), "2.1");
+  assert.equal(manifestResponse.draft[0].source, "repository");
+  failDraft = true;
+  let savedCheck = descendants(elements["manifest-list"]).find(element => element.tagName === "input");
+  savedCheck.checked = false; await savedCheck.trigger("change");
+  assert.equal(elements["retry-manifest-draft"].hidden, false);
+  assert.equal(elements["install-manifest"].disabled, true);
+  failDraft = false; await elements["retry-manifest-draft"].trigger("click");
+  assert.equal(manifestResponse.draft[0].selected, false);
+  vm.runInContext("clearManifestPreview(); showTab('history-panel'); renderJobs(displayedJobs)", context);
+  const resumeAction = descendants(elements["job-list"]).find(element => element.tagName === "button" && element.textContent === "继续选择安装");
+  assert.ok(resumeAction);
+  await resumeAction.trigger("click");
+  assert.equal(elements["import-panel"].hidden, false);
+  assert.equal(elements["import-format"].value, "manifest");
+  assert.equal(vm.runInContext("selectedManifestSource(manifestPreview.plugins[0]).kind", context), "repository");
+  assert.equal(vm.runInContext("installChoices.size", context), 0, "A saved unchecked item must remain unchecked after reconnection");
+  savedCheck = descendants(elements["manifest-list"]).find(element => element.tagName === "input");
+  savedCheck.checked = true; await savedCheck.trigger("change");
   elements["import-format"].value = "zip"; await elements["import-format"].trigger("change");
   assert.equal(elements["bundle-import"].hidden, false);
   assert.equal(vm.runInContext("preview.job.id", context), zipPreview);
@@ -342,7 +400,7 @@ async function main() {
   elements.acknowledged.checked = true;
   await elements["confirmation-form"].trigger("submit"); await installing;
   const installation = posts.find(item => item.endpoint === "manage/manifest-install");
-  assert.deepEqual(Array.from(installation.body.ids), ["Alice/new"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(installation.body.selections)), [{id: "0", source: "repository"}]);
   assert.equal(installation.body.acknowledged, true);
   assert.equal(elements["manifest-preview"].hidden, true);
   assert.equal(vm.runInContext("preview.job.id", context), zipPreview);
@@ -644,5 +702,45 @@ async function main() {
   assert.equal(elements["source-dialog"].open, false);
   assert.equal(elements["source-message"].hidden, true);
   assert.equal(messageTimers.size, 0);
+
+  // An unavailable market cannot silently select a working repository.
+  vm.runInContext(`busy = false; requesting = false; installChoices.clear(); installSources.clear();
+    manifestPreview = {job: {id: 'sources', warnings: []}, expires_at: 2000000000, plugins: [
+      {id:'0',display_name:'双来源插件',market_plugin_id:'Alice/demo',repo_url:'https://github.com/alice/demo',default_source:'market',sources:[
+        {kind:'market',status:'blocked',problem:'市场离线'}, {kind:'repository',status:'install',name:'demo',version:'1.0'}]},
+      {id:'1',display_name:'仓库插件',market_plugin_id:'',repo_url:'https://github.com/alice/other',default_source:'repository',sources:[
+        {kind:'repository',status:'install',name:'other',version:'2.0'}]}
+    ]}; renderManifest();`, context);
+  let sourceChecks = descendants(elements["manifest-list"]).filter(element => element.tagName === "input");
+  assert.deepEqual(sourceChecks.map(element => element.disabled), [true, false]);
+  const fallbackSelect = descendants(elements["manifest-list"]).find(element => element.tagName === "select");
+  assert.equal(fallbackSelect.value, "market");
+  fallbackSelect.value = "repository"; await fallbackSelect.trigger("change");
+  assert.equal(vm.runInContext("installChoices.has('0')", context), true);
+  sourceChecks = descendants(elements["manifest-list"]).filter(element => element.tagName === "input");
+  assert.equal(sourceChecks[0].disabled, false);
+  assert.match(elements["manifest-list"].textContent, /https:\/\/github.com\/alice\/demo/);
+
+  // Expired preview records offer a new check rather than an unusable confirmation.
+  state.jobs = [{...manifestResponse.job, id: 'expired-preview', preview_expired: true, status: 'preview'}];
+  vm.runInContext("clearManifestPreview(); renderJobs(" + JSON.stringify(state.jobs) + ")", context);
+  assert.match(elements["job-list"].textContent, /预检已过期/);
+  assert.doesNotMatch(elements["job-list"].textContent, /等待确认|继续选择安装/);
+  const recheckAction = descendants(elements["job-list"]).find(element => element.tagName === "button" && element.textContent === "重新预检");
+  await recheckAction.trigger("click");
+  assert.equal(posts.at(-1).endpoint, "manage/manifest-recheck");
+  assert.equal(posts.at(-1).body.id, "expired-preview");
+  assert.equal(vm.runInContext("pendingManifestId", context), "rechecked-id");
+  assert.equal(elements["manifest-progress"].hidden, false);
+  Object.assign(state.jobs[0], manifestResponse.job); state.busy = false;
+  manifestResponse.draft = [{id:'0',source:'repository',selected:false}, {id:'1',source:'market',selected:false}, {id:'2',source:'market',selected:false}];
+  // A page initialization reconnects to the latest owned unfinished preview.
+  vm.runInContext("clearManifestPreview()", context);
+  await vm.runInContext("initialize()", context);
+  assert.equal(elements["import-panel"].hidden, false);
+  assert.equal(elements["manifest-preview"].hidden, false);
+  assert.equal(vm.runInContext("manifestPreview.job.id", context), "rechecked-id");
+  assert.equal(vm.runInContext("installChoices.size", context), 0);
+  assert.equal(vm.runInContext("selectedManifestSource(manifestPreview.plugins[0]).kind", context), "repository");
 }
 main().catch(error => {console.error(error); process.exitCode = 1;});

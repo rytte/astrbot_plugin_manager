@@ -2,6 +2,7 @@
 
 import json
 import time
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -16,6 +17,129 @@ from astrbot.dashboard.responses import ApiError
 from astrbot.dashboard.services.file_service import FileService
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+
+
+async def test_manifest_repository_upload_poll_and_selective_install(
+    web_client, monkeypatch
+):
+    env, client = web_client
+    name = "astrbot_plugin_repository_share"
+    url = "https://github.com/alice/repository_share"
+
+    async def download(source, path):
+        assert source == url
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr(
+                "metadata.yaml",
+                yaml.safe_dump(
+                    {
+                        "name": name,
+                        "author": "Alice",
+                        "version": "1.0",
+                        "desc": "Shared",
+                    }
+                ),
+            )
+            archive.writestr("main.py", "raise RuntimeError('must not execute')")
+
+    monkeypatch.setattr(
+        "astrbot_plugin_manager.manifests.download_repository_archive", download
+    )
+    state = (await client.get(management_endpoint("state"))).json()["data"]
+    manifest = {
+        "format": "astrbot-plugin-manager-manifest",
+        "schema_version": 1,
+        "plugins": [{"display_name": "分享插件", "repo_url": url}],
+    }
+    response = await client.post(
+        management_endpoint("manifest-upload/" + state["csrf"]),
+        files={
+            "file": ("plugins.json", json.dumps(manifest).encode(), "application/json")
+        },
+    )
+    assert response.status_code == 200, response.text
+    identifier = response.json()["data"]["job"]["id"]
+    await env.plugin.transfers.task
+    preview = await client.get(
+        management_endpoint("manifest-preview"), params={"id": identifier}
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["data"]["plugins"][0]["sources"][0]["status"] == "install"
+    other = jwt.encode(
+        {"username": "other", "exp": time.time() + 3600},
+        env.context.get_config()["dashboard"]["jwt_secret"],
+        algorithm="HS256",
+    )
+    denied = await client.get(
+        management_endpoint("manifest-preview"),
+        params={"id": identifier},
+        headers={"Authorization": "Bearer " + other},
+    )
+    assert denied.status_code == 400
+    draft = [{"id": "0", "source": "repository", "selected": False}]
+    saved = await client.post(
+        management_endpoint("manifest-draft"),
+        json={"csrf": state["csrf"], "id": identifier, "draft": draft},
+    )
+    assert saved.status_code == 200, saved.text
+    restored = await client.get(
+        management_endpoint("manifest-preview"), params={"id": identifier}
+    )
+    assert restored.json()["data"]["draft"] == draft
+    assert not (Path(env.manager.plugin_store_path) / name).exists()
+    other_state = (
+        await client.get(
+            management_endpoint("state"), headers={"Authorization": "Bearer " + other}
+        )
+    ).json()["data"]
+    for action, extra in [
+        ("manifest-draft", {"draft": draft}),
+        ("manifest-recheck", {}),
+    ]:
+        wrong_nonce = await client.post(
+            management_endpoint(action),
+            json={"csrf": "wrong", "id": identifier, **extra},
+        )
+        assert wrong_nonce.status_code == 403
+        wrong_owner = await client.post(
+            management_endpoint(action),
+            headers={"Authorization": "Bearer " + other},
+            json={"csrf": other_state["csrf"], "id": identifier, **extra},
+        )
+        assert wrong_owner.status_code == 400
+    body = {
+        "csrf": state["csrf"],
+        "id": identifier,
+        "selections": [{"id": "0", "source": "repository"}],
+        "acknowledged": False,
+    }
+    rejected = await client.post(management_endpoint("manifest-install"), json=body)
+    assert rejected.status_code == 400
+    body["acknowledged"] = True
+    body["csrf"] = "wrong"
+    rejected = await client.post(management_endpoint("manifest-install"), json=body)
+    assert rejected.status_code == 403
+    body["csrf"] = state["csrf"]
+    installed = await client.post(management_endpoint("manifest-install"), json=body)
+    assert installed.status_code == 200, installed.text
+    await env.plugin.transfers.task
+    assert env.plugin.transfers.get_job(identifier, "admin")["status"] == "completed"
+    assert env.prefs["plugin_install_sources"][name]["install_method"] == "repository"
+    replay = await client.post(
+        management_endpoint("manifest-recheck"),
+        json={"csrf": state["csrf"], "id": identifier},
+    )
+    assert replay.status_code == 400
+    env.manager.load.assert_not_awaited()
+    manifest["schema_version"] = 2
+    unsupported = await client.post(
+        management_endpoint("manifest-upload/" + state["csrf"]),
+        files={
+            "file": ("unsupported.json", json.dumps(manifest).encode(), "application/json")
+        },
+    )
+    assert unsupported.status_code == 400
+    assert "v1" in unsupported.json()["message"]
 
 
 @pytest.fixture
@@ -535,6 +659,10 @@ async def test_management_manifest_export_download_and_upload_are_private(
     env, client = web_client
     target = env.make_transfer_plugin()
     identifier = f"{target.author}/{target.name}"
+    monkeypatch.setattr(
+        "astrbot_plugin_manager.manifests.download_repository_archive",
+        AsyncMock(side_effect=ValueError("仓库暂不可用")),
+    )
     env.prefs["plugin_install_sources"] = {
         target.root_dir_name: {
             "install_method": "market",
@@ -599,7 +727,14 @@ async def test_management_manifest_export_download_and_upload_are_private(
         files={"file": ("manifest.json", downloaded.content, "application/json")},
     )
     assert uploaded.status_code == 200, uploaded.text
-    assert uploaded.json()["data"]["plugins"][0]["status"] == "skip"
+    pending = uploaded.json()["data"]
+    assert pending["ready"] is False
+    await env.plugin.transfers.task
+    checked = await client.get(
+        management_endpoint("manifest-preview"), params={"id": pending["job"]["id"]}
+    )
+    assert checked.status_code == 200, checked.text
+    assert checked.json()["data"]["plugins"][0]["sources"][0]["status"] == "skip"
     env.manager.load.assert_not_awaited()
     env.manager.install_plugin.assert_not_awaited()
     duplicated = json.dumps(manifest).replace(

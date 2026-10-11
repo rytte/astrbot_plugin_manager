@@ -124,7 +124,7 @@ async def test_code_only_backup_carries_sources_and_restores_them_pending(
         "get_online_plugins",
         AsyncMock(return_value=(market, None)),
     )
-    with pytest.raises(ValueError, match="尚未关联有效"):
+    with pytest.raises(ValueError, match="缺少可分享的来源"):
         await env.plugin.manifests.export([target.root_dir_name])
     selected = await sources.select(
         "admin",
@@ -960,7 +960,7 @@ async def test_busy_jobs_owner_expiration_and_interruptions_are_explicit(
 
 async def test_registered_routes_are_removed_on_termination(transfer_env):
     env = transfer_env
-    assert len(env.context.registered_web_apis) == 22
+    assert len(env.context.registered_web_apis) == 25
     await env.plugin.terminate()
     assert env.context.registered_web_apis == []
     assert env.plugin.transfers.closing

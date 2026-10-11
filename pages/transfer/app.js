@@ -22,6 +22,9 @@ let managementState = {plugins: []};
 let managementStatus = "loading", managementRequest = 0;
 let selectedRecord = null, bindingPreview = null, manifestPreview = null;
 let manifestSelections = new Set(), installChoices = new Set();
+const installSources = new Map();
+let pendingManifestId = null, manifestPreviewRequest = 0, manifestPreviewLoading = false;
+let manifestDraftQueue = Promise.resolve(), manifestDraftVersion = 0, manifestDraftSaving = false, manifestDraftError = false;
 const sourceLabels = {market: "插件市场", repository: "代码仓库", upload: "上传安装", bundle: "迁移包导入", unknown: "来源未知", builtin: "AstrBot 内置"};
 
 function node(tag, className, text) {
@@ -149,7 +152,8 @@ function manifestMode() {return elements["export-format"].value === "manifest";}
 function sourceRecord(directory) {return managementState.plugins.find(record => record.local.directory === directory);}
 function active(record) {return record.bindings.find(binding => binding.id === record.active_binding_id);}
 function official(record) {return record && record.bindings.some(binding => binding.kind === "market" && binding.registry_url === null && !["metadata_changed", "imported"].includes(binding.verification));}
-function eligible(record) {return record && !record.local.reserved && !record.local.problem && !record.identity_changed && official(record);}
+function shareableSources(record) {return record ? record.bindings.filter(binding => !["metadata_changed", "imported"].includes(binding.verification) && (binding.kind === "market" && binding.registry_url === null || binding.kind === "repository" && /^https:\/\//i.test(binding.repo_url))) : [];}
+function eligible(record) {return record && !record.local.reserved && !record.local.problem && !record.identity_changed && shareableSources(record).length > 0;}
 function sourceText(binding) {return binding ? (binding.kind === "market" ? (binding.registry_url ? "自定义市场 / " : "官方市场 / ") + binding.market_plugin_id : binding.repo_url) : "未绑定更新源";}
 function sourceKind(binding) {return !binding ? "未绑定" : binding.kind === "market" ? (binding.registry_url ? "自定义市场" : "官方市场") : "Git 仓库";}
 function sourceTime(value) {
@@ -189,7 +193,7 @@ function renderFormats() {
   document.documentElement.dataset.exportFormat = isManifest ? "manifest" : "zip";
   elements["zip-summary"].hidden = isManifest;
   elements["manifest-summary"].hidden = !isManifest;
-  elements["export-hint"].textContent = isManifest ? "接收者从官方市场安装当前版本；现有插件跳过。" : "按当前选择打包，读取导出时的实际内容。";
+  elements["export-hint"].textContent = isManifest ? "接收者可选择插件及安装来源；现有插件跳过。" : "按当前选择打包，读取导出时的实际内容。";
   const importingManifest = elements["import-format"].value === "manifest";
   elements["bundle-import"].hidden = importingManifest;
   elements["manifest-import"].hidden = !importingManifest;
@@ -274,7 +278,7 @@ function renderPlugins() {
     const selectCell = node("td", "check-cell");
     selectCell.append(checkbox("选择插件 " + plugin.name, choice.selected, blocked && !choice.selected, checked => {if (manifestMode()) {checked ? manifestSelections.add(plugin.directory) : manifestSelections.delete(plugin.directory);} else choice.selected = checked; renderPlugins(); renderSummary();}));
     const title = titleCell(plugin, true);
-    if (manifestMode()) title.append(node("div", eligible(record) ? "plugin-detail" : "plugin-error", eligible(record) ? "可分享 · 已关联官方市场" : "暂不能分享 · 请在来源管理中校验并关联官方市场"));
+    if (manifestMode()) title.append(node("div", eligible(record) ? "plugin-detail" : "plugin-error", eligible(record) ? "可分享 · " + (official(record) ? "已关联官方市场" : "已关联代码仓库") : "暂不能分享 · 请在来源管理中校验并关联市场或仓库"));
     else if (plugin.blocked) title.append(node("div", "plugin-error", plugin.blocked));
     const notice = metadataNotice(plugin, record);
     if (notice) title.append(notice);
@@ -331,8 +335,9 @@ function renderSummary() {
   elements.export.disabled = busy || requesting || (manifestMode() ? !manifestSelections.size || Array.from(manifestSelections).some(directory => !eligible(sourceRecord(directory))) : !selected.length || selectedPlugins.some(plugin => plugin.blocked));
   elements["export-format"].disabled = requesting;
   elements["import-format"].disabled = requesting;
-  elements["manifest-file"].disabled = busy || requesting || !managementState.csrf;
-  elements["install-manifest"].disabled = busy || requesting || !manifestPreview || !installChoices.size;
+  elements["manifest-file"].disabled = busy || requesting || manifestDraftSaving || !managementState.csrf;
+  elements["install-manifest"].disabled = busy || requesting || manifestDraftSaving || manifestDraftError || !manifestPreview || manifestPreviewExpired() || !installChoices.size;
+  renderManifestDraftStatus();
   elements["bundle-file"].disabled = busy || requesting;
   elements["execute-import"].disabled = busy || requesting || !preview || !Array.from(importChoices.values()).some(choice => choice.code || choice.config || choice.data);
   for (const kind of ["data", "config"]) {
@@ -361,7 +366,7 @@ function confirmOperation(title, plugins, notices) {
   elements["confirmation-list"].replaceChildren();
   for (const plugin of plugins) {
     const row = node("div", "confirmation-row");
-    row.append(node("strong", "", plugin.display_name || plugin.name), node("p", "", plugin.directory + " · " + plugin.description));
+    row.append(node("strong", "", plugin.display_name || plugin.name), node("p", "", (plugin.directory || plugin.name) + " · " + plugin.description));
     elements["confirmation-list"].append(row);
   }
   elements["confirmation-notices"].textContent = notices;
@@ -514,8 +519,8 @@ async function deleteJob(job) {
       elements["file-label"].textContent = "预检任务已删除，请重新选择插件包。";
       renderImportPreview();
     }
-    if (manifestPreview?.job.id === job.id) {
-      manifestPreview = null; installChoices.clear();
+    if (manifestPreview?.job.id === job.id || pendingManifestId === job.id) {
+      clearManifestPreview();
       elements["manifest-file"].value = "";
       renderManifest();
     }
@@ -557,7 +562,7 @@ function renderJobs(jobs) {
     const card = node("article", "job-card");
     const heading = node("div", "job-heading");
     const title = node("div", "job-heading-main");
-    title.append(node("span", "job-title", ({export: "导出插件包", import: "导入插件包", manifest_export: "导出插件清单", manifest_install: "清单安装"}[job.kind] || job.kind)), node("span", "pill job-status " + job.status, labels[job.status] || job.status));
+    title.append(node("span", "job-title", (job.preview_task && ["queued", "running"].includes(job.status) ? "清单预检" : ({export: "导出插件包", import: "导入插件包", manifest_export: "导出插件清单", manifest_install: "清单安装"}[job.kind] || job.kind))), node("span", "pill job-status " + (job.preview_expired ? "expired" : job.status), job.preview_expired ? "预检已过期" : labels[job.status] || job.status));
     const menu = node("div", "job-menu");
     const toggle = node("button", "job-menu-toggle", "⋯");
     toggle.type = "button";
@@ -599,6 +604,16 @@ function renderJobs(jobs) {
     for (const warning of job.warnings) card.append(node("p", "job-error", warning));
     if (job.error) card.append(node("p", "job-error", job.error));
     const actions = node("div", "job-actions");
+    if (job.preview_task && ["queued", "running", "preview", "failed", "interrupted"].includes(job.status)) {
+      const recheck = job.preview_expired || ["failed", "interrupted"].includes(job.status);
+      const resume = node("button", "button secondary", recheck ? "重新预检" : job.status === "preview" ? "继续选择安装" : "查看预检进度");
+      resume.disabled = requesting || manifestDraftSaving || (recheck && (busy || !managementState.csrf));
+      resume.dataset.jobId = job.id; resume.dataset.jobControl = "resume";
+      resume.addEventListener("click", () => openManifestTask(job, recheck));
+      jobMenus.get(job.id).resume = resume;
+      actions.append(resume);
+      if (job.preview_expired) card.append(node("p", "job-meta", "原预检结果已过期，点击重新预检即可使用已上传的清单。"));
+    }
     for (const kind of ["package", "rollback", "manifest"]) {
       const available = kind === "package" ? job.kind === "export" && ["completed", "completed_with_warning"].includes(job.status) : kind === "manifest" ? job.kind === "manifest_export" && job.status === "completed" : job.backup_ready && !["queued", "running"].includes(job.status);
       if (!available) continue;
@@ -613,7 +628,7 @@ function renderJobs(jobs) {
   }
   if (!jobs.length) list.append(node("p", "empty", "暂无任务。导出插件包或清单，或上传文件开始迁移。"));
   const menu = jobMenus.get(focusedJob);
-  if (menu && focusedControl) (menu[focusedControl].disabled ? menu.toggle : menu[focusedControl]).focus();
+  if (menu?.[focusedControl]) (menu[focusedControl].disabled ? menu.toggle : menu[focusedControl]).focus();
 }
 
 function bindEvents() {
@@ -705,11 +720,13 @@ async function pollJobs() {
   if (previousBusy && !busy) {
     await loadState(true);
     const failed = finishedJobs.find(job => ["failed", "rollback_failed", "interrupted"].includes(job.status));
-    message(failed ? "任务执行未完成：" + (failed.error || "请查看任务记录中的原因和处理结果。") : "任务已结束，请查看任务记录、下载文件或按提示处理警告。", Boolean(failed), {task: true});
+    const checked = finishedJobs.find(job => job.preview_task && job.status === "preview");
+    message(failed ? "任务执行未完成：" + (failed.error || "请查看任务记录中的原因和处理结果。") : checked ? "清单预检完成，可继续选择插件及安装来源。" : "任务已结束，请查看任务记录、下载文件或按提示处理警告。", Boolean(failed), {task: true});
   }
   if (busy !== previousBusy) renderPlugins();
   if (selectedRecord) await loadManagement();
   previousBusy = busy;
+  await syncManifestTask(response.jobs);
 }
 
 async function initialize() {
@@ -721,6 +738,8 @@ async function initialize() {
     await loadState();
     bindEvents();
     showTab("export-panel");
+    const pending = state.jobs.find(job => job.preview_task && !job.preview_expired && ["queued", "running", "preview"].includes(job.status));
+    if (pending) await openManifestTask(pending);
     window.setInterval(() => {if (!requesting && !document.hidden) pollJobs().catch(error => message(error.message || "任务状态读取失败，请刷新页面。", true));}, 2000);
   } catch (error) {
     elements["boot-error"].hidden = false;
@@ -853,25 +872,131 @@ function renderSource() {
 async function exportManifest() {
   const job = await managementPost("manifest-export", {directories: Array.from(manifestSelections)});
   await pollJobs();
-  message("插件清单已导出，可分享给对方从官方市场安装。清单不包含配置和数据。");
+  message("插件分享清单已导出，接收者可选择插件及安装来源。清单不包含配置和数据。");
   await downloadJob(job, "manifest");
 }
+function manifestPreviewExpired() {return manifestPreview && Date.now() / 1000 > manifestPreview.expires_at;}
+function renderManifestDraftStatus() {
+  elements["manifest-selection-status"].textContent = manifestPreviewExpired() ? "预检已过期，请从任务记录重新预检。" : manifestDraftSaving ? "正在保存选择…" : manifestDraftError ? "选择尚未保存，请重试；保存后才能安装。" : "选择会自动保存，刷新页面后可继续。";
+  elements["retry-manifest-draft"].hidden = !manifestDraftError || manifestPreviewExpired();
+  elements["retry-manifest-draft"].disabled = requesting || manifestDraftSaving;
+}
+function clearManifestPreview() {
+  ++manifestPreviewRequest; ++manifestDraftVersion;
+  pendingManifestId = null; manifestPreview = null;
+  installChoices.clear(); installSources.clear();
+  manifestDraftSaving = false; manifestDraftError = false;
+  elements["manifest-progress"].hidden = true;
+  renderManifest();
+}
+function applyManifestResult(result) {
+  if (result.ready === false) {
+    pendingManifestId = result.job.id;
+    elements["manifest-progress"].hidden = false;
+    elements["manifest-progress"].textContent = result.job.phase || "正在解析清单来源…";
+    return;
+  }
+  pendingManifestId = null;
+  elements["manifest-progress"].hidden = true;
+  manifestPreview = result;
+  installChoices.clear(); installSources.clear();
+  if (result.draft) {
+    for (const choice of result.draft) {
+      installSources.set(choice.id, choice.source);
+      if (choice.selected) installChoices.add(choice.id);
+    }
+  } else for (const plugin of result.plugins) if (selectedManifestSource(plugin).status === "install") installChoices.add(plugin.id);
+  renderManifest(); renderSummary();
+}
+function saveManifestDraft() {
+  if (!manifestPreview || manifestPreviewExpired()) return Promise.resolve();
+  const identifier = manifestPreview.job.id, version = ++manifestDraftVersion;
+  const draft = manifestPreview.plugins.map(plugin => ({id: plugin.id, source: selectedManifestSource(plugin).kind, selected: installChoices.has(plugin.id)}));
+  manifestDraftSaving = true; manifestDraftError = false; renderSummary();
+  const operation = manifestDraftQueue.then(() => managementPost("manifest-draft", {id: identifier, draft}));
+  manifestDraftQueue = operation.catch(() => {});
+  return operation.catch(error => {
+    if (version === manifestDraftVersion && manifestPreview?.job.id === identifier) {
+      manifestDraftError = true;
+      message(error.message || "安装选择保存失败，请重试。", true);
+    }
+  }).finally(() => {
+    if (version === manifestDraftVersion) {manifestDraftSaving = false; renderSummary(); renderJobs(displayedJobs);}
+  });
+}
+async function openManifestTask(job, recheck = false) {
+  if (manifestDraftSaving) return;
+  return runRequest(async () => {
+    elements["import-format"].value = "manifest";
+    showTab("import-panel"); renderFormats();
+    if (!recheck && manifestPreview?.job.id === job.id && !manifestPreviewExpired()) {
+      elements["manifest-preview"].scrollIntoView({block: "start"}); return;
+    }
+    clearManifestPreview();
+    const current = manifestPreviewRequest;
+    const result = recheck ? await managementPost("manifest-recheck", {id: job.id}) : await bridge.apiGet("manage/manifest-preview", {id: job.id});
+    if (current !== manifestPreviewRequest) return;
+    applyManifestResult(result);
+    await pollJobs();
+    message(result.ready === false ? "清单正在后台预检，可离开页面，稍后从任务记录继续。" : "已恢复清单预检及保存的选择，请核对后安装。");
+  });
+}
+async function syncManifestTask(jobs) {
+  if (manifestPreview) {
+    const current = jobs.find(job => job.id === manifestPreview.job.id);
+    if (!current || current.status !== "preview") {clearManifestPreview(); renderSummary();}
+  }
+  if (!pendingManifestId || manifestPreviewLoading) return;
+  const job = jobs.find(job => job.id === pendingManifestId);
+  if (!job || !["queued", "running", "preview"].includes(job.status)) {
+    clearManifestPreview(); renderSummary();
+    message(job?.error || "清单预检任务已结束或已删除，请从任务记录检查结果。", true, {task: true}); return;
+  }
+  if (job.status !== "preview") {
+    elements["manifest-progress"].textContent = job.phase || "正在解析清单来源…"; return;
+  }
+  if (job.preview_expired) {clearManifestPreview(); renderSummary(); message("清单预检已过期，请从任务记录重新预检。", true, {task: true}); return;}
+  const current = manifestPreviewRequest;
+  manifestPreviewLoading = true;
+  try {
+    const result = await bridge.apiGet("manage/manifest-preview", {id: job.id});
+    if (current === manifestPreviewRequest) {applyManifestResult(result); message("清单预检完成，请选择要安装的插件并核对安装来源。");}
+  } finally {manifestPreviewLoading = false;}
+}
+function selectedManifestSource(plugin) {return plugin.sources.find(source => source.kind === (installSources.get(plugin.id) || plugin.default_source));}
 function renderManifest() {
   elements["manifest-preview"].hidden = !manifestPreview;
   if (!manifestPreview) return;
   elements["preview-expiry"].textContent = "有效至 " + new Date(manifestPreview.expires_at * 1000).toLocaleString("zh-CN");
   const body = elements["manifest-list"]; body.replaceChildren();
   for (const plugin of manifestPreview.plugins) {
-    const row = node("tr"), choice = node("td"), status = node("td");
-    choice.append(checkbox("安装 " + plugin.name, installChoices.has(plugin.market_plugin_id), plugin.status !== "install", checked => {checked ? installChoices.add(plugin.market_plugin_id) : installChoices.delete(plugin.market_plugin_id); renderSummary();}));
-    const title = titleCell({...plugin, version: "", status: ""});
-    title.append(node("div", "plugin-id", plugin.market_plugin_id));
-    status.append(node("div", plugin.status === "blocked" ? "plugin-error" : "plugin-detail", {install: "可安装 · 保持停用", skip: "本机已有 · 跳过", blocked: "无法安装"}[plugin.status]), node("div", "plugin-detail", plugin.problem || "下载后再次核对包内身份与依赖"));
-    row.append(choice, title, node("td", "", (plugin.observed_version || "未声明") + " / " + (plugin.version || "未知")), status); body.append(row);
+    const source = selectedManifestSource(plugin);
+    const row = node("tr"), choice = node("td"), status = node("td"), locator = node("td", "manifest-source");
+    const display = plugin.display_name || source.name || plugin.market_plugin_id || plugin.repo_url;
+    choice.append(checkbox("安装 " + display, installChoices.has(plugin.id), source.status !== "install" || manifestPreviewExpired(), checked => {checked ? installChoices.add(plugin.id) : installChoices.delete(plugin.id); return saveManifestDraft();}));
+    const title = titleCell({...source, display_name: display, name: source.name || "身份未确认", directory: source.directory || source.name || "身份未确认", version: source.version || "", status: ""});
+    if (source.author) title.append(node("div", "plugin-detail", "作者：" + source.author));
+    const select = node("select", "manifest-source-select");
+    select.setAttribute("aria-label", "选择 " + display + " 的安装来源");
+    for (const candidate of plugin.sources) {const option = node("option", "", candidate.kind === "market" ? "官方市场" : "代码仓库"); option.value = candidate.kind; select.append(option);}
+    select.value = source.kind; select.disabled = busy || requesting || manifestPreviewExpired() || plugin.sources.length < 2;
+    select.addEventListener("change", () => {
+      const previouslyAvailable = source.status === "install";
+      installSources.set(plugin.id, select.value);
+      const updated = selectedManifestSource(plugin);
+      if (updated.status !== "install") installChoices.delete(plugin.id);
+      else if (!previouslyAvailable) installChoices.add(plugin.id);
+      renderManifest(); renderSummary();
+      return saveManifestDraft();
+    });
+    locator.append(select, sourceAddress("plugin-detail manifest-locator", source.kind === "market" ? plugin.market_plugin_id : plugin.repo_url));
+    status.append(node("div", source.status === "blocked" ? "plugin-error" : "plugin-detail", {install: "可安装 · 保持停用", skip: "本机已有 · 跳过", blocked: "无法安装"}[source.status]), node("div", "plugin-detail", source.problem || "安装前核对包内身份与依赖"));
+    row.append(choice, title, locator, status); body.append(row);
   }
   const warnings = manifestPreview.job.warnings || [];
   elements["manifest-warnings"].hidden = !warnings.length;
   elements["manifest-warnings"].textContent = warnings.join("\n");
+  renderManifestDraftStatus();
 }
 function bindManagementEvents() {
   const closeSource = () => {dismissMessage(elements["source-message"]); elements["source-dialog"].close(); selectedRecord = null; bindingPreview = null;};
@@ -895,19 +1020,24 @@ function bindManagementEvents() {
     bindingPreview = null; await loadManagement(); message("来源关联已保存并设为当前更新源。");
   }));
   elements["manifest-file"].addEventListener("change", () => runRequest(async () => {
-    manifestPreview = null; installChoices.clear(); renderManifest();
+    clearManifestPreview();
     const file = elements["manifest-file"].files[0]; if (!file) return;
     if (file.size > 8 * 1024 * 1024) throw new Error("清单超过 8 MiB 限制。");
-    manifestPreview = await bridge.upload("manage/manifest-upload/" + encodeURIComponent(managementState.csrf), file);
-    installChoices = new Set(manifestPreview.plugins.filter(plugin => plugin.status === "install").map(plugin => plugin.market_plugin_id));
-    renderManifest(); message("清单预检完成，请核对要从官方市场安装的新插件。");
+    elements["manifest-progress"].hidden = false;
+    elements["manifest-progress"].textContent = "正在上传并解析清单来源，仓库安装包将先下载预检…";
+    try {
+      applyManifestResult(await bridge.upload("manage/manifest-upload/" + encodeURIComponent(managementState.csrf), file));
+      await pollJobs();
+      if (pendingManifestId) message("清单正在后台预检，可离开页面，稍后从任务记录继续。");
+    } catch (error) {clearManifestPreview(); throw error;}
   }));
+  elements["retry-manifest-draft"].addEventListener("click", saveManifestDraft);
   elements["install-manifest"].addEventListener("click", () => runRequest(async () => {
-    if (!manifestPreview || !installChoices.size) return;
-    const selected = manifestPreview.plugins.filter(plugin => installChoices.has(plugin.market_plugin_id));
-    if (!await confirmOperation("安装 " + selected.length + " 个新插件", selected.map(plugin => ({...plugin, description: plugin.market_plugin_id + " · 市场版本 " + plugin.version})), "仅从官方市场安装新插件，不覆盖已有插件，不自动安装依赖或启用。单项失败会记录结果；安装后请重启扫描并手动启用。")) return;
-    await managementPost("manifest-install", {id: manifestPreview.job.id, ids: Array.from(installChoices), acknowledged: true});
-    manifestPreview = null; installChoices.clear(); renderManifest(); busy = true;
+    if (!manifestPreview || manifestDraftSaving || manifestDraftError || manifestPreviewExpired() || !installChoices.size) return;
+    const selected = manifestPreview.plugins.filter(plugin => installChoices.has(plugin.id));
+    if (!await confirmOperation("安装 " + selected.length + " 个新插件", selected.map(plugin => {const source = selectedManifestSource(plugin); return {...source, display_name: plugin.display_name, description: (source.kind === "market" ? "官方市场 · " + plugin.market_plugin_id : "代码仓库 · " + plugin.repo_url) + " · 版本 " + source.version};}), "按所选来源安装新插件，不覆盖已有插件，不自动安装依赖或启用。单项失败会记录结果；安装后请重启扫描并手动启用。")) return;
+    await managementPost("manifest-install", {id: manifestPreview.job.id, selections: selected.map(plugin => ({id: plugin.id, source: selectedManifestSource(plugin).kind})), acknowledged: true});
+    clearManifestPreview(); busy = true;
     showTab("history-panel"); await pollJobs(); message("清单安装任务已启动，请在任务记录查看逐项结果。", false, {task: true});
   }));
 }

@@ -1,4 +1,4 @@
-"""Official-market-only sharing manifests and persistent, disabled installs."""
+"""Compact sharing manifests with explicit market or repository installs."""
 
 from __future__ import annotations
 
@@ -11,8 +11,9 @@ from astrbot.core.config.default import VERSION
 
 from .market_archive import download_market_archive, unpack_market_archive
 from .redaction import redact
+from .repository_archive import download_repository_archive
 from .service import is_market_id
-from .sources import fingerprint, now, repository_url
+from .sources import fingerprint, now, repository_url, same_repository
 from .transfer_bundle import (
     MAX_CONTENT,
     MAX_JSON,
@@ -29,51 +30,68 @@ from .transfer_bundle import (
 from .transfers import PREVIEW_TTL
 
 MANIFEST_FORMAT = "astrbot-plugin-manager-manifest"
+MANIFEST_VERSION = 1
+
+
+async def _file_work(function, *arguments, **keywords):
+    """Join file workers before cancellation permits cleanup or job deletion."""
+    worker = asyncio.create_task(asyncio.to_thread(function, *arguments, **keywords))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError as exc:
+        try:
+            await worker
+        finally:
+            raise exc
 
 
 def validate_manifest(value) -> dict:
-    exact_keys(value, {"format", "schema_version", "created_at", "plugins"})
     if (
-        value["format"] != MANIFEST_FORMAT
-        or type(value["schema_version"]) is not int
-        or value["schema_version"] != 1
+        not isinstance(value, dict)
+        or value.get("format") != MANIFEST_FORMAT
+        or type(value.get("schema_version")) is not int
+        or value.get("schema_version") != MANIFEST_VERSION
     ):
-        raise ValueError("插件清单格式或版本不受支持。")
-    if not isinstance(value["created_at"], str) or len(value["created_at"]) > 64:
-        raise ValueError("插件清单创建时间无效。")
+        raise ValueError(f"仅支持分享清单（v{MANIFEST_VERSION}），请重新导出清单。")
+    exact_keys(value, {"format", "schema_version", "plugins"})
+    value = copy.deepcopy(value)
     if not isinstance(value["plugins"], list) or not 1 <= len(value["plugins"]) <= 256:
         raise ValueError("插件清单须包含 1～256 个插件。")
     if len(json.dumps(value, ensure_ascii=False).encode("utf-8")) > MAX_JSON:
         raise ValueError("插件清单超过 8 MiB 限制。")
     seen = set()
+    repositories = []
     for entry in value["plugins"]:
+        if isinstance(entry, dict):
+            entry.setdefault("market_plugin_id", "")
+            entry.setdefault("repo_url", "")
         exact_keys(
             entry,
             {
                 "market_plugin_id",
-                "name",
-                "author",
-                "observed_version",
-                "version_policy",
-                "registry",
+                "display_name",
+                "repo_url",
             },
         )
         if any(
-            not isinstance(entry[field], str) or len(entry[field]) > 512
+            not isinstance(entry[field], str)
+            or len(entry[field]) > (2048 if field == "repo_url" else 512)
             for field in entry
         ):
             raise ValueError("插件清单字段须是有限长度字符串。")
-        if entry["registry"] != "official" or entry["version_policy"] != "latest":
-            raise ValueError("第一版清单只支持官方市场和 latest 版本策略。")
         identifier = entry["market_plugin_id"]
-        if (
-            not is_market_id(identifier)
-            or identifier != f"{entry['author']}/{entry['name']}"
-            or identifier.casefold() in seen
-        ):
-            raise ValueError("市场 ID 与插件身份不一致或重复。")
-        component(entry["name"], module=True)
-        seen.add(identifier.casefold())
+        if identifier:
+            if not is_market_id(identifier) or identifier.casefold() in seen:
+                raise ValueError("市场 ID 无效或重复。")
+            component(identifier.split("/", 1)[1], module=True)
+            seen.add(identifier.casefold())
+        if entry["repo_url"]:
+            url = repository_url(entry["repo_url"])
+            if any(same_repository(url, previous) for previous in repositories):
+                raise ValueError("清单包含重复仓库。")
+            repositories.append(url)
+        if not identifier and not entry["repo_url"]:
+            raise ValueError("每个插件至少需要市场 ID 或仓库地址，请先补全来源。")
     return copy.deepcopy(value)
 
 
@@ -87,8 +105,10 @@ class ManifestService:
         metadata = self.operations.web.resolve_market_plugin_entry_by_id(
             data, entry["market_plugin_id"]
         )
-        if not metadata or any(
-            metadata.get(field) != entry[field] for field in ("name", "author")
+        if (
+            not metadata
+            or f"{metadata.get('author')}/{metadata.get('name')}"
+            != entry["market_plugin_id"]
         ):
             raise ValueError("官方市场中缺少该 ID，或作者/插件名已变化。")
         component(metadata["name"], module=True)
@@ -101,12 +121,11 @@ class ManifestService:
                 "repo",
                 "download_url",
                 "commit_sha",
-                "astrbot_version",
             )
         }
         remote["repo"] = repository_url(remote["repo"])
         if not remote["download_url"]:
-            raise ValueError("官方市场未提供安装包，第一版不回退到仓库下载。")
+            raise ValueError("官方市场未提供安装包，请选择仓库来源。")
         return remote
 
     async def export(self, directories: list[str]) -> dict:
@@ -120,159 +139,362 @@ class ManifestService:
             record["local"]["directory"]: record
             for record in await self.sources.inventory()
         }
-        data, notice = await self.sources.official_market()
         entries = []
         for directory in directories:
             record = records.get(directory)
             if not record:
                 raise ValueError("所选插件已不存在，请刷新。")
             self.sources._editable(record)
-            binding = next(
+            bindings = sorted(
                 (
                     binding
                     for binding in record["bindings"]
-                    if binding["kind"] == "market"
-                    and binding["registry_url"] is None
-                    and binding.get("verification")
+                    if binding.get("verification")
                     not in {"metadata_changed", "imported"}
+                ),
+                key=lambda binding: binding["id"] != record["active_binding_id"],
+            )
+            market = next(
+                (
+                    binding
+                    for binding in bindings
+                    if binding["kind"] == "market" and binding["registry_url"] is None
                 ),
                 None,
             )
-            if not binding:
-                raise ValueError(
-                    f"{directory} 尚未关联有效的官方市场 ID，请先校验并绑定。"
-                )
+            repository = next(
+                (
+                    binding
+                    for binding in bindings
+                    if binding["kind"] == "repository" and binding.get("repo_url")
+                ),
+                market,
+            )
+            repo_url = ""
+            if repository and repository.get("repo_url"):
+                try:
+                    repo_url = repository_url(repository["repo_url"])
+                except ValueError:
+                    pass
             local = record["local"]
             entry = {
-                "market_plugin_id": binding["market_plugin_id"],
-                "name": local["name"],
-                "author": local["author"],
-                "observed_version": local["version"],
-                "version_policy": "latest",
-                "registry": "official",
+                "display_name": local["display_name"] or local["name"],
+                "market_plugin_id": market["market_plugin_id"] if market else "",
+                "repo_url": repo_url,
             }
-            self._remote(data, entry)
+            if not entry["market_plugin_id"] and not repo_url:
+                raise ValueError(
+                    f"{directory} 缺少可分享的来源，请先校验并关联官方市场或 HTTPS 仓库。"
+                )
             entries.append(entry)
         manifest = validate_manifest(
             {
                 "format": MANIFEST_FORMAT,
-                "schema_version": 1,
-                "created_at": now(),
+                "schema_version": MANIFEST_VERSION,
                 "plugins": entries,
             }
         )
-        return {"manifest": manifest, "notice": notice}
+        return {"manifest": manifest, "notice": None}
 
-    async def _plan(self, manifest: dict, data: dict) -> list[dict]:
+    def _check_local(self, remote: dict, locals_: list[dict]) -> dict:
+        name = component(remote["name"], module=True)
+        matches = [
+            local
+            for local in locals_
+            if local["name"].casefold() == name.casefold()
+            or local["directory"].casefold() == name.casefold()
+        ]
+        if matches:
+            if (
+                len(matches) == 1
+                and all(
+                    matches[0][field] == remote[field] for field in ("name", "author")
+                )
+                and not matches[0]["problem"]
+            ):
+                return {
+                    "status": "skip",
+                    "directory": matches[0]["directory"],
+                    "problem": "本机已有同身份插件，将跳过，不修改版本、来源或启停状态。",
+                }
+            raise ValueError("本机存在同名或同目录的不同身份插件。")
+        if safe_path(self.sources.root, name).exists():
+            raise ValueError("安装目标目录已存在，拒绝覆盖。")
+        return {"status": "install", "directory": name, "problem": ""}
+
+    async def _repository(self, job: dict, item: dict) -> dict:
+        directory = safe_path(
+            self.transfers.job_directory(job["id"]), "repository-" + item["id"]
+        )
+        directory.mkdir()
+        await self.transfers._require_space(MAX_CONTENT + 256 * 1024 * 1024)
+        url = repository_url(item["repo_url"])
+        archive = safe_path(directory, "download.zip")
+        await download_repository_archive(url, archive)
+        code = await _file_work(
+            unpack_market_archive, archive, safe_path(directory, "checked")
+        )
+        metadata = await _file_work(read_metadata, code)
+        if (
+            item["market_plugin_id"]
+            and f"{metadata['author']}/{metadata['name']}" != item["market_plugin_id"]
+        ):
+            raise ValueError("仓库中的作者或名称与清单市场 ID 不一致。")
+        return {
+            **{field: metadata[field] for field in ("name", "author", "version")},
+            "repo": url,
+            "download_url": "",
+            "staged_directory": directory.name,
+            "archive_sha256": await _file_work(digest, archive),
+        }
+
+    async def _plan(self, job: dict, data: dict, market_problem: str) -> list[dict]:
         locals_ = [record["local"] for record in await self.sources.inventory()]
         plan = []
-        for entry in manifest["plugins"]:
+        for index, entry in enumerate(job["manifest"]["plugins"]):
             item = {
                 **entry,
-                "status": "install",
-                "problem": "",
-                "directory": entry["name"],
+                "id": str(index),
+                "default_source": "market"
+                if entry["market_plugin_id"]
+                else "repository",
+                "sources": [],
             }
-            try:
-                remote = self._remote(data, entry)
-                item.update(remote=remote, version=remote["version"])
-                matches = [
-                    local
-                    for local in locals_
-                    if local["name"].casefold() == entry["name"].casefold()
-                    or local["directory"].casefold() == entry["name"].casefold()
-                ]
-                if matches:
-                    if (
-                        len(matches) == 1
-                        and all(
-                            matches[0][field] == entry[field]
-                            for field in ("name", "author")
-                        )
-                        and not matches[0]["problem"]
-                    ):
-                        item.update(
-                            status="skip",
-                            directory=matches[0]["directory"],
-                            problem="本机已有同身份插件，将跳过，不修改版本、来源或启停状态。",
-                        )
-                    else:
-                        raise ValueError("本机存在同名或同目录的不同身份插件。")
-                elif safe_path(self.sources.root, entry["name"]).exists():
-                    raise ValueError("安装目标目录已存在，拒绝覆盖。")
-            except ValueError as exc:
-                item.update(status="blocked", problem=redact(str(exc)))
+            for kind, exists in (
+                ("market", entry["market_plugin_id"]),
+                ("repository", entry["repo_url"]),
+            ):
+                if not exists:
+                    continue
+                option = {
+                    "kind": kind,
+                    "status": "blocked",
+                    "problem": "",
+                    "name": "",
+                    "author": "",
+                    "version": "",
+                    "directory": "",
+                }
+                try:
+                    if kind == "market" and market_problem:
+                        raise ValueError(market_problem)
+                    remote = (
+                        self._remote(data, entry)
+                        if kind == "market"
+                        else await self._repository(job, item)
+                    )
+                    option.update(
+                        remote=remote,
+                        **{
+                            field: remote[field]
+                            for field in ("name", "author", "version")
+                        },
+                    )
+                    option.update(self._check_local(remote, locals_))
+                except Exception as exc:
+                    option["problem"] = (
+                        redact(str(exc))
+                        if isinstance(exc, ValueError)
+                        else "来源预检失败，请检查网络、仓库地址或安装包格式。"
+                    )
+                item["sources"].append(option)
             plan.append(item)
+            self.transfers._phase(
+                job, f"正在解析来源：{index + 1}/{len(job['manifest']['plugins'])}"
+            )
         return plan
 
-    async def preview(self, owner: str, value: dict) -> dict:
+    def begin_preview(self, owner: str, value: dict) -> dict:
         manifest = validate_manifest(value)
         self.operations.ensure_writable()
         self.transfers._ensure_idle()
-        data, notice = await self.sources.official_market(fresh=True)
         job = self.transfers._new_job(owner, "manifest_install")
-        job.update(
-            status="preview", manifest=manifest, plan=await self._plan(manifest, data)
-        )
-        if notice:
-            job["warnings"].append(notice)
-        self.transfers._phase(job, "清单预检完成，等待确认")
-        return self.preview_result(job)
+        job["manifest"] = manifest
+        self.transfers._start(job, self._prepare, preview=True)
+        return self.read_preview(owner, job["id"])
 
-    def preview_result(self, job: dict) -> dict:
-        return {
-            "job": self.transfers.public_job(job),
-            "plugins": [
-                {key: value for key, value in item.items() if key != "remote"}
-                for item in job["plan"]
-            ],
-            "expires_at": job["created_at"] + PREVIEW_TTL,
-        }
+    async def _prepare(self, job: dict) -> None:
+        data, market_problem = await self._market_data(job["manifest"]["plugins"])
+        job["plan"] = await self._plan(job, data, market_problem)
+        job["preview_expires_at"] = time.time() + PREVIEW_TTL
 
-    async def start(
-        self, owner: str, identifier: str, ids: list[str], acknowledged: bool
-    ) -> dict:
-        self.operations.ensure_writable()
+    @staticmethod
+    def _deadline(job: dict) -> float:
+        return job.get("preview_expires_at", job["created_at"] + PREVIEW_TTL)
+
+    def _ready_job(self, owner: str, identifier: str) -> dict:
         job = self.transfers.get_job(identifier, owner)
         if (
             job["kind"] != "manifest_install"
             or job["status"] != "preview"
-            or time.time() > job["created_at"] + PREVIEW_TTL
+            or time.time() > self._deadline(job)
         ):
             raise ValueError("清单预检已过期或已执行，请重新预检。")
-        allowed = {
-            item["market_plugin_id"]
+        validate_manifest(job.get("manifest"))
+        return job
+
+    def recheck(self, owner: str, identifier: str) -> dict:
+        job = self.transfers.get_job(identifier, owner)
+        if (
+            job["kind"] != "manifest_install"
+            or job.get("selected")
+            or job["status"] not in {"preview", "failed", "interrupted"}
+        ):
+            raise ValueError("此任务不能重新预检，请重新上传清单。")
+        return self.begin_preview(owner, job.get("manifest"))
+
+    def save_draft(self, owner: str, identifier: str, draft: list[dict]) -> dict:
+        self.operations.ensure_writable()
+        job = self._ready_job(owner, identifier)
+        if not isinstance(draft, list) or len(draft) != len(job["plan"]):
+            raise ValueError("清单选择草稿不完整，请重新打开预检。")
+        options = {
+            item["id"]: {source["kind"]: source for source in item["sources"]}
             for item in job["plan"]
-            if item["status"] == "install"
+        }
+        seen = set()
+        for choice in draft:
+            exact_keys(choice, {"id", "source", "selected"})
+            if (
+                not isinstance(choice["id"], str)
+                or not isinstance(choice["source"], str)
+                or type(choice["selected"]) is not bool
+                or choice["id"] in seen
+                or choice["source"] not in options.get(choice["id"], {})
+                or (
+                    choice["selected"]
+                    and options[choice["id"]][choice["source"]]["status"] != "install"
+                )
+            ):
+                raise ValueError("清单选择草稿中的插件或来源无效。")
+            seen.add(choice["id"])
+        job["draft"] = copy.deepcopy(draft)
+        self.transfers._save(job)
+        return {"saved": True}
+
+    async def preview(self, owner: str, value: dict) -> dict:
+        """Await the background preview for local callers; HTTP uses polling."""
+        pending = self.begin_preview(owner, value)
+        await self.transfers.task
+        return self.read_preview(owner, pending["job"]["id"])
+
+    def read_preview(self, owner: str, identifier: str) -> dict:
+        job = self.transfers.get_job(identifier, owner)
+        if job["kind"] != "manifest_install":
+            raise ValueError("任务不是清单安装预检。")
+        validate_manifest(job.get("manifest"))
+        if job["status"] in {"queued", "running"}:
+            return {"job": self.transfers.public_job(job), "ready": False}
+        if job["status"] != "preview":
+            raise ValueError(job["error"] or "清单预检已执行或未完成，请重新上传。")
+        self._ready_job(owner, identifier)
+        return self.preview_result(job)
+
+    async def _market_data(self, entries: list[dict]) -> tuple[dict, str]:
+        if not any(entry.get("market_plugin_id") for entry in entries):
+            return {}, ""
+        try:
+            data, notice = await self.sources.official_market(fresh=True)
+            return data, "当前只能取得市场缓存，请联网后重新预检。" if notice else ""
+        except Exception as exc:
+            return {}, redact(str(exc)) if isinstance(
+                exc, ValueError
+            ) else "官方市场读取失败，请稍后重试或明确选择仓库来源。"
+
+    def preview_result(self, job: dict) -> dict:
+        return {
+            "ready": True,
+            "job": self.transfers.public_job(job),
+            "plugins": [
+                {
+                    **{key: value for key, value in item.items() if key != "sources"},
+                    "sources": [
+                        {key: value for key, value in source.items() if key != "remote"}
+                        for source in item["sources"]
+                    ],
+                }
+                for item in job["plan"]
+            ],
+            "expires_at": self._deadline(job),
+            "draft": copy.deepcopy(job.get("draft")),
+        }
+
+    async def start(
+        self, owner: str, identifier: str, selections: list[dict], acknowledged: bool
+    ) -> dict:
+        self.operations.ensure_writable()
+        job = self._ready_job(owner, identifier)
+        allowed = {
+            (item["id"], source["kind"])
+            for item in job["plan"]
+            for source in item["sources"]
+            if source["status"] == "install"
         }
         if (
             acknowledged is not True
-            or not isinstance(ids, list)
-            or not ids
-            or any(not isinstance(item, str) for item in ids)
-            or len(set(ids)) != len(ids)
-            or not set(ids) <= allowed
+            or not isinstance(selections, list)
+            or not selections
         ):
             raise ValueError("请确认来源与安装范围，只能选择通过预检的新插件。")
-        job["selected"] = ids
+        seen = set()
+        names = set()
+        for selection in selections:
+            exact_keys(selection, {"id", "source"})
+            if (
+                not isinstance(selection["id"], str)
+                or not isinstance(selection["source"], str)
+                or (selection["id"], selection["source"]) not in allowed
+                or selection["id"] in seen
+            ):
+                raise ValueError("插件或安装来源选择无效、重复或未通过预检。")
+            seen.add(selection["id"])
+            source = next(
+                source
+                for item in job["plan"]
+                if item["id"] == selection["id"]
+                for source in item["sources"]
+                if source["kind"] == selection["source"]
+            )
+            name = source["name"].casefold()
+            if name in names:
+                raise ValueError("所选来源解析到同名插件，请仅选择其中一项。")
+            names.add(name)
+        job["selected"] = copy.deepcopy(selections)
         return self.transfers._start(job, self._install)
 
     async def _install(self, job: dict) -> None:
-        # Fetch again after acquiring the shared task lock: previews do not authorize changed sources.
-        data, notice = await self.sources.official_market(fresh=True)
-        if notice:
-            raise ValueError("当前只能取得市场缓存，清单安装已停止，请联网后重新预检。")
-        current = await self._plan(job["manifest"], data)
-        previous = {item["market_plugin_id"]: item for item in job["plan"]}
-        for item in current:
-            identifier = item["market_plugin_id"]
-            if identifier not in job["selected"]:
-                continue
-            result = {"directory": item["directory"], "market_plugin_id": identifier}
+        entries = {item["id"]: item for item in job["plan"]}
+        data, market_problem = await self._market_data(
+            [
+                entries[selected["id"]]
+                for selected in job["selected"]
+                if selected["source"] == "market"
+            ]
+        )
+        for selected in job["selected"]:
+            entry = entries[selected["id"]]
+            option = next(
+                source
+                for source in entry["sources"]
+                if source["kind"] == selected["source"]
+            )
+            item = {**entry, **option, "source_kind": selected["source"]}
+            identifier = entry["market_plugin_id"] or entry["repo_url"]
+            result = {
+                "directory": option["directory"],
+                "market_plugin_id": entry["market_plugin_id"],
+                "source": selected["source"],
+            }
             try:
-                if item["status"] != "install" or fingerprint(
-                    item.get("remote")
-                ) != fingerprint(previous[identifier].get("remote")):
+                if selected["source"] == "market":
+                    if market_problem:
+                        raise ValueError(market_problem)
+                    if fingerprint(self._remote(data, entry)) != fingerprint(
+                        option["remote"]
+                    ):
+                        raise ValueError("市场条目已变化，请重新预检。")
+                locals_ = [record["local"] for record in await self.sources.inventory()]
+                if self._check_local(item["remote"], locals_)["status"] != "install":
                     raise ValueError(
                         "目标插件或市场条目已变化，请重新预检；未覆盖现有插件。"
                     )
@@ -301,31 +523,50 @@ class ManifestService:
     async def _install_one(self, job: dict, item: dict) -> None:
         directory = safe_path(
             self.transfers.job_directory(job["id"]),
-            "market-" + fingerprint(item["market_plugin_id"])[:24],
+            "install-" + item["id"],
         )
         directory.mkdir()
         try:
             await self.transfers._require_space(MAX_CONTENT + 256 * 1024 * 1024)
             archive = safe_path(directory, "download.zip")
-            await download_market_archive(item["remote"]["download_url"], archive)
-            code = await asyncio.to_thread(
-                unpack_market_archive, archive, safe_path(directory, "checked")
-            )
-            metadata = await asyncio.to_thread(read_metadata, code)
+            if item["source_kind"] == "market":
+                await download_market_archive(item["remote"]["download_url"], archive)
+                code = await _file_work(
+                    unpack_market_archive, archive, safe_path(directory, "checked")
+                )
+            else:
+                staged = safe_path(
+                    self.transfers.job_directory(job["id"]),
+                    item["remote"]["staged_directory"],
+                )
+                archive = safe_path(staged, "download.zip")
+                if (
+                    await _file_work(digest, archive)
+                    != item["remote"]["archive_sha256"]
+                ):
+                    raise ValueError("仓库预检安装包已变化，请重新上传清单。")
+                code = await _file_work(
+                    unpack_market_archive, archive, safe_path(directory, "checked")
+                )
+            metadata = await _file_work(read_metadata, code)
             if any(
                 metadata[field] != item["remote"][field]
                 for field in ("name", "author", "version")
             ):
-                raise ValueError("下载包中的作者、名称或版本与官方市场不一致。")
-            await asyncio.to_thread(check_environment, code, VERSION)
+                raise ValueError(
+                    "安装包中的作者、名称或版本与所选来源的预检信息不一致。"
+                )
+            await _file_work(check_environment, code, VERSION)
             # Copy only sanitized source files, discarding .git, virtualenvs and bytecode.
             stage = safe_path(directory, "stage")
-            await asyncio.to_thread(copy_tree, code, stage, code=True)
+            await _file_work(copy_tree, code, stage, code=True)
             module = f"data.plugins.{metadata['name']}.main"
             artifact = {
                 "directory": metadata["name"],
-                "sha256": await asyncio.to_thread(digest, archive),
+                "sha256": await _file_work(digest, archive),
                 "market_plugin_id": item["market_plugin_id"],
+                "source": item["source_kind"],
+                "repo_url": item["remote"]["repo"],
             }
             async with self.operations.manager._pm_lock:
                 self.transfers.in_critical = True
@@ -335,7 +576,7 @@ class ManifestService:
                     if any(
                         local["name"].casefold() == metadata["name"].casefold()
                         or local["directory"].casefold() == metadata["name"].casefold()
-                        for local in await asyncio.to_thread(self.sources._locals)
+                        for local in await _file_work(self.sources._locals)
                     ):
                         raise ValueError("安装期间本机新增了同名插件，拒绝覆盖。")
                     target = safe_path(self.sources.root, metadata["name"])
@@ -358,7 +599,7 @@ class ManifestService:
                         "inactivated_plugins", list(dict.fromkeys([*inactive, module]))
                     )
                     # rename is same-volume and does not overwrite an existing directory.
-                    await asyncio.to_thread(stage.rename, target)
+                    await _file_work(stage.rename, target)
                     installed = True
                     records = await self.operations.web.get_plugin_install_sources()
                     records[metadata["name"]] = {
@@ -366,17 +607,19 @@ class ManifestService:
                         "root_dir_name": metadata["name"],
                         "name": metadata["name"],
                         "author": metadata["author"],
-                        "install_method": "market",
+                        "install_method": item["source_kind"],
                         "registry_url": None,
                         "registry_name": "Default",
-                        "market_plugin_id": item["market_plugin_id"],
+                        "market_plugin_id": item["market_plugin_id"]
+                        if item["source_kind"] == "market"
+                        else "",
                         "repo": item["remote"]["repo"],
                         "download_url": item["remote"]["download_url"],
                         "installed_at": now(),
                     }
                     await self.operations.web.save_plugin_install_sources(records)
                     await self.sources.observe_install(
-                        metadata["name"], "market", job["owner"]
+                        metadata["name"], item["source_kind"], job["owner"]
                     )
                     job.setdefault("installed_artifacts", []).append(artifact)
                     job.pop("pending_install", None)
@@ -384,7 +627,7 @@ class ManifestService:
                     if snapshot is not None:
                         try:
                             if installed:
-                                await asyncio.to_thread(target.rename, stage)
+                                await _file_work(target.rename, stage)
                             await self.sources.restore_sources(snapshot)
                             current = await self.transfers.preferences.global_get(
                                 "inactivated_plugins", []
@@ -409,10 +652,10 @@ class ManifestService:
                 finally:
                     self.transfers.in_critical = False
         finally:
-            await asyncio.to_thread(
+            await _file_work(
                 remove_path, self.transfers.job_directory(job["id"]), directory.name
             )
 
     @staticmethod
     async def download_export(path, manifest: dict) -> None:
-        await asyncio.to_thread(write_json, path, manifest)
+        await _file_work(write_json, path, manifest)
