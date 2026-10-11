@@ -185,6 +185,65 @@ async def test_state_rules_and_csrf_through_real_extension_router(web_client):
     assert denied.status_code == 400
 
 
+async def test_export_current_selection_without_saving_through_router(web_client):
+    env, client = web_client
+    target = env.make_transfer_plugin()
+    transfers = env.plugin.transfers
+    state = (await client.get(endpoint("state"))).json()["data"]
+    selection = {"directory": target.root_dir_name, "config": False, "data": False}
+    preview = await client.post(
+        endpoint("export-preview"),
+        json={"csrf": state["csrf"], "selections": [selection]},
+    )
+    assert preview.status_code == 200, preview.text
+    snapshot = preview.json()["data"]["selections"]
+    assert snapshot[0]["name"] == target.name
+    assert snapshot[0]["plugin_id"] == target.plugin_id
+    for csrf, acknowledged, expected in (
+        ("wrong", True, 403),
+        (state["csrf"], False, 400),
+    ):
+        response = await client.post(
+            endpoint("export"),
+            json={"csrf": csrf, "selections": snapshot, "acknowledged": acknowledged},
+        )
+        assert response.status_code == expected
+        assert not transfers.jobs
+    response = await client.post(
+        endpoint("export"),
+        json={"csrf": state["csrf"], "selections": snapshot, "acknowledged": True},
+    )
+    assert response.status_code == 200, response.text
+    await transfers.task
+    assert transfers.get_job(response.json()["data"]["id"], "admin")["status"] == (
+        "completed"
+    )
+    assert not transfers.rule_path.exists()
+
+
+@pytest.mark.parametrize("action", ["export-preview", "export"])
+@pytest.mark.parametrize(
+    "selections", [None, {}, [], [{"directory": "../outside"}]]
+)
+async def test_invalid_current_export_selection_does_not_fall_back_to_rule(
+    web_client, action, selections
+):
+    env, client = web_client
+    target = env.make_transfer_plugin()
+    transfers = env.plugin.transfers
+    saved = await transfers.save_rule(
+        [{"directory": target.root_dir_name, "config": False, "data": False}]
+    )
+    state = (await client.get(endpoint("state"))).json()["data"]
+    body = {"csrf": state["csrf"], "selections": selections}
+    if action == "export":
+        body["acknowledged"] = True
+    response = await client.post(endpoint(action), json=body)
+    assert response.status_code == 400, response.text
+    assert not transfers.jobs
+    assert transfers.rule() == saved
+
+
 @pytest.mark.parametrize(
     "claims",
     [

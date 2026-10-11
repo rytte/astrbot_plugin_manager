@@ -169,6 +169,75 @@ async def test_rule_persists_components_and_can_be_cleared(transfer_env):
         await restarted.export_preview()
 
 
+@pytest.mark.parametrize("existing_rule", [False, True])
+async def test_current_selection_export_is_independent_of_saved_rule(
+    transfer_env, existing_rule
+):
+    env = transfer_env
+    target = env.make_transfer_plugin()
+    other = env.make_transfer_plugin(name="other", directory="other_dir")
+    transfers = env.plugin.transfers
+    if existing_rule:
+        await transfers.save_rule(
+            [{"directory": other.root_dir_name, "config": False, "data": False}]
+        )
+    saved_before = transfers.rule()
+    preview = await transfers.export_preview(
+        [{"directory": target.root_dir_name, "config": False, "data": False}]
+    )
+    assert transfers.rule() == saved_before
+    assert transfers.rule_path.exists() == existing_rule
+    assert preview["selections"][0]["plugin_id"] == target.plugin_id
+    if existing_rule:
+        # Another page may change the reusable rule while confirmation is open.
+        await transfers.save_rule([])
+    saved_after = transfers.rule()
+    async with env.manager._pm_lock:
+        started = await transfers.start_export(
+            "admin", None, True, selections=preview["selections"]
+        )
+        # The queued job owns a copy, including its component choices.
+        preview["selections"][0].update(directory=other.root_dir_name, data=True)
+    await transfers.task
+    job = transfers.get_job(started["id"], "admin")
+    assert job["status"] == "completed", job
+    package = transfers.download(job["id"], "admin", "package")
+    manifest = unpack(package, env.root / "current-export")
+    assert [item["directory"] for item in manifest["plugins"]] == [
+        target.root_dir_name
+    ]
+    assert not job["rule"]["selections"][0]["data"]
+    assert transfers.rule() == saved_after
+    assert transfers.rule_path.exists() == existing_rule
+
+
+@pytest.mark.parametrize("change", ["identity", "configuration", "missing"])
+async def test_current_selection_export_rechecks_after_confirmation(
+    transfer_env, change
+):
+    env = transfer_env
+    target = env.make_transfer_plugin(active=True)
+    transfers = env.plugin.transfers
+    config = transfers.config_root / (target.root_dir_name + "_config.json")
+    config.write_text('{"enabled": true}', encoding="utf-8")
+    preview = await transfers.export_preview(
+        [{"directory": target.root_dir_name, "config": True, "data": True}]
+    )
+    if change == "identity":
+        preview["selections"][0]["plugin_id"] = "Another/plugin"
+    elif change == "configuration":
+        config.unlink()
+    else:
+        shutil.rmtree(transfers.code_root / target.root_dir_name)
+    with pytest.raises(ValueError):
+        await transfers.start_export(
+            "admin", None, True, selections=preview["selections"]
+        )
+    assert not transfers.jobs
+    assert not transfers.rule_path.exists()
+    env.manager._terminate_plugin.assert_not_awaited()
+
+
 async def test_export_codes_do_not_import_code_or_include_unselected_artifacts(
     transfer_env, tmp_path
 ):

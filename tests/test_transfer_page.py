@@ -127,17 +127,18 @@ async function main() {
     createTextNode(text) {const element = new Element("text"); element.textContent = text; return element;},
   };
   const plugin = {
-    directory: "demo_dir", name: "demo", display_name: "<script>展示文本</script>",
+    directory: "demo_dir", name: "demo", plugin_id: "Alice/demo", display_name: "<script>展示文本</script>",
     version: "1.0.0", status: "enabled", blocked: "", ranges: [],
     data_available: true, config_available: true, code_size: 1024,
     config_size: 32, data_size: 2048, kv_count: 1,
   };
   const state = {
     csrf: "test", busy: false, plugins: [plugin], jobs: [],
-    rule: {rule_version: 1, updated_at: null, selections: []},
+    rule: {rule_version: 1, updated_at: 50, selections: [{directory: plugin.directory, name: plugin.name, plugin_id: plugin.plugin_id, config: true, data: true}]},
     limits: {archive_bytes: 256 * 1024 * 1024},
   };
   let posts = 0;
+  const exports = [];
   const bridge = {
     async ready() {}, onContext(handler) {handler({isDark: true});},
     async apiGet(endpoint) {
@@ -147,10 +148,11 @@ async function main() {
     async apiPost(endpoint, body) {
       posts += 1;
       if (endpoint === "transfer/rule") {
-        state.rule = {rule_version: 1, updated_at: 100, selections: body.selections};
+        state.rule = {rule_version: 1, updated_at: 100, selections: body.selections.map(item => ({...item, name: plugin.name, plugin_id: plugin.plugin_id}))};
         return structuredClone(state.rule);
       }
-      if (endpoint === "transfer/export-preview") return {plugins: [{...plugin, config: false, data: false}]};
+      if (endpoint === "transfer/export-preview") return {plugins: body.selections.map(item => ({...plugin, ...item})), selections: body.selections.map(item => ({...item, name: plugin.name, plugin_id: plugin.plugin_id}))};
+      if (endpoint === "transfer/export") {exports.push(body); return {id: "export-id"};}
       throw new Error("Unexpected endpoint " + endpoint);
     },
     async upload(endpoint) {
@@ -171,12 +173,23 @@ async function main() {
   assert.equal(elements["boot-error"].hidden, true, elements["boot-error"].textContent);
   assert.equal(document.documentElement.dataset.theme, "dark");
   assert.ok(elements["plugin-list"].textContent.includes(plugin.display_name));
+  assert.equal(elements["selected-count"].textContent, "0");
+  assert.equal(elements["apply-rule"].disabled, false);
   assert.equal(elements.export.disabled, true);
+  await elements["apply-rule"].trigger("click");
+  assert.equal(elements["selected-count"].textContent, "1");
+  assert.equal(elements["data-count"].textContent, "1 个");
+  assert.equal(elements["config-count"].textContent, "1 个");
+  assert.equal(elements["save-rule"].disabled, true);
+  await elements.refresh.trigger("click");
+  assert.equal(elements["selected-count"].textContent, "1");
+  await vm.runInContext("loadState()", context);
+  assert.equal(elements["selected-count"].textContent, "0");
   elements["select-all"].checked = true;
   await elements["select-all"].trigger("change");
   assert.equal(elements["selected-count"].textContent, "1");
   assert.equal(elements["save-rule"].disabled, false);
-  assert.equal(elements.export.disabled, true);
+  assert.equal(elements.export.disabled, false);
   await elements["save-rule"].trigger("click");
   assert.equal(elements["save-rule"].disabled, true);
   assert.equal(elements.export.disabled, false);
@@ -186,6 +199,24 @@ async function main() {
   await elements["confirmation-cancel"].trigger("click");
   await exporting;
   assert.equal(posts, 2);
+  // An unsaved selection can be confirmed and exported without changing the rule.
+  const savedRule = JSON.stringify(state.rule);
+  elements["bulk-data"].checked = true;
+  await elements["bulk-data"].trigger("change");
+  assert.equal(elements["save-rule"].disabled, false);
+  assert.equal(elements.export.disabled, false);
+  const currentExport = elements.export.trigger("click");
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(elements["apply-rule"].disabled, true);
+  elements.acknowledged.checked = true;
+  await elements["confirmation-form"].trigger("submit", {preventDefault() {}});
+  await currentExport;
+  assert.equal(exports.length, 1);
+  assert.equal(exports[0].selections[0].data, true);
+  assert.equal(exports[0].selections[0].plugin_id, plugin.plugin_id);
+  assert.equal(JSON.stringify(state.rule), savedRule);
+  await elements["apply-rule"].trigger("click");
+  assert.equal(elements["data-count"].textContent, "0 个");
   elements["bundle-file"].files = [{name: "test.zip", size: 100}];
   await elements["bundle-file"].trigger("change");
   assert.equal(elements["import-preview"].hidden, false);
@@ -196,7 +227,29 @@ async function main() {
   assert.equal(elements["execute-import"].disabled, false);
   state.rule.selections.push({directory: "missing_dir", name: "missing", config: false, data: false});
   await vm.runInContext("loadState(true)", context);
-  assert.match(elements["plugin-list"].textContent, /已保存规则中的插件不存在/);
+  assert.doesNotMatch(elements["plugin-list"].textContent, /missing/);
+  const beforeApply = vm.runInContext("JSON.stringify(selections())", context);
+  await elements["apply-rule"].trigger("click");
+  assert.match(elements.message.textContent, /规则未应用.*插件不存在/);
+  assert.equal(vm.runInContext("JSON.stringify(selections())", context), beforeApply);
+  state.rule.selections.pop();
+  state.rule.selections[0].plugin_id = "Another/demo";
+  await vm.runInContext("loadState(true)", context);
+  await elements["apply-rule"].trigger("click");
+  assert.match(elements.message.textContent, /规则未应用.*身份已变化/);
+  assert.equal(vm.runInContext("JSON.stringify(selections())", context), beforeApply);
+  state.rule.selections[0].plugin_id = plugin.plugin_id;
+  state.rule.selections[0].config = true;
+  state.plugins[0].config_available = false;
+  await vm.runInContext("loadState(true)", context);
+  await elements["apply-rule"].trigger("click");
+  assert.match(elements.message.textContent, /规则未应用.*配置不存在/);
+  assert.equal(vm.runInContext("JSON.stringify(selections())", context), beforeApply);
+  await elements["clear-selection"].trigger("click");
+  assert.equal(elements.export.disabled, true);
+  await elements["save-rule"].trigger("click");
+  assert.equal(state.rule.selections.length, 0);
+  assert.equal(elements["apply-rule"].disabled, true);
 }
 main().catch(error => {console.error(error); process.exitCode = 1;});
 """

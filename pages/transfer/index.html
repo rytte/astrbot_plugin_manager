@@ -26,11 +26,11 @@
           <div class="summary-number"><strong id="selected-count">0</strong><span>个插件</span></div>
           <div id="zip-summary"><dl><div><dt>附带标准数据</dt><dd id="data-count">0 个</dd></div><div><dt>附带当前配置</dt><dd id="config-count">0 个</dd></div><div><dt>文件预计大小</dt><dd id="selected-size">—</dd></div></dl>
           <p class="muted small" title="按所选文件大小估算，不含键值数据编码与压缩开销。">实际大小以导出文件为准。</p>
-          <div id="rule-status" class="rule-status">尚未保存导出规则</div>
-          <button id="save-rule" class="button secondary full" disabled>保存导出规则</button>
+          <div class="rule-tools"><p id="rule-status" class="rule-status">可保存常用选择，下次一键应用</p>
+          <div class="rule-actions"><button id="apply-rule" class="button secondary" disabled>应用已保存规则</button><button id="save-rule" class="button secondary" disabled>保存规则</button></div></div>
           </div><div id="manifest-summary" class="muted small" hidden>只分享官方市场插件列表，不包含代码、配置和数据。尚未关联市场的插件可点击「来源管理」进行绑定。</div>
-          <button id="export" class="button primary full" disabled>按已保存规则导出 <span aria-hidden="true">↗</span></button>
-          <p id="export-hint" class="muted small">保存规则不产生备份。导出读取执行时的实际内容。</p>
+          <button id="export" class="button primary full" disabled>导出插件包 <span aria-hidden="true">↗</span></button>
+          <p id="export-hint" class="muted small">按当前选择打包，读取导出时的实际内容。</p>
         </section>
         <details class="card guide" data-zip-only>
           <summary>备份说明</summary>

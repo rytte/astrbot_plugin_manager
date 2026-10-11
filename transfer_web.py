@@ -165,13 +165,30 @@ class TransferWeb:
                     exact_keys(body, {"csrf", "selections"})
                     data = await self.transfers.save_rule(body["selections"])
                 elif action == "export-preview":
-                    exact_keys(body, {"csrf"})
-                    data = await self.transfers.export_preview()
+                    if "selections" in body:
+                        exact_keys(body, {"csrf", "selections"})
+                        if not isinstance(body["selections"], list):
+                            raise ValueError("插件选择必须为列表。")
+                        data = await self.transfers.export_preview(body["selections"])
+                    else:
+                        exact_keys(body, {"csrf"})
+                        data = await self.transfers.export_preview()
                 elif action == "export":
-                    exact_keys(body, {"csrf", "rule_updated_at", "acknowledged"})
-                    data = await self.transfers.start_export(
-                        owner, body["rule_updated_at"], body["acknowledged"]
-                    )
+                    if "selections" in body:
+                        exact_keys(body, {"csrf", "selections", "acknowledged"})
+                        if not isinstance(body["selections"], list):
+                            raise ValueError("插件选择必须为列表。")
+                        data = await self.transfers.start_export(
+                            owner,
+                            None,
+                            body["acknowledged"],
+                            selections=body["selections"],
+                        )
+                    else:
+                        exact_keys(body, {"csrf", "rule_updated_at", "acknowledged"})
+                        data = await self.transfers.start_export(
+                            owner, body["rule_updated_at"], body["acknowledged"]
+                        )
                 elif action == "import":
                     exact_keys(body, {"csrf", "id", "selections", "acknowledged"})
                     data = await self.transfers.start_import(

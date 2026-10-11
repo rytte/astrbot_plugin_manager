@@ -214,7 +214,7 @@ async function main() {
   elements["export-format"].value = "zip"; await elements["export-format"].trigger("change");
   assert.equal(vm.runInContext("JSON.stringify(selections())", context), zipSelections);
   assert.equal(elements["save-rule"].disabled, false);
-  assert.equal(elements.export.disabled, true);
+  assert.equal(elements.export.disabled, false);
 
   // Source management opens from the plugin row and handles errors in its dialog.
   const sourceButton = descendants(elements["plugin-list"]).find(element => element.tagName === "button" && element.textContent === "来源管理");

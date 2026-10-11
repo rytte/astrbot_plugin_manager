@@ -397,8 +397,15 @@ class TransferService:
             return await self._save_rule(selections)
 
     async def _save_rule(self, selections: list[dict]) -> dict:
+        rule = await self._selection_rule(selections)
+        await asyncio.to_thread(write_json, self.rule_path, rule)
+        return rule
+
+    async def _selection_rule(self, selections: list[dict]) -> dict:
+        """Capture identities for a selection without changing the saved rule."""
+        self._validate_selections(selections)
         saved = []
-        for selection in selections:
+        for selection in copy.deepcopy(selections):
             source = await asyncio.to_thread(self._source, selection["directory"])
             self._check_components(source, selection)
             saved.append(
@@ -408,9 +415,7 @@ class TransferService:
                     "plugin_id": source["metadata"]["plugin_id"],
                 }
             )
-        rule = {"rule_version": 1, "updated_at": time.time(), "selections": saved}
-        await asyncio.to_thread(write_json, self.rule_path, rule)
-        return rule
+        return {"rule_version": 1, "updated_at": time.time(), "selections": saved}
 
     def _check_components(self, source: dict, selection: dict) -> None:
         if selection["config"] and not source["config_path"].is_file():
@@ -422,10 +427,14 @@ class TransferService:
             if any(not hasattr(self.preferences, field) for field in required):
                 raise ValueError("当前 AstrBot 缺少专属 KV 快照或恢复接口。")
 
-    async def export_preview(self) -> dict:
-        rule = self.rule()
+    async def export_preview(self, selections: list[dict] | None = None) -> dict:
+        rule = (
+            self.rule()
+            if selections is None
+            else await self._selection_rule(selections)
+        )
         if not rule["selections"]:
-            raise ValueError("已保存规则没有插件，请先选择插件并保存规则。")
+            raise ValueError("导出选择没有插件，请先选择插件。")
         self._validate_selections(rule["selections"], identities=True)
         sources = await self._rule_sources(rule)
         return {
@@ -447,6 +456,7 @@ class TransferService:
                 for source, selection in zip(sources, rule["selections"])
             ],
             "rule_updated_at": rule["updated_at"],
+            "selections": rule["selections"],
         }
 
     async def _rule_sources(self, rule: dict) -> list[dict]:
@@ -457,7 +467,7 @@ class TransferService:
                 source["metadata"]["name"] != selection["name"]
                 or source["metadata"]["plugin_id"] != selection["plugin_id"]
             ):
-                raise ValueError("已保存规则中的插件身份变化，请重新保存规则。")
+                raise ValueError("导出选择中的插件身份变化，请重新选择并预检。")
             self._check_components(source, selection)
             sources.append(source)
         return sources
@@ -518,17 +528,31 @@ class TransferService:
             self._phase(job, "失败")
 
     async def start_export(
-        self, owner: str, rule_updated_at, acknowledged: bool
+        self,
+        owner: str,
+        rule_updated_at,
+        acknowledged: bool,
+        *,
+        selections: list[dict] | None = None,
     ) -> dict:
         self.operations.ensure_writable()
         if acknowledged is not True:
             raise ValueError("请确认敏感内容和暂停插件风险。")
         if self.task and not self.task.done():
             raise ValueError("已有导入导出任务运行。")
-        rule = self.rule()
+        # Keep the legacy saved-rule path; page exports use their own snapshot.
+        rule = (
+            self.rule()
+            if selections is None
+            else {
+                "rule_version": 1,
+                "updated_at": None,
+                "selections": copy.deepcopy(selections),
+            }
+        )
         if not rule["selections"]:
-            raise ValueError("已保存规则没有插件，请先选择插件并保存规则。")
-        if rule["updated_at"] != rule_updated_at:
+            raise ValueError("导出选择没有插件，请先选择插件。")
+        if selections is None and rule["updated_at"] != rule_updated_at:
             raise ValueError("导出规则已变化，请重新预检。")
         self._validate_selections(rule["selections"], identities=True)
         await self._rule_sources(rule)

@@ -63,6 +63,21 @@ function isDirty() {
   return JSON.stringify(selections()) !== JSON.stringify(savedSelections());
 }
 
+function applySavedRule() {
+  if (busy || requesting || manifestMode() || !state.rule.selections.length) return;
+  const problems = [];
+  for (const selection of state.rule.selections) {
+    const plugin = state.plugins.find(plugin => plugin.directory === selection.directory);
+    const problem = !plugin ? "插件不存在" : plugin.name !== selection.name || plugin.plugin_id !== selection.plugin_id ? "插件身份已变化" : plugin.blocked ? "插件暂不可导出" : selection.config && !plugin.config_available ? "已保存配置不存在" : selection.data && !plugin.data_available ? "标准数据不可用" : "";
+    if (problem) problems.push(selection.directory + "（" + problem + "）");
+  }
+  if (problems.length) {message("规则未应用：" + problems.join("、") + "。请重新选择插件并保存规则。", true); return;}
+  choices = new Map(state.plugins.map(plugin => [plugin.directory, {selected: false, config: false, data: false}]));
+  for (const selection of state.rule.selections) choices.set(selection.directory, {selected: true, config: selection.config, data: selection.data});
+  renderPlugins(); renderSummary();
+  message("已应用保存的规则，可继续调整本次导出的内容。");
+}
+
 function manifestMode() {return elements["export-format"].value === "manifest";}
 function sourceRecord(directory) {return managementState.plugins.find(record => record.local.directory === directory);}
 function active(record) {return record.bindings.find(binding => binding.id === record.active_binding_id);}
@@ -95,7 +110,7 @@ function renderFormats() {
   document.documentElement.dataset.exportFormat = isManifest ? "manifest" : "zip";
   elements["zip-summary"].hidden = isManifest;
   elements["manifest-summary"].hidden = !isManifest;
-  elements["export-hint"].textContent = isManifest ? "接收者从官方市场安装当前版本；现有插件跳过。" : "保存规则不产生备份。导出读取执行时的实际内容。";
+  elements["export-hint"].textContent = isManifest ? "接收者从官方市场安装当前版本；现有插件跳过。" : "按当前选择打包，读取导出时的实际内容。";
   const importingManifest = elements["import-format"].value === "manifest";
   elements["bundle-import"].hidden = importingManifest;
   elements["manifest-import"].hidden = !importingManifest;
@@ -227,11 +242,12 @@ function renderSummary() {
   elements["config-count"].textContent = selected.filter(selection => selection.config).length + " 个";
   const sizes = selectedPlugins.flatMap(plugin => [plugin.code_size, ...(choices.get(plugin.directory).data ? [plugin.data_size] : []), ...(choices.get(plugin.directory).config ? [plugin.config_size] : [])]);
   elements["selected-size"].textContent = selectedPlugins.some(plugin => plugin.statistics_status === "pending") ? "统计中…" : sizes.every(Number.isFinite) && !selectedPlugins.some(plugin => ["failed", "unavailable"].includes(plugin.statistics_status)) ? formatSize(sizes.reduce((total, size) => total + size, 0)) : "暂不可用";
-  elements["rule-status"].textContent = dirty ? "有未保存改动 · 请先保存规则" : state.rule.updated_at ? "规则已保存 · " + new Date(state.rule.updated_at * 1000).toLocaleString("zh-CN") : "尚未保存导出规则";
-  elements["rule-status"].classList.toggle("dirty", dirty);
-  elements["save-rule"].disabled = busy || requesting || !dirty;
-  elements.export.textContent = manifestMode() ? "导出清单 JSON" : "按已保存规则导出 ↗";
-  elements.export.disabled = busy || requesting || (manifestMode() ? !manifestSelections.size || Array.from(manifestSelections).some(directory => !eligible(sourceRecord(directory))) : dirty || !state.rule.selections.length);
+  elements["rule-status"].textContent = state.rule.selections.length ? "已保存 " + state.rule.selections.length + " 个插件的规则" : "可保存常用选择，下次一键应用";
+  elements["rule-status"].title = state.rule.updated_at ? "保存于 " + new Date(state.rule.updated_at * 1000).toLocaleString("zh-CN") : "";
+  elements["apply-rule"].disabled = busy || requesting || manifestMode() || !state.rule.selections.length;
+  elements["save-rule"].disabled = busy || requesting || manifestMode() || !dirty;
+  elements.export.textContent = manifestMode() ? "导出清单 JSON" : "导出插件包 ↗";
+  elements.export.disabled = busy || requesting || (manifestMode() ? !manifestSelections.size || Array.from(manifestSelections).some(directory => !eligible(sourceRecord(directory))) : !selected.length || selectedPlugins.some(plugin => plugin.blocked));
   elements["export-format"].disabled = requesting;
   elements["import-format"].disabled = requesting;
   elements["manifest-file"].disabled = busy || requesting || !managementState.csrf;
@@ -287,20 +303,18 @@ async function loadState(preserve = false) {
   const current = ++stateRequest;
   const updated = await bridge.apiGet("transfer/state");
   if (current !== stateRequest) return;
+  const previousState = state;
   state = updated;
   managementStatus = "loading";
   busy = state.busy;
-  if (!preserve) {
-    choices = new Map(state.plugins.map(plugin => [plugin.directory, {selected: false, config: false, data: false}]));
-    for (const selection of state.rule.selections) {
-      choices.set(selection.directory, {selected: true, config: selection.config, data: selection.data});
-    }
+  const retained = new Map();
+  for (const plugin of state.plugins) {
+    const previous = previousState?.plugins.find(entry => entry.directory === plugin.directory);
+    const unchanged = previous && previous.name === plugin.name && previous.plugin_id === plugin.plugin_id;
+    retained.set(plugin.directory, preserve && unchanged && choices.has(plugin.directory) ? choices.get(plugin.directory) : {selected: false, config: false, data: false});
   }
-  for (const plugin of state.plugins) if (!choices.has(plugin.directory)) choices.set(plugin.directory, {selected: false, config: false, data: false});
-  for (const selection of state.rule.selections) {
-    if (!choices.has(selection.directory)) choices.set(selection.directory, {selected: false, config: false, data: false});
-    if (!state.plugins.some(plugin => plugin.directory === selection.directory)) state.plugins.push({directory: selection.directory, name: selection.name, display_name: "", version: "", status: "failed", blocked: "已保存规则中的插件不存在。请取消选择并重新保存规则。", data_available: false, config_available: false, code_size: null, config_size: null, data_size: null, kv_count: null, statistics_status: "unavailable"});
-  }
+  if (preserve && Array.from(choices).some(([directory, choice]) => choice.selected && !retained.get(directory)?.selected)) message("部分已选插件已不存在或身份变化，已取消选择。请核对本次导出。", true);
+  choices = retained;
   elements["upload-limit"].textContent = "最大 " + formatSize(state.limits.archive_bytes) + " · 不接受普通插件安装 ZIP";
   renderPlugins();
   renderSummary();
@@ -432,13 +446,14 @@ function bindEvents() {
   elements["clear-selection"].addEventListener("click", () => {if (busy || requesting) return; if (manifestMode()) manifestSelections.clear(); else for (const choice of choices.values()) choice.selected = false; renderPlugins(); renderSummary();});
   for (const kind of ["data", "config"]) elements["bulk-" + kind].addEventListener("change", event => {if (busy || requesting || manifestMode()) return; for (const plugin of state.plugins) if (choices.get(plugin.directory).selected && plugin[kind + "_available"] && !plugin.blocked) choices.get(plugin.directory)[kind] = event.target.checked; renderPlugins(); renderSummary();});
   elements.refresh.addEventListener("click", () => runRequest(() => loadState(true)));
-  elements["save-rule"].addEventListener("click", () => runRequest(async () => {state.rule = await post("rule", {selections: selections()}); message("导出规则已保存。导出按钮将读取这套规则。");}));
+  elements["apply-rule"].addEventListener("click", applySavedRule);
+  elements["save-rule"].addEventListener("click", () => runRequest(async () => {state.rule = await post("rule", {selections: selections()}); message(state.rule.selections.length ? "当前选择已保存为规则，下次可点击「应用已保存规则」恢复。" : "已清空保存的导出规则。");}));
   elements.export.addEventListener("click", () => runRequest(async () => {
     if (manifestMode()) {await exportManifest(); return;}
-    const checked = await post("export-preview");
+    const checked = await post("export-preview", {selections: selections()});
     const accepted = await confirmOperation("检查本次导出", checked.plugins.map(plugin => ({...plugin, description: "代码" + (plugin.config ? " + 当前配置" : "") + (plugin.data ? " + 标准数据 / KV" : "") + (plugin.pause_required ? " · 将短暂暂停" : "")})), "配置和数据按原样备份，不会自动脱敏。附带数据时会暂停相关插件并尝试恢复原运行状态；外部写入可能导致快照失败。");
     if (!accepted) return;
-    await post("export", {rule_updated_at: checked.rule_updated_at, acknowledged: true});
+    await post("export", {selections: checked.selections, acknowledged: true});
     busy = true;
     showTab("history-panel");
     message("导出任务已启动。任务在服务端继续运行，可以稍后下载。");

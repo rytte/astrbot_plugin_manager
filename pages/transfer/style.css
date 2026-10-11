@@ -33,8 +33,10 @@ dt{color:var(--muted)}
 dd{margin:0;font-weight:600}
 .muted{color:var(--muted)}
 .small{font-size:13px}
-.rule-status{border-top:1px solid var(--line);padding-top:17px;margin-top:17px;font-size:13px;color:var(--muted);margin-bottom:12px}
-.rule-status.dirty{color:var(--warning)}
+.rule-tools{border-top:1px solid var(--line);padding-top:14px;margin:16px 0}
+.rule-status{font-size:13px;color:var(--muted);margin-bottom:9px}
+.rule-actions{display:flex;flex-wrap:wrap;gap:8px}
+.rule-actions .button{font-size:13px;padding:7px 10px;min-height:34px;font-weight:400}
 .button{border:1px solid transparent;border-radius:8px;padding:8px 14px;display:inline-flex;justify-content:center;align-items:center;gap:8px;font-weight:600;min-height:38px;line-height:1.5;transition:background .15s,transform .15s}
 .button:not(:disabled):active{transform:translateY(1px)}
 .primary{background:var(--accent);color:var(--surface)}
@@ -248,7 +250,6 @@ footer span{display:block;margin-top:5px}
 
 @media(max-width:760px){.summary>.format-label,.summary>.format-select,.summary>#zip-summary,.summary>#manifest-summary,.summary>#export-hint{grid-column:1/-1}
 .summary>#export{grid-column:1/-1}
-.summary #save-rule{margin-top:10px}
 .format-select{font-size:14px}
 }
 
