@@ -248,6 +248,21 @@ async function main() {
   await vm.runInContext("pollJobs()", context);
   assert.equal(elements["save-binding"].disabled, true);
   assert.ok(elements["source-summary"].textContent.includes("未绑定更新源"));
+  // Imported locators remain visible but cannot be shared before revalidation.
+  record.bindings[0].verification = "imported"; record.bindings[0].imported_active = true;
+  record.provenance.evidence = "bundle_record";
+  await elements.refresh.trigger("click"); await settle();
+  assert.match(elements["source-summary"].textContent, /来源信息已从备份恢复/);
+  assert.match(elements["binding-list"].textContent, /备份时的更新源/);
+  assert.match(elements["binding-list"].textContent, /待校验/);
+  assert.match(elements["source-provenance"].textContent, /备份中的安装来源记录/);
+  elements["export-format"].value = "manifest"; await elements["export-format"].trigger("change");
+  assert.equal(elements.export.disabled, true);
+  assert.match(elements["plugin-list"].textContent, /暂不能分享/);
+  elements["export-format"].value = "zip"; await elements["export-format"].trigger("change");
+  record.bindings[0].verification = "observed"; delete record.bindings[0].imported_active;
+  record.provenance.evidence = "core_record_observed";
+  await elements.refresh.trigger("click"); await settle();
   const selectSource = descendants(elements["binding-list"]).find(element => element.tagName === "button");
   const selecting = selectSource.trigger("click"); await settle();
   assert.equal(elements.confirmation.open, true);

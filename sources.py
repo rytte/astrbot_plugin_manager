@@ -17,6 +17,7 @@ from astrbot.core.repository import normalize_repository_url, parse_repository_u
 
 from .redaction import redact
 from .service import MARKET_QUERY_TIMEOUT_SECONDS, is_market_id
+from .source_bundle import METHODS, portable_binding, validate_sources
 from .transfer_bundle import MAX_JSON, component, load_json, safe_path, write_json
 
 SOURCE_LABELS = {
@@ -567,6 +568,8 @@ class SourceService:
         records[local["directory"]] = core
         await self.operations.web.save_plugin_install_sources(records)
         record["last_core_revision"] = fingerprint(core)
+        for item in record["bindings"]:
+            item.pop("imported_active", None)
         self._event(record, "active_changed", owner, binding["id"])
 
     @staticmethod
@@ -608,6 +611,10 @@ class SourceService:
                 for key in keys
                 if key == directory
                 or (records.get(key) or {}).get("root_dir_name") == directory
+                or self._core(
+                    {"directory": directory, "name": name}, {key: records.get(key)}
+                )
+                is not None
             },
         }
 
@@ -627,21 +634,107 @@ class SourceService:
                 records[key] = value
         await self.operations.web.save_plugin_install_sources(records)
 
-    async def note_bundle(self, directory: str, actor: str) -> None:
+    async def export_sources(
+        self, directory: str, metadata: dict
+    ) -> tuple[dict, list[str]]:
         record = await self.detail(directory)
+        if any(
+            record["local"][field] != metadata[field] for field in ("name", "author")
+        ):
+            raise ValueError("快照期间插件来源身份变化，请重新导出。")
+        warnings = []
+
+        def portable(binding):
+            try:
+                return portable_binding(binding)
+            except ValueError:
+                warnings.append(f"{directory}：一条来源地址无法安全迁移，已省略。")
+                if (
+                    isinstance(binding, dict)
+                    and binding.get("kind") == "market"
+                    and binding.get("repo_url")
+                ):
+                    try:
+                        return portable_binding({**binding, "repo_url": ""})
+                    except ValueError:
+                        pass
+                return None
+
+        bindings = {}
+        active_id = None
+        for binding in record["bindings"]:
+            entry = portable(binding)
+            if entry is None:
+                continue
+            bindings[entry["id"]] = entry
+            if binding["id"] == record["active_binding_id"] or (
+                not record["active_binding_id"] and binding.get("imported_active")
+            ):
+                active_id = entry["id"]
+        provenance = record["provenance"]
+        data = {
+            "schema_version": 1,
+            "identity": {field: metadata[field] for field in ("name", "author")},
+            "provenance": {
+                "method": provenance["method"]
+                if provenance["method"] in METHODS
+                else "unknown",
+                **{
+                    field: str(provenance[field])
+                    if provenance.get(field) is not None
+                    else None
+                    for field in (
+                        "installed_at",
+                        "observed_at",
+                        "reported_installed_at",
+                    )
+                },
+                "source": portable(provenance.get("source")),
+            },
+            "bindings": list(bindings.values()),
+            "active_binding_id": active_id,
+        }
+        return validate_sources(data, metadata), warnings
+
+    async def note_bundle(
+        self, directory: str, actor: str, incoming: dict | None = None
+    ) -> None:
+        record = await self.detail(directory)
+        if incoming is not None:
+            validate_sources(incoming, record["local"])
         records = await self.operations.web.get_plugin_install_sources()
         records.pop(directory, None)
         name = record["local"]["name"]
-        if (
-            name != directory
-            and (records.get(name) or {}).get("root_dir_name") == directory
+        if name != directory and (
+            (records.get(name) or {}).get("root_dir_name") == directory
+            or self._core(record["local"], {name: records.get(name)}) is not None
         ):
             records.pop(name, None)
         await self.operations.web.save_plugin_install_sources(records)
         record["bindings"] = []
+        if incoming is not None:
+            record["provenance"] = {
+                **copy.deepcopy(incoming["provenance"]),
+                "evidence": "bundle_record",
+            }
+            record["identity"] = self._identity(record["local"])
+            record["metadata_snapshot"] = {
+                field: record["local"][field] for field in METADATA_FIELDS
+            }
+            record["bindings"] = [
+                {
+                    **copy.deepcopy(binding),
+                    "verification": "imported",
+                    "checked_at": None,
+                    "imported_active": binding["id"] == incoming["active_binding_id"],
+                }
+                for binding in incoming["bindings"]
+            ]
         record["last_core_revision"] = fingerprint(None)
         self._event(record, "bundle_imported", actor)
-        if record["provenance"]["method"] == "unknown":
+        if incoming is not None:
+            self._event(record, "bundle_sources_imported", actor)
+        if incoming is None and record["provenance"]["method"] == "unknown":
             record["provenance"] = {
                 "method": "bundle",
                 "evidence": "manager_operation",
@@ -702,6 +795,8 @@ class SourceService:
                         if provenance["evidence"] == "manager_operation"
                         else "首次观察到的 AstrBot 记录，不能证明最初安装来源"
                         if provenance["evidence"] == "core_record_observed"
+                        else "备份中的安装来源记录，仅供参考；关联来源须重新校验"
+                        if provenance["evidence"] == "bundle_record"
                         else "缺少真实安装记录"
                     ),
                     "当前更新源："

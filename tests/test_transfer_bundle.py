@@ -148,7 +148,16 @@ async def test_bundle_checksums_extra_files_and_versions_are_rejected(
     original = transfers.download(result["id"], "admin", "package")
     with zipfile.ZipFile(original) as archive:
         contents = {name: archive.read(name) for name in archive.namelist()}
-    for mode in ("checksum", "extra", "version", "directory"):
+    for mode in (
+        "checksum",
+        "extra",
+        "version",
+        "directory",
+        "sources-checksum",
+        "sources-identity",
+        "sources-validation",
+        "sources-missing",
+    ):
         changed = dict(contents)
         manifest = json.loads(changed["manifest.json"])
         if mode == "checksum":
@@ -158,9 +167,24 @@ async def test_bundle_checksums_extra_files_and_versions_are_rejected(
         elif mode == "version":
             manifest["format_version"] = 0
             changed["manifest.json"] = json.dumps(manifest).encode()
-        else:
+        elif mode == "directory":
             manifest["directories"].append("forbidden/directory")
             changed["manifest.json"] = json.dumps(manifest).encode()
+        else:
+            relative = f"payload/{target.root_dir_name}/sources.json"
+            sources = json.loads(changed[relative])
+            if mode == "sources-checksum":
+                sources["provenance"]["observed_at"] = "2025-01-01T00:00:00Z"
+            elif mode == "sources-identity":
+                sources["identity"]["author"] = "Somebody else"
+            elif mode == "sources-validation":
+                sources["verification"] = "identity_matched"
+            if mode == "sources-missing":
+                changed.pop(relative)
+                manifest["files"].pop(relative)
+                changed["manifest.json"] = json.dumps(manifest).encode()
+            else:
+                changed[relative] = json.dumps(sources).encode()
         path = tmp_path / (mode + ".zip")
         with zipfile.ZipFile(path, "w") as archive:
             for name, content in changed.items():

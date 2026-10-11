@@ -81,7 +81,7 @@ function applySavedRule() {
 function manifestMode() {return elements["export-format"].value === "manifest";}
 function sourceRecord(directory) {return managementState.plugins.find(record => record.local.directory === directory);}
 function active(record) {return record.bindings.find(binding => binding.id === record.active_binding_id);}
-function official(record) {return record && record.bindings.some(binding => binding.kind === "market" && binding.registry_url === null && binding.verification !== "metadata_changed");}
+function official(record) {return record && record.bindings.some(binding => binding.kind === "market" && binding.registry_url === null && !["metadata_changed", "imported"].includes(binding.verification));}
 function eligible(record) {return record && !record.local.reserved && !record.local.problem && !record.identity_changed && official(record);}
 function sourceText(binding) {return binding ? (binding.kind === "market" ? (binding.registry_url ? "自定义市场 / " : "官方市场 / ") + binding.market_plugin_id : binding.repo_url) : "未绑定更新源";}
 function sourceKind(binding) {return !binding ? "未绑定" : binding.kind === "market" ? (binding.registry_url ? "自定义市场" : "官方市场") : "Git 仓库";}
@@ -592,12 +592,13 @@ async function openSource(directory) {
 function renderSource() {
   if (!selectedRecord) return;
   const record = selectedRecord, local = record.local, current = active(record);
+  const imported = record.bindings.some(binding => binding.verification === "imported");
   elements["source-title"].textContent = local.display_name || local.name || local.directory;
   elements["source-identity"].textContent = [local.name || local.directory, local.version && "v" + local.version.replace(/^v/i, ""), local.directory !== local.name && "目录：" + local.directory].filter(Boolean).join(" · ");
   elements["source-current-kind"].textContent = sourceKind(current);
   elements["source-current-kind"].className = "source-type" + (current ? "" : " unbound");
   const summary = elements["source-summary"]; summary.replaceChildren();
-  summary.append(sourceAddress("source-current-value", current ? (current.kind === "market" ? current.market_plugin_id : current.repo_url) : "未绑定更新源"), node("p", "source-current-note", current ? "AstrBot 更新时使用此来源。" : "可在下方关联来源，并将其设为更新源。"));
+  summary.append(sourceAddress("source-current-value", current ? (current.kind === "market" ? current.market_plugin_id : current.repo_url) : "未绑定更新源"), node("p", "source-current-note", current ? "AstrBot 更新时使用此来源。" : imported ? "来源信息已从备份恢复，请在下方校验后设为更新源。" : "可在下方关联来源，并将其设为更新源。"));
   if (local.problem || record.identity_changed) summary.append(node("p", "plugin-error", local.problem || "目录身份已变化，旧来源记录已隔离。"));
   const notice = metadataNotice(local, record);
   if (notice) summary.append(notice);
@@ -605,7 +606,7 @@ function renderSource() {
   const provenance = elements["source-provenance"]; provenance.replaceChildren();
   const facts = [
     ["安装记录", sourceLabels[record.provenance.method] || record.provenance.method],
-    ["记录依据", record.provenance.evidence === "manager_operation" ? "管家实际执行安装" : record.provenance.evidence === "core_record_observed" ? "首次观察到 AstrBot 绑定记录；不能据此还原最初安装历史" : "缺少安装证据"],
+    ["记录依据", record.provenance.evidence === "manager_operation" ? "管家实际执行安装" : record.provenance.evidence === "core_record_observed" ? "首次观察到 AstrBot 绑定记录；不能据此还原最初安装历史" : record.provenance.evidence === "bundle_record" ? "备份中的安装来源记录，仅供参考" : "缺少安装证据"],
     ["安装时间", sourceTime(record.provenance.installed_at)],
     ["首次观察", sourceTime(record.provenance.observed_at)]
   ];
@@ -619,12 +620,13 @@ function renderSource() {
     const content = node("div", "binding-content"), heading = node("div", "binding-heading");
     heading.append(node("strong", "binding-type", sourceKind(binding)));
     if (isCurrent) heading.append(node("span", "badge", "当前更新源"));
+    else if (binding.imported_active) heading.append(node("span", "badge", "备份时的更新源"));
     content.append(heading, sourceAddress("binding-address", binding.kind === "market" ? binding.market_plugin_id : binding.repo_url));
     if (binding.kind === "market" && binding.repo_url) content.append(sourceAddress("binding-repo", binding.repo_url));
     const verified = binding.verification === "identity_matched";
-    content.append(node("p", "detail", verified ? "名称与作者已匹配" + (binding.checked_at ? " · " + sourceTime(binding.checked_at) : "") : binding.verification === "metadata_changed" ? "作者信息已变更 · 请重新校验后分享清单" : "AstrBot 来源记录 · 尚未重新校验"));
+    content.append(node("p", "detail", verified ? "名称与作者已匹配" + (binding.checked_at ? " · " + sourceTime(binding.checked_at) : "") : binding.verification === "metadata_changed" ? "作者信息已变更 · 请重新校验后分享清单" : binding.verification === "imported" ? "从备份恢复 · 待校验" : "AstrBot 来源记录 · 尚未重新校验"));
     card.append(content);
-    if (!isCurrent && (binding.kind === "repository" || binding.registry_url === null)) card.append(button("设为更新源", async () => {
+    if (!isCurrent && (binding.kind === "repository" || binding.registry_url === null)) card.append(button(binding.verification === "imported" ? "校验并设为更新源" : "设为更新源", async () => {
       if (!await confirmOperation("切换更新源", [{name: local.name, directory: local.directory, description: sourceText(binding)}], "将重新校验该来源并同步到 AstrBot，后续原生 WebUI 更新使用此来源。最初安装记录保留。")) return;
       const result = await managementPost("source-select", {directory: local.directory, binding_id: binding.id, revision: record.revision, acknowledged: true});
       if (selectedRecord && selectedRecord.local.directory === local.directory) selectedRecord = result;
@@ -651,7 +653,7 @@ function renderSource() {
   }
   const history = elements["source-history"]; history.replaceChildren();
   elements["source-history-count"].textContent = record.history.length;
-  const labels = {installed: "管家安装", uninstalled: "管家卸载", binding_added: "保存来源关联", active_changed: "切换当前更新源", core_observed: "观察到 AstrBot 来源变更", metadata_synced: "同步插件信息", bundle_imported: "迁移包覆盖代码，原更新源已清除"};
+  const labels = {installed: "管家安装", uninstalled: "管家卸载", binding_added: "保存来源关联", active_changed: "切换当前更新源", core_observed: "观察到 AstrBot 来源变更", metadata_synced: "同步插件信息", bundle_imported: "从迁移包恢复代码", bundle_sources_imported: "恢复来源信息，等待重新校验"};
   for (const event of record.history.slice().reverse()) {const row = node("div", "history-row"); row.append(node("span", "history-event", labels[event.action] || event.action), node("span", "history-meta", sourceTime(event.at) + " · " + event.actor)); history.append(row);}
   if (!record.history.length) history.append(node("p", "source-empty", "暂无管家操作记录。"));
 }

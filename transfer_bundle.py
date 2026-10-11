@@ -24,8 +24,10 @@ from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
+from .source_bundle import validate_sources
+
 FORMAT = "astrbot-plugin-manager"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 MAX_ARCHIVE = 256 * 1024 * 1024
 MAX_CONTENT = 1024 * 1024 * 1024
 MAX_FILE = 128 * 1024 * 1024
@@ -528,7 +530,7 @@ def _unpack(archive_path: Path, destination: Path) -> dict:
     if (
         manifest["format"] != FORMAT
         or type(manifest["format_version"]) is not int
-        or manifest["format_version"] != FORMAT_VERSION
+        or manifest["format_version"] not in {1, FORMAT_VERSION}
     ):
         raise ValueError("插件包格式或格式版本不受支持。")
     if (
@@ -584,6 +586,12 @@ def _unpack(archive_path: Path, destination: Path) -> dict:
             if type(plugin[key]) is not bool:
                 raise ValueError("组件标记必须是布尔值。")
         prefix = f"payload/{plugin['directory']}"
+        if manifest["format_version"] >= 2:
+            relative = prefix + "/sources.json"
+            if relative not in actual:
+                raise ValueError("包缺少来源快照。")
+            validate_sources(load_json(safe_path(destination, relative)), plugin)
+            allowed.add(relative)
         metadata = read_metadata(safe_path(destination, prefix + "/code"))
         for field in ("name", "author", "version", "plugin_id"):
             if metadata[field] != plugin[field]:

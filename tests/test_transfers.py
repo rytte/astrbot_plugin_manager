@@ -2,15 +2,17 @@
 
 import asyncio
 import copy
+import json
 import shutil
 import time
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
+from astrbot_plugin_manager.sources import SourceService
 from astrbot_plugin_manager.transfer_bundle import (
     load_json,
     remove_path,
@@ -38,6 +40,200 @@ async def prepare(env, path):
     shutil.copyfile(path, transfers.job_directory(job["id"]) / "upload.zip")
     result = await transfers.prepare_import(job)
     return job, result
+
+
+async def test_code_only_backup_carries_sources_and_restores_them_pending(
+    transfer_env, monkeypatch
+):
+    env = transfer_env
+    target = env.make_transfer_plugin()
+    sources, transfers = env.plugin.sources, env.plugin.transfers
+    repo = "https://github.com/test/demo"
+    market_id = f"{target.author}/{target.name}"
+    env.prefs["plugin_install_sources"] = {
+        target.root_dir_name: {
+            "install_method": "market",
+            "registry_url": None,
+            "market_plugin_id": market_id,
+            "repo": repo,
+            "installed_at": "2025-01-01T00:00:00Z",
+        }
+    }
+    inspect = AsyncMock(return_value={"name": target.name, "author": target.author})
+    monkeypatch.setattr(
+        env.manager, "inspect_plugin_repository", inspect, raising=False
+    )
+    binding_preview = await sources.preview_binding(
+        "admin", target.root_dir_name, "repository", repo
+    )
+    original = await sources.bind("admin", binding_preview["id"], True, True)
+    package = await export_package(env, target)
+    with zipfile.ZipFile(package) as archive:
+        manifest = json.loads(archive.read("manifest.json"))
+        data = json.loads(archive.read(f"payload/{target.root_dir_name}/sources.json"))
+    assert manifest["format_version"] == 2
+    assert not manifest["plugins"][0]["config"] and not manifest["plugins"][0]["data"]
+    assert data["provenance"]["method"] == "market"
+    assert data["provenance"]["reported_installed_at"].startswith("2025")
+    assert len(data["bindings"]) == 2
+    assert data["active_binding_id"] == original["active_binding_id"]
+    assert "history" not in data
+    assert all(
+        "verification" not in binding and "checked_at" not in binding
+        for binding in data["bindings"]
+    )
+    # Simulate moving to an empty installation, without executing plugin code.
+    env.owners.pop(target.module_path)
+    shutil.rmtree(transfers.code_root / target.root_dir_name)
+    sources.path.unlink()
+    env.prefs["plugin_install_sources"] = {}
+    job, _ = await prepare(env, package)
+    await transfers.start_import(job["id"], "admin", [restore_selection(target)], True)
+    await transfers.task
+    assert job["status"] == "completed", job
+    restored = await sources.detail(target.root_dir_name)
+    assert restored["active_binding_id"] is None
+    assert {binding["verification"] for binding in restored["bindings"]} == {"imported"}
+    assert (
+        next(binding for binding in restored["bindings"] if binding["imported_active"])[
+            "id"
+        ]
+        == original["active_binding_id"]
+    )
+    assert not env.prefs["plugin_install_sources"]
+    assert restored["provenance"]["evidence"] == "bundle_record"
+    restarted = SourceService(env.plugin.service, transfers)
+    assert (await restarted.detail(target.root_dir_name))["bindings"] == restored[
+        "bindings"
+    ]
+    # Backup/restore again must retain the preferred source without promoting trust.
+    repeated, warnings = await sources.export_sources(
+        target.root_dir_name, restored["local"]
+    )
+    assert not warnings and repeated["active_binding_id"] == data["active_binding_id"]
+    market = {
+        market_id: {
+            "name": target.name,
+            "author": target.author,
+            "repo": repo,
+            "download_url": "https://example.com/official.zip",
+        }
+    }
+    monkeypatch.setattr(
+        sources.operations.web,
+        "get_online_plugins",
+        AsyncMock(return_value=(market, None)),
+    )
+    with pytest.raises(ValueError, match="尚未关联有效"):
+        await env.plugin.manifests.export([target.root_dir_name])
+    selected = await sources.select(
+        "admin",
+        target.root_dir_name,
+        original["active_binding_id"],
+        restored["revision"],
+    )
+    assert selected["active_binding_id"] == original["active_binding_id"]
+    assert inspect.await_count == 2
+    assert all(not binding.get("imported_active") for binding in selected["bindings"])
+    assert (
+        env.prefs["plugin_install_sources"][target.root_dir_name]["install_method"]
+        == "repository"
+    )
+    market_binding = next(
+        binding for binding in selected["bindings"] if binding["kind"] == "market"
+    )
+    selected = await sources.select(
+        "admin", target.root_dir_name, market_binding["id"], selected["revision"]
+    )
+    assert (
+        next(
+            binding
+            for binding in selected["bindings"]
+            if binding["id"] == market_binding["id"]
+        )["verification"]
+        == "identity_matched"
+    )
+    assert (await env.plugin.manifests.export([target.root_dir_name]))["manifest"][
+        "plugins"
+    ][0]["market_plugin_id"] == market_id
+    env.manager.load.assert_not_awaited()
+
+
+async def test_source_backup_strips_credentials_and_omits_unsafe_locators(transfer_env):
+    env = transfer_env
+    target = env.make_transfer_plugin()
+    env.prefs["plugin_install_sources"] = {
+        target.root_dir_name: {
+            "install_method": "market",
+            "market_plugin_id": f"{target.author}/{target.name}",
+            "repo": "https://user:password@github.com/test/demo?token=secret#private",
+            "registry_url": None,
+            "download_url": "https://example.com/download?token=secret",
+        }
+    }
+    record = await env.plugin.sources.detail(target.root_dir_name)
+    record["bindings"].append(
+        {"id": "local", "kind": "repository", "repo_url": "file:///private/repo"}
+    )
+    await env.plugin.sources._save_record(record)
+    package = await export_package(env, target)
+    with zipfile.ZipFile(package) as archive:
+        text = archive.read(f"payload/{target.root_dir_name}/sources.json").decode()
+    assert not any(
+        value in text for value in ("password", "secret", "private", "download_url")
+    )
+    data = json.loads(text)
+    assert len(data["bindings"]) == 1
+    assert data["bindings"][0]["repo_url"] == "https://github.com/test/demo"
+    job = next(
+        job for job in env.plugin.transfers.jobs.values() if job["kind"] == "export"
+    )
+    assert job["status"] == "completed_with_warning"
+    assert any("来源地址" in warning for warning in job["warnings"])
+
+
+@pytest.mark.parametrize("component", ["config", "data"])
+async def test_restoring_only_config_or_data_keeps_current_local_sources(
+    transfer_env, component
+):
+    env = transfer_env
+    target = env.make_transfer_plugin()
+    transfers, sources = env.plugin.transfers, env.plugin.sources
+    config = transfers.config_root / (target.root_dir_name + "_config.json")
+    config.write_text('{"enabled": true}', encoding="utf-8")
+    env.kv_values[("plugin", target.plugin_id)] = {"saved": "data"}
+    env.prefs["plugin_install_sources"] = {
+        target.root_dir_name: {
+            "install_method": "repository",
+            "repo": "https://github.com/test/original",
+        }
+    }
+    package = await export_package(env, target, config=True, data=True)
+    env.prefs["plugin_install_sources"][target.root_dir_name]["repo"] = (
+        "https://github.com/test/current"
+    )
+    before = await sources.detail(target.root_dir_name)
+    core_before = copy.deepcopy(env.prefs["plugin_install_sources"])
+    job, _ = await prepare(env, package)
+    await transfers.start_import(
+        job["id"],
+        "admin",
+        [
+            restore_selection(
+                target,
+                code=False,
+                config=component == "config",
+                data=component == "data",
+            )
+        ],
+        True,
+    )
+    await transfers.task
+    assert job["status"] == "completed", job
+    after = await sources.detail(target.root_dir_name)
+    for field in ("bindings", "active_binding_id", "provenance", "history"):
+        assert after[field] == before[field]
+    assert env.prefs["plugin_install_sources"] == core_before
 
 
 async def test_inventory_defers_file_scans_and_kv_until_statistics(
@@ -189,14 +385,16 @@ async def test_metadata_name_conflicts_do_not_invent_loading_failure(transfer_en
 
 
 @pytest.mark.parametrize("fail_after_source_change", [False, True])
-async def test_code_migration_clears_bindings_and_rollback_restores_original_source(
-    transfer_env, monkeypatch, fail_after_source_change
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("legacy_source_key", [False, True])
+async def test_code_migration_restores_pending_sources_and_rollback_restores_original(
+    transfer_env, monkeypatch, fail_after_source_change, legacy, legacy_source_key
 ):
     env = transfer_env
     target = env.make_transfer_plugin()
     sources, transfers = env.plugin.sources, env.plugin.transfers
     env.prefs["plugin_install_sources"] = {
-        target.root_dir_name: {
+        (target.name if legacy_source_key else target.root_dir_name): {
             "install_method": "market",
             "registry_url": None,
             "market_plugin_id": f"{target.author}/{target.name}",
@@ -206,12 +404,25 @@ async def test_code_migration_clears_bindings_and_rollback_restores_original_sou
     original_core = copy.deepcopy(env.prefs["plugin_install_sources"])
     original_record = await sources.detail(target.root_dir_name)
     package = await export_package(env, target)
+    if legacy:
+        with zipfile.ZipFile(package) as archive:
+            contents = {name: archive.read(name) for name in archive.namelist()}
+        manifest = json.loads(contents["manifest.json"])
+        manifest["format_version"] = 1
+        source_file = f"payload/{target.root_dir_name}/sources.json"
+        contents.pop(source_file)
+        manifest["files"].pop(source_file)
+        contents["manifest.json"] = json.dumps(manifest).encode()
+        package = env.root / "legacy.zip"
+        with zipfile.ZipFile(package, "w") as archive:
+            for name, content in contents.items():
+                archive.writestr(name, content)
     job, _ = await prepare(env, package)
     if fail_after_source_change:
         saved = sources.note_bundle
 
-        async def fail(directory, actor):
-            await saved(directory, actor)
+        async def fail(directory, actor, incoming=None):
+            await saved(directory, actor, incoming)
             raise OSError("failure after clearing old source")
 
         monkeypatch.setattr(sources, "note_bundle", fail)
@@ -226,8 +437,20 @@ async def test_code_migration_clears_bindings_and_rollback_restores_original_sou
         assert env.prefs["plugin_install_sources"] == original_core
     else:
         assert job["status"] == "completed", job
-        assert not current["bindings"] and current["active_binding_id"] is None
+        assert current["active_binding_id"] is None
+        if legacy:
+            assert not current["bindings"]
+        else:
+            assert len(current["bindings"]) == len(original_record["bindings"])
+            assert (
+                current["provenance"]["method"]
+                == original_record["provenance"]["method"]
+            )
+            assert current["provenance"]["evidence"] == "bundle_record"
+            assert current["bindings"][0]["verification"] == "imported"
+            assert current["bindings"][0]["imported_active"]
         assert target.root_dir_name not in env.prefs["plugin_install_sources"]
+        assert target.name not in env.prefs["plugin_install_sources"]
 
 
 async def test_rule_persists_components_and_can_be_cleared(transfer_env):

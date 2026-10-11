@@ -133,7 +133,8 @@ class ManifestService:
                     for binding in record["bindings"]
                     if binding["kind"] == "market"
                     and binding["registry_url"] is None
-                    and binding.get("verification") != "metadata_changed"
+                    and binding.get("verification")
+                    not in {"metadata_changed", "imported"}
                 ),
                 None,
             )

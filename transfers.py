@@ -818,6 +818,18 @@ class TransferService:
                             source, selection, stage, source["was_enabled"]
                         )
                     )
+                    (
+                        source_data,
+                        warnings,
+                    ) = await self.operations.sources.export_sources(
+                        source["directory"], source["metadata"]
+                    )
+                    await asyncio.to_thread(
+                        write_json,
+                        safe_path(stage, f"payload/{source['directory']}/sources.json"),
+                        source_data,
+                    )
+                    job["warnings"].extend(warnings)
                     job["results"].append(
                         {"directory": source["directory"], "status": "snapshot"}
                     )
@@ -1325,8 +1337,13 @@ class TransferService:
                             )
                         self.manager.failed_plugin_dict.pop(plugin["directory"], None)
                         if selection["code"] and hasattr(self.operations, "sources"):
+                            incoming_sources = None
+                            if job["manifest"]["format_version"] >= 2:
+                                incoming_sources = await asyncio.to_thread(
+                                    load_json, prefix / "sources.json"
+                                )
                             await self.operations.sources.note_bundle(
-                                plugin["directory"], job["owner"]
+                                plugin["directory"], job["owner"], incoming_sources
                             )
                         job["results"].append(
                             {
