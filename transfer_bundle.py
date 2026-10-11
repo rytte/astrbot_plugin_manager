@@ -105,11 +105,11 @@ def _invalid_number(value):
 
 
 def load_json(path: Path):
-    """Read bounded JSON and reject ambiguous fields and nonfinite numbers."""
+    """Accept UTF-8 BOMs while rejecting oversized or ambiguous JSON."""
     if path.stat().st_size > MAX_JSON:
         raise ValueError("JSON 文件超过 8 MiB 限制。")
     return json.loads(
-        path.read_text(encoding="utf-8"),
+        path.read_text(encoding="utf-8-sig"),
         object_pairs_hook=_json_pairs,
         parse_constant=_invalid_number,
     )

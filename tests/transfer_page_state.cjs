@@ -55,6 +55,7 @@ async function main() {
   const statisticsRequests = [], managementRequests = [];
   let delayStatistics = true, delayManagement = true, failStatistics = false, failManagement = false;
   let failState = false, failMetadataSync = false;
+  let pendingDownload = null;
   let delayedPreview, failPreview = false;
   const bridge = {
     async ready() {}, onContext(handler) {handler({isDark: true});},
@@ -98,7 +99,11 @@ async function main() {
         return structuredClone(record);
       }
       if (endpoint === "manage/source-select") {record.active_binding_id = body.binding_id; record.revision = "r3"; return structuredClone(record);}
-      if (endpoint === "manage/manifest-export") return {id: "export-id"};
+      if (endpoint === "manage/manifest-export") {
+        const job = {id: "export-id", kind: "manifest_export", status: "completed", created_at: 100, phase: "清单已导出", results: [], warnings: [], expired: false};
+        state.jobs.unshift(job);
+        return structuredClone(job);
+      }
       if (endpoint === "manage/manifest-install") return {id: "install-id"};
       throw new Error("Unexpected endpoint " + endpoint);
     },
@@ -113,7 +118,10 @@ async function main() {
         {market_plugin_id: "Alice/conflict", name: "conflict", status: "blocked", problem: "身份冲突"},
       ]};
     },
-    async download(...args) {downloads.push(args);},
+    async download(...args) {
+      downloads.push(args);
+      if (pendingDownload) return new Promise((resolve, reject) => {pendingDownload.resolve = resolve; pendingDownload.reject = reject;});
+    },
   };
   const context = vm.createContext({document, window: {AstrBotPluginPage: bridge, setInterval() {}}, console});
   const source = fs.readFileSync(path.join(root, "pages/transfer/app.js"), "utf8");
@@ -221,6 +229,9 @@ async function main() {
   await elements.export.trigger("click");
   assert.deepEqual(Array.from(posts.find(item => item.endpoint === "manage/manifest-export").body.directories), ["demo_dir"]);
   assert.equal(downloads[0][0], "manage/manifest-download");
+  const manifestDownload = descendants(elements["job-list"]).find(element => element.tagName === "button" && element.textContent.includes("下载清单 JSON"));
+  assert.ok(manifestDownload);
+  assert.equal(manifestDownload.disabled, false, "A completed manifest remains downloadable immediately after export finishes");
   elements["export-format"].value = "zip"; await elements["export-format"].trigger("change");
   assert.equal(vm.runInContext("JSON.stringify(selections())", context), zipSelections);
   assert.equal(elements["save-rule"].disabled, false);
@@ -319,6 +330,36 @@ async function main() {
   assert.equal(downloadButtons.length, 3);
   for (const button of downloadButtons) await button.trigger("click");
   assert.deepEqual(downloads.slice(1).map(args => [args[0], args[1].kind || "manifest"]), [["transfer/download", "package"], ["transfer/download", "rollback"], ["manage/manifest-download", "manifest"]]);
+  // Downloads have their own lifecycle; other operations and polling cannot lock them.
+  vm.runInContext("requesting = true; busy = true;", context);
+  await vm.runInContext("renderJobs(displayedJobs)", context);
+  assert.ok(descendants(elements["job-list"]).filter(element => element.tagName === "button").every(element => !element.disabled));
+  const findManifestDownload = () => descendants(elements["job-list"]).find(element => element.tagName === "button" && element.textContent.includes("下载清单 JSON"));
+  const beforeDownload = downloads.length;
+  pendingDownload = {};
+  const downloading = findManifestDownload().trigger("click"); await settle();
+  assert.equal(downloads.length, beforeDownload + 1);
+  let pendingButton = descendants(elements["job-list"]).find(element => element.tagName === "button" && element.textContent === "正在下载…");
+  assert.equal(pendingButton.disabled, true);
+  await vm.runInContext("pollJobs()", context);
+  pendingButton = descendants(elements["job-list"]).find(element => element.tagName === "button" && element.textContent === "正在下载…");
+  assert.equal(pendingButton.disabled, true);
+  await pendingButton.trigger("click");
+  assert.equal(downloads.length, beforeDownload + 1);
+  pendingDownload.reject(new Error("清单下载失败，请重试。")); await downloading;
+  pendingDownload = null;
+  assert.equal(elements.message.textContent, "清单下载失败，请重试。");
+  assert.equal(elements.message.hidden, false);
+  assert.equal(findManifestDownload().disabled, false);
+  await findManifestDownload().trigger("click");
+  assert.match(elements.message.textContent, /已发起清单 JSON下载/);
+  state.jobs[2].expired = true; await vm.runInContext("pollJobs()", context);
+  const expiredDownload = descendants(elements["job-list"]).find(element => element.tagName === "button" && element.textContent === "文件已过保留期");
+  assert.equal(expiredDownload.disabled, true);
+  const beforeExpired = downloads.length;
+  await expiredDownload.trigger("click");
+  assert.equal(downloads.length, beforeExpired);
+  vm.runInContext("requesting = false; busy = false;", context);
   // If the official association disappears, stale sharing selections are cleared.
   record.bindings = [];
   await refresh();

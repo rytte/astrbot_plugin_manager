@@ -460,6 +460,19 @@ class TransferService:
             raise ValueError("管家自身数据不可导出。")
         if selection["data"]:
             target = source.get("target")
+            if target and target.plugin and target.plugin.activated:
+                try:
+                    self.operations.check_operation(target, "disable")
+                except ValueError as exc:
+                    reason = (
+                        "插件标记为启用，但没有已初始化的运行实例。"
+                        if target.plugin.star_cls is None
+                        else str(exc)
+                    )
+                    raise ValueError(
+                        f"插件 {source['directory']} 无法安全暂停以处理标准数据："
+                        f"{reason}请在 WebUI 中检查，或取消勾选该插件的标准数据后重试。"
+                    ) from exc
             if (
                 target
                 and target.plugin

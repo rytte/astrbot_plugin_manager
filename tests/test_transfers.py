@@ -603,6 +603,79 @@ async def test_export_data_uses_name_and_plugin_id_and_restores_active_plugin(
     assert env.actions == ["terminate", "unbind", "load"]
 
 
+async def test_bom_config_is_exported_and_restored_without_rewriting(transfer_env):
+    env = transfer_env
+    target = env.make_transfer_plugin()
+    transfers = env.plugin.transfers
+    config = transfers.config_root / (target.root_dir_name + "_config.json")
+    content = '{"enabled":true}'.encode("utf-8-sig")
+    config.write_bytes(content)
+    path = await export_package(env, target, config=True)
+    with zipfile.ZipFile(path) as archive:
+        assert archive.read(f"payload/{target.root_dir_name}/config.json") == content
+    assert config.read_bytes() == content
+    config.write_bytes(b'{"enabled":false}')
+    job, _ = await prepare(env, path)
+    await transfers.start_import(
+        job["id"],
+        "admin",
+        [
+            {
+                "directory": target.root_dir_name,
+                "code": False,
+                "config": True,
+                "data": False,
+            }
+        ],
+        True,
+    )
+    await transfers.task
+    assert job["status"] == "completed", job
+    assert config.read_bytes() == content
+    env.manager._terminate_plugin.assert_not_awaited()
+    env.manager.load.assert_not_awaited()
+
+
+@pytest.mark.parametrize("change_after_start", [False, True])
+async def test_incomplete_runtime_is_identified_before_pausing_any_plugin(
+    transfer_env, change_after_start
+):
+    env = transfer_env
+    ready = env.make_transfer_plugin(active=True)
+    incomplete = env.make_transfer_plugin(
+        name="incomplete_plugin", directory="incomplete_directory", active=True
+    )
+    transfers = env.plugin.transfers
+    selections = [
+        {"directory": target.root_dir_name, "config": False, "data": True}
+        for target in (ready, incomplete)
+    ]
+    if change_after_start:
+        preview = await transfers.export_preview(selections)
+        started = await transfers.start_export(
+            "admin", None, True, selections=preview["selections"]
+        )
+        incomplete.star_cls = None
+        await transfers.task
+        job = transfers.get_job(started["id"], "admin")
+        assert job["status"] == "failed"
+        assert "incomplete_directory" in job["error"]
+        assert "没有已初始化的运行实例" in job["error"]
+        assert not (transfers.job_directory(job["id"]) / "package.zip").exists()
+    else:
+        incomplete.star_cls = None
+        with pytest.raises(
+            ValueError, match="incomplete_directory.*没有已初始化的运行实例"
+        ):
+            await transfers.export_preview(selections)
+        assert not transfers.jobs
+    env.manager._terminate_plugin.assert_not_awaited()
+    env.manager.load.assert_not_awaited()
+    await export_package(env, incomplete)
+    env.manager._terminate_plugin.assert_not_awaited()
+    env.manager.load.assert_not_awaited()
+
+
 async def test_stale_rule_and_missing_configuration_fail_without_pause(transfer_env):
     env = transfer_env
     target = env.make_transfer_plugin(active=True)

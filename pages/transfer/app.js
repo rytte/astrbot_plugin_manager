@@ -11,6 +11,8 @@ let importChoices = new Map();
 let busy = false;
 let requesting = false;
 let previousBusy = false;
+let displayedJobs = [];
+const downloadingJobs = new Set();
 let confirmationResolve = null;
 let managementState = {plugins: []};
 let managementStatus = "loading", managementRequest = 0;
@@ -401,7 +403,26 @@ function renderImportPreview() {
   elements["import-warnings"].textContent = preview.job.warnings.join("\n");
 }
 
+async function downloadJob(job, kind) {
+  const key = job.id + "/" + kind;
+  if (job.expired || downloadingJobs.has(key)) return;
+  downloadingJobs.add(key);
+  message("");
+  renderJobs(displayedJobs);
+  const manifest = kind === "manifest";
+  try {
+    await bridge.download(manifest ? "manage/manifest-download" : "transfer/download", manifest ? {id: job.id} : {id: job.id, kind}, manifest ? "plugins.astrbot-plugin-manifest.json" : "astrbot-" + kind + "-" + job.id.slice(0, 8) + ".zip");
+    message("已发起" + (manifest ? "清单 JSON" : kind === "package" ? "插件包" : "恢复资料") + "下载，请查看浏览器下载记录。");
+  } catch (error) {
+    message(error.message || "下载失败，请重试。", true);
+  } finally {
+    downloadingJobs.delete(key);
+    renderJobs(displayedJobs);
+  }
+}
+
 function renderJobs(jobs) {
+  displayedJobs = jobs;
   elements["job-count"].textContent = jobs.length;
   const list = elements["job-list"];
   list.replaceChildren();
@@ -419,21 +440,13 @@ function renderJobs(jobs) {
     for (const warning of job.warnings) card.append(node("p", "job-error", warning));
     if (job.error) card.append(node("p", "job-error", job.error));
     const actions = node("div", "job-actions");
-    for (const kind of ["package", "rollback"]) {
-      const available = kind === "package" ? job.kind === "export" && ["completed", "completed_with_warning"].includes(job.status) : job.backup_ready && !["queued", "running"].includes(job.status);
+    for (const kind of ["package", "rollback", "manifest"]) {
+      const available = kind === "package" ? job.kind === "export" && ["completed", "completed_with_warning"].includes(job.status) : kind === "manifest" ? job.kind === "manifest_export" && job.status === "completed" : job.backup_ready && !["queued", "running"].includes(job.status);
       if (!available) continue;
-      const button = node("button", "button secondary", job.expired ? "文件已过保留期" : kind === "package" ? "下载插件包 ↓" : "下载恢复资料 ↓");
-      button.disabled = job.expired;
-      button.addEventListener("click", async () => {
-        button.disabled = true;
-        try { await bridge.download("transfer/download", {id: job.id, kind}, "astrbot-" + kind + "-" + job.id.slice(0, 8) + ".zip"); }
-        catch (error) { message(error.message || "下载失败。", true); }
-        finally { button.disabled = false; }
-      });
-      actions.append(button);
-    }
-    if (job.kind === "manifest_export" && job.status === "completed") {
-      const download = button(job.expired ? "文件已过保留期" : "下载清单 JSON ↓", () => bridge.download("manage/manifest-download", {id: job.id}, "plugins.astrbot-plugin-manifest.json"), job.expired);
+      const downloading = downloadingJobs.has(job.id + "/" + kind);
+      const download = node("button", "button secondary", job.expired ? "文件已过保留期" : downloading ? "正在下载…" : kind === "manifest" ? "下载清单 JSON ↓" : kind === "package" ? "下载插件包 ↓" : "下载恢复资料 ↓");
+      download.disabled = job.expired || downloading;
+      download.addEventListener("click", () => downloadJob(job, kind));
       actions.append(download);
     }
     if (actions.childNodes.length) card.append(actions);
@@ -661,8 +674,8 @@ function renderSource() {
 async function exportManifest() {
   const job = await managementPost("manifest-export", {directories: Array.from(manifestSelections)});
   await pollJobs();
-  await bridge.download("manage/manifest-download", {id: job.id}, "plugins.astrbot-plugin-manifest.json");
   message("插件清单已导出，可分享给对方从官方市场安装。清单不包含配置和数据。");
+  await downloadJob(job, "manifest");
 }
 function renderManifest() {
   elements["manifest-preview"].hidden = !manifestPreview;

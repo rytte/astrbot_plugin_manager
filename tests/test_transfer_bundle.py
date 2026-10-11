@@ -69,11 +69,19 @@ def test_unknown_or_mismatched_kv_types_fail_fast(value):
 @pytest.mark.parametrize(
     "text", ['{"same":1,"same":2}', '{"value":NaN}', '{"value":Infinity}']
 )
-def test_json_rejects_duplicates_and_nonfinite_values(tmp_path, text):
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_json_rejects_duplicates_and_nonfinite_values(tmp_path, text, encoding):
     path = tmp_path / "value.json"
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text, encoding=encoding)
     with pytest.raises(ValueError):
         bundle.load_json(path)
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_json_accepts_utf8_with_or_without_bom(tmp_path, encoding):
+    path = tmp_path / "value.json"
+    path.write_text('{"text":"中文","enabled":true}', encoding=encoding)
+    assert bundle.load_json(path) == {"text": "中文", "enabled": True}
 
 
 def test_database_snapshot_includes_committed_wal_data_and_empty_directories(tmp_path):
