@@ -13,6 +13,7 @@ let requesting = false;
 let previousBusy = false;
 let displayedJobs = [];
 const downloadingJobs = new Set();
+const notifications = new Map();
 let confirmationResolve = null;
 let managementState = {plugins: []};
 let managementStatus = "loading", managementRequest = 0;
@@ -42,15 +43,76 @@ function statisticSize(plugin, field) {
   return formatSize(plugin[field]);
 }
 
-function message(text, error = false) {
-  elements.message.textContent = text;
-  elements.message.classList.toggle("error", error);
-  elements.message.hidden = !text;
-  if (elements["source-dialog"].open) {
-    elements["source-message"].textContent = text;
-    elements["source-message"].hidden = !text;
-    elements["source-message"].classList.toggle("error", error);
+function dismissMessage(target) {
+  const current = notifications.get(target);
+  if (current && current.timer !== null) window.clearTimeout(current.timer);
+  notifications.delete(target);
+  target.hidden = true;
+  target.replaceChildren();
+}
+
+function scheduleMessage(target) {
+  const current = notifications.get(target);
+  if (!current || current.error || current.hovered || current.focused || current.timer !== null) return;
+  current.startedAt = Date.now();
+  current.timer = window.setTimeout(() => {
+    if (notifications.get(target) === current) dismissMessage(target);
+  }, current.remaining);
+}
+
+function pauseMessage(target, reason) {
+  const current = notifications.get(target);
+  if (!current) return;
+  current[reason] = true;
+  if (current.timer !== null) {
+    window.clearTimeout(current.timer);
+    current.timer = null;
+    current.remaining = Math.max(0, current.remaining - (Date.now() - current.startedAt));
   }
+}
+
+function resumeMessage(target, reason) {
+  const current = notifications.get(target);
+  if (!current) return;
+  current[reason] = false;
+  scheduleMessage(target);
+}
+
+function message(text, error = false, {task = false} = {}) {
+  const target = elements[elements["source-dialog"].open ? "source-message" : "message"];
+  const other = target === elements.message ? elements["source-message"] : elements.message;
+  dismissMessage(other);
+  if (!text) {dismissMessage(target); return;}
+  const previous = notifications.get(target);
+  if (previous?.text === text && previous.error === error && previous.task === task) return;
+  if (previous && previous.timer !== null) window.clearTimeout(previous.timer);
+  notifications.set(target, {text, error, task, timer: null, remaining: 4000, startedAt: 0, hovered: previous?.hovered || false, focused: false});
+  target.className = "message" + (error ? " error" : "");
+  target.setAttribute("role", error ? "alert" : "status");
+  target.setAttribute("aria-live", error ? "assertive" : "polite");
+  const icon = node("span", "message-icon");
+  icon.setAttribute("aria-hidden", "true");
+  const content = node("div", "message-content");
+  content.append(node("strong", "message-title", error ? "操作未完成" : "操作提示"), node("p", "message-text", text));
+  if (task) {
+    const action = node("button", "text-button message-action", "查看任务");
+    action.type = "button";
+    action.addEventListener("click", () => {
+      if (elements["source-dialog"].open) elements["close-source"].click();
+      message("");
+      showTab("history-panel");
+      elements["history-panel"].scrollIntoView({block: "start"});
+    });
+    content.append(action);
+  }
+  const close = node("button", "message-close");
+  close.type = "button";
+  close.title = "关闭提示";
+  close.setAttribute("aria-label", "关闭提示");
+  close.addEventListener("click", () => dismissMessage(target));
+  target.replaceChildren(icon, content, close);
+  target.hidden = false;
+  scheduleMessage(target);
 }
 
 function selections() {
@@ -372,7 +434,7 @@ async function runRequest(operation) {
   requesting = true;
   renderPlugins();
   renderSummary();
-  if (selectedRecord) {elements["source-message"].hidden = true; renderSource();}
+  if (selectedRecord) {dismissMessage(elements["source-message"]); renderSource();}
   try { await operation(); }
   catch (error) { message(error.message || "操作失败，请检查服务端日志。", true); }
   finally { requesting = false; renderPlugins(); renderSummary(); if (preview) renderImportPreview(); if (manifestPreview) renderManifest(); if (selectedRecord) renderSource(); }
@@ -457,6 +519,12 @@ function renderJobs(jobs) {
 
 function bindEvents() {
   bindManagementEvents();
+  for (const target of [elements.message, elements["source-message"]]) {
+    target.addEventListener("mouseenter", () => pauseMessage(target, "hovered"));
+    target.addEventListener("mouseleave", () => resumeMessage(target, "hovered"));
+    target.addEventListener("focusin", () => pauseMessage(target, "focused"));
+    target.addEventListener("focusout", event => {if (!target.contains(event.relatedTarget)) resumeMessage(target, "focused");});
+  }
   elements["export-format"].addEventListener("change", () => {renderPlugins(); renderSummary();});
   elements["import-format"].addEventListener("change", renderFormats);
   for (const button of document.querySelectorAll("[data-tab]")) button.addEventListener("click", () => showTab(button.dataset.tab));
@@ -486,7 +554,7 @@ function bindEvents() {
     await post("export", {selections: checked.selections, acknowledged: true});
     busy = true;
     showTab("history-panel");
-    message("导出任务已启动。任务在服务端继续运行，可以稍后下载。");
+    message("导出任务已启动。任务在服务端继续运行，可以稍后下载。", false, {task: true});
     await pollJobs();
   }));
   elements["bundle-file"].addEventListener("change", () => runRequest(async () => {
@@ -511,7 +579,7 @@ function bindEvents() {
     elements["import-preview"].hidden = true;
     busy = true;
     showTab("history-panel");
-    message("恢复任务已启动。请勿在任务运行期间手工修改插件文件。");
+    message("恢复任务已启动。请勿在任务运行期间手工修改插件文件。", false, {task: true});
     await pollJobs();
   }));
   elements["confirmation-form"].addEventListener("submit", event => {event.preventDefault(); if (elements.acknowledged.checked) finishConfirmation(true);});
@@ -521,12 +589,14 @@ function bindEvents() {
 
 async function pollJobs() {
   const response = await bridge.apiGet("transfer/jobs");
+  const finishedJobs = response.jobs.filter(job => displayedJobs.some(previous => previous.id === job.id && ["queued", "running"].includes(previous.status)));
   busy = response.busy;
   renderJobs(response.jobs);
   renderSummary();
   if (previousBusy && !busy) {
     await loadState(true);
-    message("任务已结束，请查看任务记录、下载文件或按提示处理警告。");
+    const failed = finishedJobs.find(job => ["failed", "rollback_failed", "interrupted"].includes(job.status));
+    message(failed ? "任务执行未完成：" + (failed.error || "请查看任务记录中的原因和处理结果。") : "任务已结束，请查看任务记录、下载文件或按提示处理警告。", Boolean(failed), {task: true});
   }
   if (busy !== previousBusy) renderPlugins();
   if (selectedRecord) await loadManagement();
@@ -597,7 +667,7 @@ async function openSource(directory) {
   await loadManagement();
   selectedRecord = managementState.plugins.find(record => record.local.directory === directory); bindingPreview = null;
   if (!selectedRecord) throw new Error("该插件暂无可管理的来源记录，请刷新列表。");
-  elements["source-message"].hidden = true;
+  message("");
   elements["source-install-details"].open = false; elements["source-history-details"].open = false;
   elements["binding-value"].value = "";
   renderSource(); elements["source-dialog"].showModal();
@@ -695,7 +765,7 @@ function renderManifest() {
   elements["manifest-warnings"].textContent = warnings.join("\n");
 }
 function bindManagementEvents() {
-  const closeSource = () => {elements["source-dialog"].close(); selectedRecord = null; bindingPreview = null;};
+  const closeSource = () => {dismissMessage(elements["source-message"]); elements["source-dialog"].close(); selectedRecord = null; bindingPreview = null;};
   elements["close-source"].addEventListener("click", closeSource);
   elements["source-dialog"].addEventListener("cancel", closeSource);
   const invalidate = () => {bindingPreview = null; if (selectedRecord) renderSource();};
@@ -729,7 +799,7 @@ function bindManagementEvents() {
     if (!await confirmOperation("安装 " + selected.length + " 个新插件", selected.map(plugin => ({...plugin, description: plugin.market_plugin_id + " · 市场版本 " + plugin.version})), "仅从官方市场安装新插件，不覆盖已有插件，不自动安装依赖或启用。单项失败会记录结果；安装后请重启扫描并手动启用。")) return;
     await managementPost("manifest-install", {id: manifestPreview.job.id, ids: Array.from(installChoices), acknowledged: true});
     manifestPreview = null; installChoices.clear(); renderManifest(); busy = true;
-    showTab("history-panel"); await pollJobs(); message("清单安装任务已启动，请在任务记录查看逐项结果。");
+    showTab("history-panel"); await pollJobs(); message("清单安装任务已启动，请在任务记录查看逐项结果。", false, {task: true});
   }));
 }
 

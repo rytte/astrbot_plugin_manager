@@ -6,7 +6,7 @@ const vm = require("node:vm");
 
 class Element {
   constructor(tag) {
-    this.tagName = tag; this.children = []; this.dataset = {}; this.listeners = {};
+    this.tagName = tag; this.children = []; this.dataset = {}; this.listeners = {}; this.attributes = {};
     this.value = ""; this.hidden = false; this.disabled = false; this.checked = false;
     this.classList = {toggle() {}}; this.content = "";
   }
@@ -15,9 +15,12 @@ class Element {
   get childNodes() {return this.children;}
   append(...children) {this.children.push(...children);}
   replaceChildren(...children) {this.children = children; this.content = "";}
-  setAttribute() {}
+  setAttribute(key, value) {this.attributes[key] = value;}
   addEventListener(event, handler) {(this.listeners[event] ||= []).push(handler);}
-  async trigger(event) {for (const handler of this.listeners[event] || []) await handler({target: this, preventDefault() {}});}
+  async trigger(event, payload = {}) {for (const handler of this.listeners[event] || []) await handler({target: this, preventDefault() {}, ...payload});}
+  contains(element) {return element === this || this.children.some(child => child.contains(element));}
+  click() {return this.trigger("click");}
+  scrollIntoView() {this.scrolledIntoView = true;}
   showModal() {this.open = true;}
   close() {this.open = false;}
 }
@@ -123,7 +126,23 @@ async function main() {
       if (pendingDownload) return new Promise((resolve, reject) => {pendingDownload.resolve = resolve; pendingDownload.reject = reject;});
     },
   };
-  const context = vm.createContext({document, window: {AstrBotPluginPage: bridge, setInterval() {}}, console});
+  let timerClock = 0, timerSerial = 0;
+  const messageTimers = new Map();
+  class MessageDate extends Date {static now() {return timerClock;}}
+  function tickMessages(duration) {
+    const deadline = timerClock + duration;
+    while (true) {
+      const next = [...messageTimers].filter(([, timer]) => timer.at <= deadline).sort((first, second) => first[1].at - second[1].at)[0];
+      if (!next) break;
+      timerClock = next[1].at; messageTimers.delete(next[0]); next[1].handler();
+    }
+    timerClock = deadline;
+  }
+  const context = vm.createContext({document, Date: MessageDate, window: {
+    AstrBotPluginPage: bridge, setInterval() {},
+    setTimeout(handler, delay) {const id = ++timerSerial; messageTimers.set(id, {handler, at: timerClock + delay}); return id;},
+    clearTimeout(id) {messageTimers.delete(id);},
+  }, console});
   const source = fs.readFileSync(path.join(root, "pages/transfer/app.js"), "utf8");
   assert.ok(!source.includes("innerHTML"));
   assert.ok(!source.includes("page-entry"));
@@ -243,8 +262,9 @@ async function main() {
   assert.equal(elements["source-dialog"].open, true);
   elements["binding-kind"].value = "repository"; elements["binding-value"].value = binding.repo_url;
   failPreview = true; await elements["binding-form"].trigger("submit"); failPreview = false;
-  assert.equal(elements["source-message"].textContent, "仓库身份不一致");
+  assert.match(elements["source-message"].textContent, /仓库身份不一致/);
   assert.equal(elements["source-message"].hidden, false);
+  assert.equal(elements.message.hidden, true, "Dialog feedback must not also appear behind the dialog");
   await elements.refresh.trigger("click"); await settle();
   assert.equal(elements.message.hidden, true);
   assert.equal(elements["source-message"].hidden, true);
@@ -348,7 +368,7 @@ async function main() {
   assert.equal(downloads.length, beforeDownload + 1);
   pendingDownload.reject(new Error("清单下载失败，请重试。")); await downloading;
   pendingDownload = null;
-  assert.equal(elements.message.textContent, "清单下载失败，请重试。");
+  assert.match(elements.message.textContent, /清单下载失败，请重试。/);
   assert.equal(elements.message.hidden, false);
   assert.equal(findManifestDownload().disabled, false);
   await findManifestDownload().trigger("click");
@@ -393,10 +413,10 @@ async function main() {
   const beforeSync = vm.runInContext("JSON.stringify(selections())", context);
   // Refresh dismisses the stale action error, while a failed refresh shows its own error.
   failMetadataSync = true; await updateInfo.trigger("click"); failMetadataSync = false;
-  assert.equal(elements.message.textContent, "插件信息已变化，请刷新后重试。");
+  assert.match(elements.message.textContent, /插件信息已变化，请刷新后重试。/);
   assert.equal(elements.message.hidden, false);
   failState = true; await elements.refresh.trigger("click"); failState = false;
-  assert.equal(elements.message.textContent, "插件状态读取失败");
+  assert.match(elements.message.textContent, /插件状态读取失败/);
   assert.equal(elements.message.hidden, false);
   await elements.refresh.trigger("click"); await settle();
   assert.equal(elements.message.hidden, true);
@@ -466,5 +486,80 @@ async function main() {
   assert.doesNotMatch(elements["plugin-list"].textContent, /统计失败|统计中/);
   assert.equal(elements["selected-count"].textContent, "2");
   assert.equal(elements["selected-size"].textContent, "9.0 KiB");
+
+  // Only the task that just finished determines the completion notice severity.
+  state.busy = true;
+  state.jobs = [{id: "new-export", kind: "export", status: "running", results: [], warnings: []}];
+  await vm.runInContext("pollJobs()", context);
+  state.busy = false; state.jobs[0].status = "failed";
+  state.jobs[0].error = "配置快照失败，请检查文件。";
+  await vm.runInContext("pollJobs()", context);
+  assert.match(elements.message.textContent, /任务执行未完成：配置快照失败/);
+  assert.equal(elements.message.attributes.role, "alert");
+  tickMessages(60000); assert.equal(elements.message.hidden, false);
+  state.busy = true;
+  state.jobs.unshift({id: "retry-export", kind: "export", status: "running", results: [], warnings: []});
+  await vm.runInContext("pollJobs()", context);
+  state.busy = false; state.jobs[0].status = "completed";
+  await vm.runInContext("pollJobs()", context);
+  assert.equal(elements.message.attributes.role, "status");
+  assert.match(elements.message.textContent, /任务已结束/);
+
+  // Success notices expire; hovering and keyboard focus both pause the clock.
+  vm.runInContext("message('保存规则完成')", context);
+  assert.equal(elements.message.attributes.role, "status");
+  assert.equal(elements.message.attributes["aria-live"], "polite");
+  tickMessages(3999); assert.equal(elements.message.hidden, false);
+  tickMessages(1); assert.equal(elements.message.hidden, true);
+  vm.runInContext("message('已应用规则')", context);
+  tickMessages(1000);
+  await elements.message.trigger("mouseenter");
+  tickMessages(10000); assert.equal(elements.message.hidden, false);
+  await elements.message.trigger("focusin");
+  await elements.message.trigger("mouseleave");
+  tickMessages(10000); assert.equal(elements.message.hidden, false);
+  await elements.message.trigger("focusout", {relatedTarget: elements.refresh});
+  tickMessages(2999); assert.equal(elements.message.hidden, false);
+  tickMessages(1); assert.equal(elements.message.hidden, true);
+
+  // A prior timer cannot dismiss a newer error; errors stay until dismissed.
+  vm.runInContext("message('下载已发起')", context);
+  const oldTimer = [...messageTimers.values()][0];
+  vm.runInContext("message('配置文件无法读取，请刷新后重试。', true)", context);
+  oldTimer.handler(); tickMessages(60000);
+  assert.equal(elements.message.hidden, false);
+  assert.equal(elements.message.attributes.role, "alert");
+  assert.equal(elements.message.attributes["aria-live"], "assertive");
+  const errorContent = elements.message.children[1];
+  vm.runInContext("message('配置文件无法读取，请刷新后重试。', true)", context);
+  assert.equal(elements.message.children[1], errorContent, "Polling the same error must not redraw or announce it repeatedly");
+  await elements.message.children.at(-1).trigger("click");
+  assert.equal(elements.message.hidden, true);
+  assert.equal(messageTimers.size, 0);
+
+  // Task navigation is available during work and brings its panel into view.
+  vm.runInContext("busy = true; message('导出任务已启动', false, {task: true})", context);
+  const taskAction = descendants(elements.message).find(element => element.textContent === "查看任务");
+  assert.equal(taskAction.disabled, false);
+  await taskAction.trigger("click");
+  assert.equal(elements["history-panel"].hidden, false);
+  assert.equal(elements["history-panel"].scrolledIntoView, true);
+  assert.equal(elements.message.hidden, true);
+
+  // Modal notices live only inside the dialog and are cleared when it closes.
+  elements["source-dialog"].showModal();
+  vm.runInContext("message('来源关联失败，请重新校验。', true)", context);
+  assert.equal(elements.message.hidden, true);
+  assert.equal(elements["source-message"].hidden, false);
+  tickMessages(60000); assert.equal(elements["source-message"].hidden, false);
+  await elements["close-source"].trigger("click");
+  assert.equal(elements["source-message"].hidden, true);
+  assert.equal(elements.message.hidden, true);
+  elements["source-dialog"].showModal();
+  vm.runInContext("message('恢复任务已结束', false, {task: true})", context);
+  await descendants(elements["source-message"]).find(element => element.textContent === "查看任务").trigger("click");
+  assert.equal(elements["source-dialog"].open, false);
+  assert.equal(elements["source-message"].hidden, true);
+  assert.equal(messageTimers.size, 0);
 }
 main().catch(error => {console.error(error); process.exitCode = 1;});

@@ -165,7 +165,7 @@ async function main() {
     },
     async download() {},
   };
-  const context = vm.createContext({document, window: {AstrBotPluginPage: bridge, setInterval() {}}, console});
+  const context = vm.createContext({document, window: {AstrBotPluginPage: bridge, setInterval() {}, setTimeout() {}, clearTimeout() {}}, console});
   const source = fs.readFileSync(path.join(root, "pages/transfer/app.js"), "utf8");
   assert.ok(source.trimEnd().endsWith("initialize();"));
   vm.runInContext(source.slice(0, source.lastIndexOf("initialize();")) + "globalThis.boot = initialize();", context);

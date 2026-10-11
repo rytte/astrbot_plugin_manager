@@ -14,7 +14,7 @@
       <h1>插件管家</h1>
       <button id="refresh" class="button secondary">刷新状态</button>
     </header>
-    <div id="message" class="message" role="status" aria-live="polite" hidden></div>
+    <div id="message" class="message" role="status" aria-live="polite" aria-atomic="true" hidden></div>
     <div id="boot-error" class="notice danger" role="alert" hidden></div>
     <nav class="tabs" aria-label="迁移功能">
       <button class="tab active" data-tab="export-panel" aria-pressed="true">导出 / 分享</button><button class="tab" data-tab="import-panel" aria-pressed="false">导入 / 恢复</button><button class="tab" data-tab="history-panel" aria-pressed="false">任务记录 <span id="job-count" class="counter">0</span></button>
@@ -74,8 +74,8 @@
       <div class="source-dialog-title"><div class="source-title-line"><h2 id="source-dialog-title">来源管理</h2><p id="source-title" class="dialog-subtitle">插件来源</p></div><p id="source-identity" class="source-identity"></p></div>
       <button id="close-source" class="button secondary source-close" type="button" aria-label="关闭来源管理">关闭</button>
     </header>
+    <div id="source-message" class="message" role="status" aria-live="polite" aria-atomic="true" hidden></div>
     <div class="source-body">
-      <div id="source-message" class="message" role="status" aria-live="polite" hidden></div>
       <section class="source-overview" aria-labelledby="current-source-title">
         <div class="source-section-heading"><h3 id="current-source-title">当前更新源</h3><span id="source-current-kind" class="source-type"></span></div>
         <div id="source-summary"></div>
