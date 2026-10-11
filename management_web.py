@@ -71,7 +71,7 @@ class ManagementWeb(TransferWeb):
                     or job["status"] != "completed"
                     or self.transfers._expired(job)
                 ):
-                    raise ValueError("清单文件不存在或已过期，请重新导出。")
+                    raise ValueError("清单文件未就绪或已被旧版清理，请重新导出。")
                 return file_response(
                     safe_path(
                         self.transfers.job_directory(job["id"]),

@@ -222,6 +222,83 @@ async def test_export_current_selection_without_saving_through_router(web_client
     assert not transfers.rule_path.exists()
 
 
+async def test_manual_job_deletion_checks_owner_and_csrf_and_removes_downloads(
+    web_client,
+):
+    env, client = web_client
+    transfers = env.plugin.transfers
+    job = transfers._new_job("admin", "export")
+    job["status"] = "completed"
+    transfers._save(job)
+    directory = transfers.job_directory(job["id"])
+    (directory / "package.zip").write_bytes(b"private backup")
+    state = (await client.get(endpoint("state"))).json()["data"]
+    for body, status in [
+        ({"csrf": "wrong", "id": job["id"], "acknowledged": True}, 403),
+        ({"csrf": state["csrf"], "id": job["id"], "acknowledged": False}, 400),
+        ({"csrf": state["csrf"], "id": "../outside", "acknowledged": True}, 400),
+    ]:
+        response = await client.post(endpoint("delete-job"), json=body)
+        assert response.status_code == status, response.text
+        assert directory.is_dir()
+    other_token = jwt.encode(
+        {"username": "other", "exp": time.time() + 3600},
+        env.context.get_config()["dashboard"]["jwt_secret"],
+        algorithm="HS256",
+    )
+    other_headers = {"Authorization": "Bearer " + other_token}
+    other_state = (await client.get(endpoint("state"), headers=other_headers)).json()[
+        "data"
+    ]
+    denied = await client.post(
+        endpoint("delete-job"),
+        headers=other_headers,
+        json={"csrf": other_state["csrf"], "id": job["id"], "acknowledged": True},
+    )
+    assert denied.status_code == 400 and "无权访问" in denied.text
+    assert directory.is_dir()
+    deleted = await client.post(
+        endpoint("delete-job"),
+        json={"csrf": state["csrf"], "id": job["id"], "acknowledged": True},
+    )
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["data"] == {"id": job["id"], "deleted": True}
+    assert not directory.exists()
+    assert not (await client.get(endpoint("jobs"))).json()["data"]["jobs"]
+    assert (
+        await client.get(
+            endpoint("download"), params={"id": job["id"], "kind": "package"}
+        )
+    ).status_code == 400
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        {"username": "admin", "token_type": "plugin_page_asset"},
+        {"username": "api_key:test"},
+        {"username": "admin", "exp": 1},
+    ],
+)
+async def test_manual_deletion_rejects_non_dashboard_credentials(web_client, claims):
+    env, client = web_client
+    transfers = env.plugin.transfers
+    job = transfers._new_job("admin", "export")
+    job["status"] = "completed"
+    token = jwt.encode(
+        {"exp": time.time() + 3600, **claims},
+        env.context.get_config()["dashboard"]["jwt_secret"],
+        algorithm="HS256",
+    )
+    response = await client.post(
+        endpoint("delete-job"),
+        headers={"Authorization": "Bearer " + token},
+        json={"csrf": "untrusted", "id": job["id"], "acknowledged": True},
+    )
+    assert response.status_code in {401, 403}, response.text
+    assert job["id"] in transfers.jobs
+
+
 @pytest.mark.parametrize("action", ["export-preview", "export"])
 @pytest.mark.parametrize("selections", [None, {}, [], [{"directory": "../outside"}]])
 async def test_invalid_current_export_selection_does_not_fall_back_to_rule(
@@ -491,6 +568,9 @@ async def test_management_manifest_export_download_and_upload_are_private(
     )
     assert exported.status_code == 200, exported.text
     job = exported.json()["data"]
+    env.plugin.transfers.get_job(job["id"], "admin")["created_at"] = (
+        time.time() - 365 * 86400
+    )
     downloaded = await client.get(
         management_endpoint("manifest-download"), params={"id": job["id"]}
     )

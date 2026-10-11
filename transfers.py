@@ -48,7 +48,6 @@ from .transfer_bundle import (
 )
 
 logger = logging.getLogger("astrbot")
-RETENTION = 7 * 86400
 PREVIEW_TTL = 3600
 SPACE_MARGIN = 64 * 1024 * 1024
 
@@ -68,13 +67,14 @@ class TransferService:
         self.jobs_root = safe_path(self.root, "jobs")
         self.rule_path = safe_path(self.root, "rule.json")
         self.jobs = {}
+        self.deleting_jobs = set()
         self.task = None
         self.active_job = None
         self.in_critical = False
         self.closing = False
 
     async def initialize(self) -> None:
-        """Load private state, mark interrupted work and remove expired content."""
+        """Load retained jobs and mark unfinished work as interrupted."""
         await asyncio.to_thread(self._initialize_files)
 
     def _initialize_files(self) -> None:
@@ -98,7 +98,7 @@ class TransferService:
             job = load_json(path)
             if job["id"] != directory.name:
                 raise ValueError("任务存储标识不一致。")
-            if job["status"] in {"queued", "running"}:
+            if job["status"] in {"preparing", "queued", "running"}:
                 job.update(
                     status="interrupted",
                     phase="进程中断",
@@ -106,7 +106,6 @@ class TransferService:
                 )
                 write_json(path, job)
             self.jobs[job["id"]] = job
-        self._cleanup()
         if self.rule_path.exists():
             rule = load_json(self.rule_path)
             exact_keys(rule, {"rule_version", "updated_at", "selections"})
@@ -114,30 +113,10 @@ class TransferService:
                 raise ValueError("导出规则版本不受支持。")
             self._validate_selections(rule["selections"], identities=True)
 
-    def _cleanup(self) -> None:
-        for job in self.jobs.values():
-            if self._expired(job) and not job.get("expired"):
-                directory = self.job_directory(job["id"])
-                for name in (
-                    "upload.zip",
-                    "checked",
-                    "stage",
-                    "package.zip",
-                    "before",
-                    "rollback.zip",
-                    "rollback.json",
-                    "plugins.astrbot-plugin-manifest.json",
-                ):
-                    remove_path(directory, name)
-                job["expired"] = True
-                self._save(job)
-
     @staticmethod
     def _expired(job: dict) -> bool:
-        return bool(job.get("expired")) or (
-            job["status"] not in {"running", "queued", "interrupted", "rollback_failed"}
-            and time.time() > job["created_at"] + RETENTION
-        )
+        """Recognize files already cleaned by older releases; age never expires files."""
+        return bool(job.get("expired"))
 
     def job_directory(self, identifier: str) -> Path:
         """Resolve only server-issued UUID job directories."""
@@ -154,7 +133,6 @@ class TransferService:
 
     def _new_job(self, owner: str, kind: str) -> dict:
         self._ensure_idle()
-        self._cleanup()
         identifier = uuid.uuid4().hex
         directory = self.job_directory(identifier)
         directory.mkdir(mode=0o700)
@@ -162,8 +140,8 @@ class TransferService:
             "id": identifier,
             "owner": owner,
             "kind": kind,
-            "status": "preview" if kind == "import" else "queued",
-            "phase": "待预检" if kind == "import" else "排队",
+            "status": "preparing" if kind == "import" else "queued",
+            "phase": "上传与预检" if kind == "import" else "排队",
             "created_at": time.time(),
             "updated_at": time.time(),
             "results": [],
@@ -186,7 +164,50 @@ class TransferService:
         job = self.jobs.get(identifier)
         if job is None or job["owner"] != owner:
             raise ValueError("任务不存在或无权访问。")
+        if identifier in self.deleting_jobs:
+            raise ValueError("任务正在删除，请稍后重试。")
         return job
+
+    async def delete_job(self, identifier: str, owner: str, acknowledged: bool) -> dict:
+        """Delete one owned inactive job and all files under its verified directory."""
+        self.operations.ensure_writable()
+        if acknowledged is not True:
+            raise ValueError("请确认删除任务记录及全部相关文件。")
+        self.get_job(identifier, owner)
+        self._ensure_idle()
+        async with self.operation_lock:
+            self._ensure_idle()
+            job = self.get_job(identifier, owner)
+            if job["status"] in {"preparing", "queued", "running"}:
+                raise ValueError("任务正在上传、预检或执行，结束后才能删除。")
+            self.deleting_jobs.add(identifier)
+            deletion = asyncio.create_task(
+                asyncio.to_thread(self._delete_job_files, job)
+            )
+            try:
+                try:
+                    await asyncio.shield(deletion)
+                except asyncio.CancelledError:
+                    await deletion
+                    self.jobs.pop(identifier, None)
+                    raise
+                self.jobs.pop(identifier, None)
+            finally:
+                self.deleting_jobs.discard(identifier)
+            return {"id": identifier, "deleted": True}
+
+    def _delete_job_files(self, job: dict) -> None:
+        self.job_directory(job["id"])
+        try:
+            remove_path(self.jobs_root, job["id"])
+        except OSError:
+            # A partial filesystem deletion must leave a readable task record.
+            directory = self.job_directory(job["id"])
+            directory.mkdir(exist_ok=True)
+            self._save(job)
+            raise ValueError(
+                "部分任务文件未能删除，记录已保留，请检查文件权限后重试。"
+            ) from None
 
     @staticmethod
     def public_job(job: dict) -> dict:
@@ -218,7 +239,7 @@ class TransferService:
                 self.jobs.values(), key=lambda item: item["created_at"], reverse=True
             )
             if job["owner"] == owner
-        ][:100]
+        ]
 
     def rule(self) -> dict:
         if self.rule_path.exists():
@@ -533,11 +554,13 @@ class TransferService:
         return sources
 
     def _ensure_idle(self) -> None:
-        if self.closing or (self.task and not self.task.done()):
+        if self.closing or self.deleting_jobs or (self.task and not self.task.done()):
             raise ValueError("已有导入导出任务运行或管家正在关闭，请稍后重试。")
 
     def _start(self, job: dict, operation) -> dict:
         self._ensure_idle()
+        if self.jobs.get(job["id"]) is not job:
+            raise ValueError("任务记录已删除，请重新创建任务。")
         job["status"] = "queued"
         self._save(job)
         self.active_job = job["id"]
@@ -901,7 +924,7 @@ class TransferService:
                 plan.append(
                     {**plugin, "exists": existing is not None, "problem": problem}
                 )
-            job.update(manifest=manifest, checks=checks, plan=plan)
+            job.update(status="preview", manifest=manifest, checks=checks, plan=plan)
             if manifest["platform"] != platform.system():
                 job["warnings"].append(
                     "来源系统不同，数据内的绝对路径和外部资源不会自动迁移。"
@@ -914,15 +937,17 @@ class TransferService:
                 "expires_at": job["created_at"] + PREVIEW_TTL,
             }
         except Exception:
-            job.update(
-                status="failed",
-                error="上传包未通过预检，请检查包格式、身份和安全限制。",
-            )
             for key in ("manifest", "checks", "plan"):
                 job.pop(key, None)
-            self._save(job)
-            for name in ("upload.zip", "checked"):
-                await asyncio.to_thread(remove_path, directory, name)
+            try:
+                for name in ("upload.zip", "checked"):
+                    await asyncio.to_thread(remove_path, directory, name)
+            finally:
+                job.update(
+                    status="failed",
+                    error="上传包未通过预检，请检查包格式、身份和安全限制。",
+                )
+                self._save(job)
             raise
 
     def _protect_import(self, plugin: dict) -> None:
@@ -1405,7 +1430,7 @@ class TransferService:
     def download(self, identifier: str, owner: str, kind: str) -> Path:
         job = self.get_job(identifier, owner)
         if self._expired(job):
-            raise ValueError("任务文件已过保留期，请重新导出。")
+            raise ValueError("任务文件已被旧版清理，请重新导出。")
         if kind == "package":
             if job["kind"] != "export" or job["status"] not in {
                 "completed",
@@ -1447,6 +1472,6 @@ class TransferService:
             "unpacked_bytes": MAX_CONTENT,
             "file_bytes": MAX_FILE,
             "file_count": MAX_FILES,
-            "retention_days": 7,
+            "retention_days": None,
             "preview_seconds": PREVIEW_TTL,
         }

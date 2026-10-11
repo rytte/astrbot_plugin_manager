@@ -122,6 +122,7 @@ async function main() {
   elements["import-format"].value = "zip";
   const document = {
     hidden: false, documentElement: {dataset: {}},
+    addEventListener() {},
     querySelectorAll(selector) {return selector === "[id]" ? Object.values(elements) : tabs;},
     createElement(tag) {return new Element(tag);},
     createTextNode(text) {const element = new Element("text"); element.textContent = text; return element;},

@@ -36,6 +36,7 @@ class TransferWeb:
             "upload": "POST",
             "upload/<csrf_token>": "POST",
             "import": "POST",
+            "delete-job": "POST",
         }
         for action, method in routes.items():
             handler = functools.partial(self.dispatch, action.split("/")[0])
@@ -164,6 +165,11 @@ class TransferWeb:
                 if action == "rule":
                     exact_keys(body, {"csrf", "selections"})
                     data = await self.transfers.save_rule(body["selections"])
+                elif action == "delete-job":
+                    exact_keys(body, {"csrf", "id", "acknowledged"})
+                    data = await self.transfers.delete_job(
+                        body["id"], owner, body["acknowledged"]
+                    )
                 elif action == "export-preview":
                     if "selections" in body:
                         exact_keys(body, {"csrf", "selections"})
@@ -242,9 +248,12 @@ class TransferWeb:
                     await asyncio.to_thread(output.write, chunk)
             return await self.transfers.prepare_import(job)
         except Exception:
-            job.update(status="failed", error="上传或预检失败，正式目录未修改。")
-            self.transfers._save(job)
-            await asyncio.to_thread(remove_path, directory, "upload.zip")
+            job["status"] = "preparing"
+            try:
+                await asyncio.to_thread(remove_path, directory, "upload.zip")
+            finally:
+                job.update(status="failed", error="上传或预检失败，正式目录未修改。")
+                self.transfers._save(job)
             raise
         finally:
             await uploaded.close()

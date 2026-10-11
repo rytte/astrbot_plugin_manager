@@ -128,13 +128,31 @@ tr.selected{background:var(--accent-bg)}
 #execute-import{margin-top:18px;margin-bottom:8px}
 .job-list{display:grid;gap:14px}
 .job-card{border:1px solid var(--line);border-radius:10px;padding:16px}
-.job-heading{display:flex;justify-content:space-between;gap:10px;align-items:center}
-.job-title{font-weight:650}
+.job-heading{display:flex;gap:12px;align-items:flex-start}
+.job-heading-main{display:flex;align-items:center;flex-wrap:wrap;gap:8px 10px;min-width:0;min-height:32px}
+.job-title{font-weight:650;overflow-wrap:anywhere}
+.job-menu{position:relative;margin-left:auto;flex-shrink:0}
+.job-menu-toggle{display:grid;place-items:center;width:32px;height:32px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--muted);font-size:24px;line-height:1}
+.job-menu-toggle:hover,.job-menu-toggle[aria-expanded=true]{background:var(--bg);color:var(--text)}
+.job-menu-panel{position:absolute;top:calc(100% + 5px);right:0;z-index:5;min-width:174px;padding:5px;border:1px solid var(--line);border-radius:8px;background:var(--surface);box-shadow:0 8px 24px #0002}
+.job-menu-item{display:block;width:100%;padding:9px 12px;border:0;border-radius:5px;background:transparent;color:var(--danger);font-size:13px;line-height:1.5;text-align:left;white-space:nowrap}
+.job-menu-item:hover:enabled{background:color-mix(in srgb,var(--danger) 9%,transparent)}
 .job-meta{font-size:12px;color:var(--muted);margin:6px 0}
 .job-phase{font-size:13px;margin-top:8px}
 .job-results{font-size:13px;margin:8px 0 0;padding-left:18px;color:var(--muted)}
-.job-actions{display:flex;gap:8px;margin-top:13px}
+.job-status{--job-tone:var(--muted);display:inline-flex;align-items:center;gap:6px;font-weight:600;color:var(--job-tone);background:color-mix(in srgb,var(--job-tone) 12%,transparent);border-color:transparent}
+.job-status::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0}
+.job-status.completed{--job-tone:var(--message-success)}
+.job-status.preparing,.job-status.queued,.job-status.running{--job-tone:var(--accent)}
+.job-status.preview,.job-status.completed_with_warning,.job-status.interrupted{--job-tone:var(--warning)}
+.job-status.failed,.job-status.rollback_failed{--job-tone:var(--danger)}
+.job-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:13px}
 .job-actions .button{font-size:13px;min-height:32px;padding:5px 10px}
+.button.danger-button{color:var(--danger);border:1px solid color-mix(in srgb,var(--danger) 35%,var(--line));background:color-mix(in srgb,var(--danger) 5%,var(--surface))}
+.button.danger-button:hover:enabled{background:color-mix(in srgb,var(--danger) 12%,var(--surface));border-color:var(--danger)}
+.delete-job-summary{border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:12px 14px}
+.delete-job-description{font-size:14px;color:var(--muted);margin-top:16px;overflow-wrap:anywhere}
+#delete-confirmation .dialog-actions{margin-top:24px;flex-wrap:wrap}
 .job-error{color:var(--danger);font-size:13px;overflow-wrap:anywhere;margin-top:8px}
 footer{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;gap:15px;margin-top:25px}
 dialog{border:1px solid var(--line);border-radius:12px;max-width:600px;width:calc(100% - 36px);padding:28px;color:var(--text);background:var(--surface);box-shadow:0 20px 90px #0004}
@@ -178,8 +196,7 @@ dialog h2{margin:0 0 18px;font-size:22px}
 .tabs{justify-content:space-between}
 .tab{font-size:14px;padding-left:10px;padding-right:10px}
 .batch{gap:13px}
-.job-heading{align-items:flex-start}
-.job-heading .pill{white-space:normal;text-align:right}
+.job-heading-main{gap:6px 8px}
 footer{display:block;text-align:center}
 footer span{display:block;margin-top:5px}
 }

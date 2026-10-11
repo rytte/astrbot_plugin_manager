@@ -13,8 +13,11 @@ let requesting = false;
 let previousBusy = false;
 let displayedJobs = [];
 const downloadingJobs = new Set();
+const jobMenus = new Map();
+let openJobMenuId = null;
 const notifications = new Map();
 let confirmationResolve = null;
+let deletionResolve = null;
 let managementState = {plugins: []};
 let managementStatus = "loading", managementRequest = 0;
 let selectedRecord = null, bindingPreview = null, manifestPreview = null;
@@ -434,14 +437,16 @@ async function runRequest(operation) {
   requesting = true;
   renderPlugins();
   renderSummary();
+  renderJobs(displayedJobs);
   if (selectedRecord) {dismissMessage(elements["source-message"]); renderSource();}
   try { await operation(); }
   catch (error) { message(error.message || "操作失败，请检查服务端日志。", true); }
-  finally { requesting = false; renderPlugins(); renderSummary(); if (preview) renderImportPreview(); if (manifestPreview) renderManifest(); if (selectedRecord) renderSource(); }
+  finally { requesting = false; renderPlugins(); renderSummary(); renderJobs(displayedJobs); if (preview) renderImportPreview(); if (manifestPreview) renderManifest(); if (selectedRecord) renderSource(); }
 }
 
 function renderImportPreview() {
-  elements["import-preview"].hidden = false;
+  elements["import-preview"].hidden = !preview;
+  if (!preview) return;
   elements["preview-source"].textContent = "来源 AstrBot " + preview.astrbot_version + " · 预检一小时内有效";
   const body = elements["import-list"];
   body.replaceChildren();
@@ -483,16 +488,108 @@ async function downloadJob(job, kind) {
   }
 }
 
+function confirmJobDeletion(job) {
+  const labels = {export: "导出插件包", import: "导入插件包", manifest_export: "导出插件清单", manifest_install: "清单安装"};
+  elements["delete-job-title"].textContent = (labels[job.kind] || job.kind) + " · " + job.id.slice(0, 8);
+  elements["delete-job-time"].textContent = new Date(job.created_at * 1000).toLocaleString("zh-CN");
+  elements["delete-recovery-warning"].hidden = !job.backup_ready && !["interrupted", "rollback_failed"].includes(job.status);
+  elements["delete-confirmation"].showModal();
+  return new Promise(resolve => {deletionResolve = resolve;});
+}
+
+function finishJobDeletion(accepted) {
+  elements["delete-confirmation"].close();
+  if (deletionResolve) deletionResolve(accepted);
+  deletionResolve = null;
+}
+
+async function deleteJob(job) {
+  if (requesting || busy || ["preparing", "queued", "running"].includes(job.status) || Array.from(downloadingJobs).some(key => key.startsWith(job.id + "/"))) return;
+  return runRequest(async () => {
+    if (!await confirmJobDeletion(job)) return;
+    await post("delete-job", {id: job.id, acknowledged: true});
+    if (preview?.job.id === job.id) {
+      preview = null; importChoices.clear();
+      elements["bundle-file"].value = "";
+      elements["file-label"].textContent = "预检任务已删除，请重新选择插件包。";
+      renderImportPreview();
+    }
+    if (manifestPreview?.job.id === job.id) {
+      manifestPreview = null; installChoices.clear();
+      elements["manifest-file"].value = "";
+      renderManifest();
+    }
+    await pollJobs();
+    message("任务记录及相关文件已删除。");
+  });
+}
+
+function closeJobMenu(restoreFocus = false) {
+  const menu = jobMenus.get(openJobMenuId);
+  openJobMenuId = null;
+  if (!menu) return;
+  menu.panel.hidden = true;
+  menu.toggle.setAttribute("aria-expanded", "false");
+  if (restoreFocus) menu.toggle.focus();
+}
+
+function openJobMenu(identifier) {
+  closeJobMenu();
+  const menu = jobMenus.get(identifier);
+  if (!menu) return;
+  openJobMenuId = identifier;
+  menu.panel.hidden = false;
+  menu.toggle.setAttribute("aria-expanded", "true");
+  if (!menu.remove.disabled) menu.remove.focus();
+}
+
 function renderJobs(jobs) {
+  const focused = document.activeElement?.dataset;
+  const focusedJob = focused?.jobId, focusedControl = focused?.jobControl;
   displayedJobs = jobs;
+  if (!jobs.some(job => job.id === openJobMenuId)) openJobMenuId = null;
+  jobMenus.clear();
   elements["job-count"].textContent = jobs.length;
   const list = elements["job-list"];
   list.replaceChildren();
-  const labels = {preview: "等待确认", queued: "排队", running: "进行中", completed: "已完成", completed_with_warning: "完成 · 需检查", failed: "失败", interrupted: "中断 · 需检查", rollback_failed: "自动恢复失败"};
+  const labels = {preparing: "上传 / 预检中", preview: "等待确认", queued: "排队", running: "进行中", completed: "已完成", completed_with_warning: "完成 · 需检查", failed: "失败", interrupted: "中断 · 需检查", rollback_failed: "自动恢复失败"};
   for (const job of jobs) {
     const card = node("article", "job-card");
     const heading = node("div", "job-heading");
-    heading.append(node("span", "job-title", ({export: "导出插件包", import: "导入插件包", manifest_export: "导出插件清单", manifest_install: "清单安装"}[job.kind] || job.kind)), node("span", "pill", labels[job.status] || job.status));
+    const title = node("div", "job-heading-main");
+    title.append(node("span", "job-title", ({export: "导出插件包", import: "导入插件包", manifest_export: "导出插件清单", manifest_install: "清单安装"}[job.kind] || job.kind)), node("span", "pill job-status " + job.status, labels[job.status] || job.status));
+    const menu = node("div", "job-menu");
+    const toggle = node("button", "job-menu-toggle", "⋯");
+    toggle.type = "button";
+    toggle.title = "更多操作";
+    toggle.dataset.jobId = job.id; toggle.dataset.jobControl = "toggle";
+    toggle.setAttribute("aria-label", "任务 " + job.id.slice(0, 8) + " 的更多操作");
+    toggle.setAttribute("aria-haspopup", "menu");
+    toggle.setAttribute("aria-expanded", String(openJobMenuId === job.id));
+    toggle.setAttribute("aria-controls", "job-menu-" + job.id);
+    toggle.addEventListener("click", () => openJobMenuId === job.id ? closeJobMenu(true) : openJobMenu(job.id));
+    toggle.addEventListener("keydown", event => {
+      if (["ArrowDown", "ArrowUp"].includes(event.key)) {event.preventDefault(); openJobMenu(job.id);}
+    });
+    const panel = node("div", "job-menu-panel");
+    panel.id = "job-menu-" + job.id;
+    panel.hidden = openJobMenuId !== job.id;
+    panel.setAttribute("role", "menu");
+    panel.setAttribute("aria-label", "任务操作");
+    const remove = node("button", "job-menu-item", "删除记录及文件");
+    remove.type = "button";
+    remove.dataset.jobId = job.id; remove.dataset.jobControl = "remove";
+    remove.setAttribute("role", "menuitem");
+    remove.disabled = requesting || busy || ["preparing", "queued", "running"].includes(job.status) || Array.from(downloadingJobs).some(key => key.startsWith(job.id + "/"));
+    remove.title = ["preparing", "queued", "running"].includes(job.status) ? "任务正在处理，结束后可删除" : "删除这条任务记录及全部相关文件";
+    remove.addEventListener("click", () => {closeJobMenu(); return deleteJob(job);});
+    remove.addEventListener("keydown", event => {
+      if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {event.preventDefault(); remove.focus();}
+    });
+    menu.addEventListener("focusout", event => {if (jobMenus.get(job.id)?.menu === menu && openJobMenuId === job.id && !menu.contains(event.relatedTarget)) closeJobMenu();});
+    panel.append(remove); menu.append(toggle, panel);
+    jobMenus.set(job.id, {menu, toggle, panel, remove});
+    heading.append(title, menu);
     card.append(heading, node("div", "job-meta", new Date(job.created_at * 1000).toLocaleString("zh-CN") + " · " + job.id.slice(0, 8)), node("div", "job-phase", job.phase));
     if (job.results.length) {
       const results = node("ul", "job-results");
@@ -506,7 +603,7 @@ function renderJobs(jobs) {
       const available = kind === "package" ? job.kind === "export" && ["completed", "completed_with_warning"].includes(job.status) : kind === "manifest" ? job.kind === "manifest_export" && job.status === "completed" : job.backup_ready && !["queued", "running"].includes(job.status);
       if (!available) continue;
       const downloading = downloadingJobs.has(job.id + "/" + kind);
-      const download = node("button", "button secondary", job.expired ? "文件已过保留期" : downloading ? "正在下载…" : kind === "manifest" ? "下载清单 JSON ↓" : kind === "package" ? "下载插件包 ↓" : "下载恢复资料 ↓");
+      const download = node("button", "button secondary", job.expired ? "文件已被旧版清理" : downloading ? "正在下载…" : kind === "manifest" ? "下载清单 JSON ↓" : kind === "package" ? "下载插件包 ↓" : "下载恢复资料 ↓");
       download.disabled = job.expired || downloading;
       download.addEventListener("click", () => downloadJob(job, kind));
       actions.append(download);
@@ -515,10 +612,19 @@ function renderJobs(jobs) {
     list.append(card);
   }
   if (!jobs.length) list.append(node("p", "empty", "暂无任务。导出插件包或清单，或上传文件开始迁移。"));
+  const menu = jobMenus.get(focusedJob);
+  if (menu && focusedControl) (menu[focusedControl].disabled ? menu.toggle : menu[focusedControl]).focus();
 }
 
 function bindEvents() {
   bindManagementEvents();
+  document.addEventListener("click", event => {
+    const menu = jobMenus.get(openJobMenuId);
+    if (menu && !menu.menu.contains(event.target)) closeJobMenu();
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && openJobMenuId !== null) {event.preventDefault(); closeJobMenu(true);}
+  });
   for (const target of [elements.message, elements["source-message"]]) {
     target.addEventListener("mouseenter", () => pauseMessage(target, "hovered"));
     target.addEventListener("mouseleave", () => resumeMessage(target, "hovered"));
@@ -585,6 +691,9 @@ function bindEvents() {
   elements["confirmation-form"].addEventListener("submit", event => {event.preventDefault(); if (elements.acknowledged.checked) finishConfirmation(true);});
   elements["confirmation-cancel"].addEventListener("click", () => finishConfirmation(false));
   elements.confirmation.addEventListener("cancel", event => {event.preventDefault(); finishConfirmation(false);});
+  elements["delete-job-form"].addEventListener("submit", event => {event.preventDefault(); finishJobDeletion(true);});
+  elements["cancel-delete-job"].addEventListener("click", () => finishJobDeletion(false));
+  elements["delete-confirmation"].addEventListener("cancel", event => {event.preventDefault(); finishJobDeletion(false);});
 }
 
 async function pollJobs() {

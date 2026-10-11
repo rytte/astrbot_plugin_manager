@@ -960,7 +960,7 @@ async def test_busy_jobs_owner_expiration_and_interruptions_are_explicit(
 
 async def test_registered_routes_are_removed_on_termination(transfer_env):
     env = transfer_env
-    assert len(env.context.registered_web_apis) == 21
+    assert len(env.context.registered_web_apis) == 22
     await env.plugin.terminate()
     assert env.context.registered_web_apis == []
     assert env.plugin.transfers.closing
@@ -1076,17 +1076,16 @@ async def test_preview_expiration_is_checked_before_start_and_after_queue(transf
     assert not job["backup_ready"]
 
 
-async def test_download_expiration_does_not_depend_on_new_jobs(transfer_env):
+async def test_old_downloads_remain_available_without_retention_deadline(transfer_env):
     env = transfer_env
     target = env.make_transfer_plugin()
     transfers = env.plugin.transfers
     await export_package(env, target)
     job = transfers.jobs[transfers.active_job]
     job["created_at"] = time.time() - 8 * 86400
-    assert transfers.history("admin")[0]["expired"]
+    assert not transfers.history("admin")[0]["expired"]
     assert (transfers.job_directory(job["id"]) / "package.zip").exists()
-    with pytest.raises(ValueError, match="保留期"):
-        transfers.download(job["id"], "admin", "package")
+    assert transfers.download(job["id"], "admin", "package").is_file()
 
 
 async def test_interrupted_import_recovery_files_are_not_automatically_expired(
@@ -1287,6 +1286,5 @@ async def test_failed_automatic_restore_keeps_recovery_files_indefinitely(
     assert job["results"][0]["status"] == "rollback_failed"
     assert job["backup_ready"]
     job["created_at"] = time.time() - 30 * 86400
-    transfers._cleanup()
     assert not transfers.public_job(job)["expired"]
     assert transfers.download(job["id"], "admin", "rollback").is_file()

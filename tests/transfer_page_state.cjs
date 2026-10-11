@@ -20,6 +20,7 @@ class Element {
   async trigger(event, payload = {}) {for (const handler of this.listeners[event] || []) await handler({target: this, preventDefault() {}, ...payload});}
   contains(element) {return element === this || this.children.some(child => child.contains(element));}
   click() {return this.trigger("click");}
+  focus() {if (!this.disabled) Element.document.activeElement = this;}
   scrollIntoView() {this.scrolledIntoView = true;}
   showModal() {this.open = true;}
   close() {this.open = false;}
@@ -39,11 +40,13 @@ async function main() {
   elements["boot-error"].hidden = true; elements["status-filter"].value = "all";
   elements["export-format"].value = "zip"; elements["import-format"].value = "zip";
   const document = {
-    hidden: false, documentElement: {dataset: {}},
+    hidden: false, documentElement: {dataset: {}}, listeners: {},
+    addEventListener: Element.prototype.addEventListener, trigger: Element.prototype.trigger,
     querySelectorAll(selector) {return selector === "[id]" ? Object.values(elements) : tabs;},
     createElement(tag) {return new Element(tag);},
     createTextNode(text) {const element = new Element("text"); element.textContent = text; return element;},
   };
+  Element.document = document;
   const binding = {id: "official", kind: "market", registry_url: null, market_plugin_id: "Alice/demo", repo_url: "https://github.com/alice/demo", verification: "observed"};
   const record = {
     revision: "r1", identity_changed: false, active_binding_id: binding.id, bindings: [binding], history: [],
@@ -57,7 +60,7 @@ async function main() {
   const posts = [], downloads = [], uploads = [];
   const statisticsRequests = [], managementRequests = [];
   let delayStatistics = true, delayManagement = true, failStatistics = false, failManagement = false;
-  let failState = false, failMetadataSync = false;
+  let failState = false, failMetadataSync = false, failDelete = false;
   let pendingDownload = null;
   let delayedPreview, failPreview = false;
   const bridge = {
@@ -87,6 +90,12 @@ async function main() {
     async apiPost(endpoint, body) {
       posts.push({endpoint, body});
       if (endpoint.startsWith("manage/")) assert.equal(body.csrf, "source-token");
+      if (endpoint === "transfer/delete-job") {
+        assert.equal(body.csrf, "zip-token"); assert.equal(body.acknowledged, true);
+        if (failDelete) throw new Error("任务文件删除失败，请重试。");
+        state.jobs = state.jobs.filter(job => job.id !== body.id);
+        return {id: body.id, deleted: true};
+      }
       if (endpoint === "manage/source-preview") {
         if (failPreview) throw new Error("仓库身份不一致");
         if (delayedPreview) return new Promise(resolve => {delayedPreview.resolve = resolve;});
@@ -346,14 +355,14 @@ async function main() {
   await vm.runInContext("pollJobs()", context);
   assert.equal(elements["job-count"].textContent, "4");
   for (const text of ["导出插件包", "导入插件包", "导出插件清单", "清单安装"]) assert.ok(elements["job-list"].textContent.includes(text));
-  const downloadButtons = descendants(elements["job-list"]).filter(element => element.tagName === "button");
+  const downloadButtons = descendants(elements["job-list"]).filter(element => element.tagName === "button" && element.textContent.startsWith("下载"));
   assert.equal(downloadButtons.length, 3);
   for (const button of downloadButtons) await button.trigger("click");
   assert.deepEqual(downloads.slice(1).map(args => [args[0], args[1].kind || "manifest"]), [["transfer/download", "package"], ["transfer/download", "rollback"], ["manage/manifest-download", "manifest"]]);
   // Downloads have their own lifecycle; other operations and polling cannot lock them.
   vm.runInContext("requesting = true; busy = true;", context);
   await vm.runInContext("renderJobs(displayedJobs)", context);
-  assert.ok(descendants(elements["job-list"]).filter(element => element.tagName === "button").every(element => !element.disabled));
+  assert.ok(descendants(elements["job-list"]).filter(element => element.tagName === "button" && element.textContent.startsWith("下载")).every(element => !element.disabled));
   const findManifestDownload = () => descendants(elements["job-list"]).find(element => element.tagName === "button" && element.textContent.includes("下载清单 JSON"));
   const beforeDownload = downloads.length;
   pendingDownload = {};
@@ -374,7 +383,7 @@ async function main() {
   await findManifestDownload().trigger("click");
   assert.match(elements.message.textContent, /已发起清单 JSON下载/);
   state.jobs[2].expired = true; await vm.runInContext("pollJobs()", context);
-  const expiredDownload = descendants(elements["job-list"]).find(element => element.tagName === "button" && element.textContent === "文件已过保留期");
+  const expiredDownload = descendants(elements["job-list"]).find(element => element.tagName === "button" && element.textContent === "文件已被旧版清理");
   assert.equal(expiredDownload.disabled, true);
   const beforeExpired = downloads.length;
   await expiredDownload.trigger("click");
@@ -486,6 +495,80 @@ async function main() {
   assert.doesNotMatch(elements["plugin-list"].textContent, /统计失败|统计中/);
   assert.equal(elements["selected-count"].textContent, "2");
   assert.equal(elements["selected-size"].textContent, "9.0 KiB");
+
+  // Every job has an explicit deletion action; active work cannot be deleted.
+  const statuses = ["preparing", "preview", "queued", "running", "completed", "completed_with_warning", "failed", "interrupted", "rollback_failed"];
+  state.busy = false;
+  state.jobs = statuses.map(status => ({id: status + "-id", kind: "import", status, created_at: 100, phase: "阶段", warnings: [], results: [], backup_ready: status === "rollback_failed"}));
+  vm.runInContext("previousBusy = false", context);
+  await vm.runInContext("pollJobs()", context);
+  const taskCard = id => elements["job-list"].children.find(card => card.textContent.includes(id.slice(0, 8)));
+  const deleteAction = id => descendants(taskCard(id)).find(element => element.tagName === "button" && element.textContent === "删除记录及文件");
+  const menuToggle = id => descendants(taskCard(id)).find(element => element.className === "job-menu-toggle");
+  const menuPanel = id => descendants(taskCard(id)).find(element => element.className === "job-menu-panel");
+  for (const [index, status] of statuses.entries()) {
+    const card = elements["job-list"].children[index];
+    assert.ok(card.children[0].children[0].children[1].className.includes("job-status " + status));
+    assert.equal(deleteAction(status + "-id").disabled, ["preparing", "queued", "running"].includes(status));
+    assert.equal(menuPanel(status + "-id").hidden, true);
+  }
+  // Task polling preserves the open menu and keyboard focus until it is dismissed.
+  await menuToggle("completed-id").trigger("click");
+  assert.equal(menuPanel("completed-id").hidden, false);
+  assert.equal(document.activeElement, deleteAction("completed-id"));
+  const oldMenu = vm.runInContext("jobMenus.get('completed-id').menu", context);
+  await vm.runInContext("pollJobs()", context);
+  await oldMenu.trigger("focusout", {relatedTarget: null});
+  assert.equal(menuPanel("completed-id").hidden, false);
+  assert.equal(document.activeElement, deleteAction("completed-id"));
+  await document.trigger("keydown", {key: "Escape"});
+  assert.equal(menuPanel("completed-id").hidden, true);
+  assert.equal(document.activeElement, menuToggle("completed-id"));
+  await menuToggle("failed-id").trigger("keydown", {key: "ArrowDown"});
+  assert.equal(menuPanel("failed-id").hidden, false);
+  await menuToggle("completed-id").trigger("click");
+  assert.equal(menuPanel("failed-id").hidden, true);
+  assert.equal(menuPanel("completed-id").hidden, false);
+  await document.trigger("click", {target: elements["history-panel"]});
+  assert.equal(menuPanel("completed-id").hidden, true);
+  const beforeDeletion = posts.filter(item => item.endpoint === "transfer/delete-job").length;
+  await deleteAction("running-id").trigger("click");
+  assert.equal(posts.filter(item => item.endpoint === "transfer/delete-job").length, beforeDeletion);
+  await menuToggle("rollback_failed-id").trigger("click");
+  let deleting = deleteAction("rollback_failed-id").trigger("click"); await settle();
+  assert.equal(vm.runInContext("openJobMenuId", context), null);
+  assert.equal(elements["delete-confirmation"].open, true);
+  assert.equal(elements["delete-recovery-warning"].hidden, false);
+  await elements["cancel-delete-job"].trigger("click"); await deleting;
+  assert.equal(posts.filter(item => item.endpoint === "transfer/delete-job").length, beforeDeletion);
+  deleting = deleteAction("failed-id").trigger("click"); await settle();
+  failDelete = true;
+  await elements["delete-job-form"].trigger("submit"); await deleting; failDelete = false;
+  assert.match(elements.message.textContent, /任务文件删除失败/);
+  assert.ok(state.jobs.some(job => job.id === "failed-id"));
+  deleting = deleteAction("failed-id").trigger("click"); await settle();
+  await elements["delete-job-form"].trigger("submit"); await deleting;
+  assert.ok(!state.jobs.some(job => job.id === "failed-id"));
+  assert.equal(elements["job-count"].textContent, "8");
+  assert.match(elements.message.textContent, /任务记录及相关文件已删除/);
+
+  // Deleting a confirmed preview clears the corresponding import controls.
+  vm.runInContext("preview = {job: {id: 'preview-id', warnings: []}, plugins: []}; renderImportPreview()", context);
+  deleting = deleteAction("preview-id").trigger("click"); await settle();
+  await elements["delete-job-form"].trigger("submit"); await deleting;
+  assert.equal(elements["import-preview"].hidden, true);
+  assert.equal(vm.runInContext("preview", context), null);
+
+  state.jobs.push({id: "manifest-preview-id", kind: "manifest_install", status: "preview", created_at: 100, warnings: [], results: []});
+  await vm.runInContext("pollJobs()", context);
+  vm.runInContext("manifestPreview = {job: {id: 'manifest-preview-id', warnings: []}, plugins: []}; installChoices.add('example'); renderManifest()", context);
+  elements["manifest-file"].value = "manifest.json";
+  deleting = deleteAction("manifest-preview-id").trigger("click"); await settle();
+  await elements["delete-job-form"].trigger("submit"); await deleting;
+  assert.equal(elements["manifest-preview"].hidden, true);
+  assert.equal(elements["manifest-file"].value, "");
+  assert.equal(vm.runInContext("manifestPreview", context), null);
+  assert.equal(vm.runInContext("installChoices.size", context), 0);
 
   // Only the task that just finished determines the completion notice severity.
   state.busy = true;
