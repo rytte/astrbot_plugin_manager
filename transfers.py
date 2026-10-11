@@ -245,7 +245,7 @@ class TransferService:
                 raise ValueError("插件选择重复或组件标记不是布尔值。")
             seen.add(folded)
 
-    def _source(self, directory: str) -> dict:
+    def _source(self, directory: str, *, require_runtime_identity=False) -> dict:
         component(directory, module=True)
         code = safe_path(self.code_root, directory)
         metadata = read_metadata(code)
@@ -268,10 +268,20 @@ class TransferService:
             and target.plugin
             and (
                 target.name != metadata["name"]
-                or target.plugin.plugin_id != metadata["plugin_id"]
+                or (
+                    require_runtime_identity
+                    and target.plugin.plugin_id != metadata["plugin_id"]
+                )
             )
         ):
-            raise ValueError("磁盘元数据与已注册插件身份不一致，请先检查插件。")
+            raise ValueError(
+                "磁盘元数据与运行时插件名或数据标识不一致，请先重载或检查插件。"
+            )
+        kv_plugin_id = (
+            getattr(target.plugin.star_cls, "plugin_id", target.plugin.plugin_id)
+            if target and target.plugin
+            else metadata["plugin_id"]
+        )
         return {
             "directory": directory,
             "metadata": metadata,
@@ -279,6 +289,7 @@ class TransferService:
             "config_path": safe_path(self.config_root, directory + "_config.json"),
             "data_path": safe_path(self.data_root, component(metadata["name"])),
             "target": target,
+            "kv_plugin_id": kv_plugin_id,
             "module_path": target.plugin.module_path
             if target and target.plugin
             else f"data.plugins.{directory}.main",
@@ -305,6 +316,8 @@ class TransferService:
             "status": "failed",
             "reserved": False,
             "blocked": "",
+            "metadata_changed": False,
+            "metadata_notice": "",
             "data_available": False,
             "config_available": False,
             "code_size": None,
@@ -314,6 +327,21 @@ class TransferService:
             "statistics_status": "pending",
             "ranges": [],
         }
+        # A backup validation error must not invent a runtime loading failure.
+        registered = [
+            plugin
+            for plugin in self.operations.context.get_all_stars()
+            if plugin.root_dir_name == directory
+        ]
+        if len(registered) == 1:
+            plugin = registered[0]
+            entry.update(
+                name=plugin.name,
+                display_name=plugin.display_name or "",
+                version=plugin.version or "",
+                plugin_id=plugin.plugin_id,
+                status="enabled" if plugin.activated else "disabled",
+            )
         try:
             source = self._source(directory)
             metadata, target = source["metadata"], source["target"]
@@ -322,16 +350,24 @@ class TransferService:
                 display_name=metadata.get("display_name") or "",
                 version=metadata["version"],
                 plugin_id=metadata["plugin_id"],
+                data_plugin_id=source["kv_plugin_id"],
                 status=("enabled" if target.plugin.activated else "disabled")
                 if target and target.plugin
                 else ("failed" if target else "pending"),
                 config_available=source["config_path"].is_file(),
                 data_available=not self._is_self(source),
             )
+            if target and target.plugin and target.plugin.author != metadata["author"]:
+                entry["metadata_changed"] = True
+                entry["metadata_notice"] = "插件信息已变更：作者。"
             if source["data_path"].exists() and entry["data_available"]:
                 entry["ranges"].append(f"plugin_data/{metadata['name']}")
             if entry["data_available"]:
-                entry["ranges"].append("专属 KV：" + metadata["plugin_id"])
+                entry["ranges"].append("专属 KV：" + source["kv_plugin_id"])
+                if source["kv_plugin_id"] != metadata["plugin_id"]:
+                    entry["ranges"].append(
+                        "运行中的键值数据仍使用原作者标识；更新管家信息不会迁移数据。"
+                    )
             else:
                 entry["ranges"].append("管家自身数据不可导出，避免递归备份和页面暂停。")
             if statistics:
@@ -382,7 +418,7 @@ class TransferService:
         for entry in result:
             if statistics and entry["data_available"] and not entry["blocked"]:
                 records = await self.preferences.range_get_async(
-                    "plugin", entry["plugin_id"]
+                    "plugin", entry["data_plugin_id"]
                 )
                 entry["kv_count"] = len(records)
         return result
@@ -423,6 +459,17 @@ class TransferService:
         if selection["data"] and self._is_self(source):
             raise ValueError("管家自身数据不可导出。")
         if selection["data"]:
+            target = source.get("target")
+            if (
+                target
+                and target.plugin
+                and target.plugin.activated
+                and source["kv_plugin_id"] != source["metadata"]["plugin_id"]
+            ):
+                raise ValueError(
+                    "运行中的键值数据仍使用原作者标识。请先停用该插件再备份标准数据，"
+                    "避免备份后的自动重载改变数据归属；代码和配置可直接备份。"
+                )
             required = {"flush", "range_get_async", "clear_async", "put_async"}
             if any(not hasattr(self.preferences, field) for field in required):
                 raise ValueError("当前 AstrBot 缺少专属 KV 快照或恢复接口。")
@@ -677,7 +724,7 @@ class TransferService:
                     self._path_size, path, code=export and kind == "code"
                 )
         if selection["data"]:
-            values = await self._read_kv(source["metadata"]["plugin_id"])
+            values = await self._read_kv(source["kv_plugin_id"])
             size += len(
                 json.dumps(values, ensure_ascii=False, indent=2).encode("utf-8")
             )
@@ -718,7 +765,7 @@ class TransferService:
         if selection["data"]:
             if file_data:
                 await asyncio.to_thread(copy_tree, source["data_path"], prefix / "data")
-            values = await self._read_kv(metadata["plugin_id"])
+            values = await self._read_kv(source["kv_plugin_id"])
             await asyncio.to_thread(write_json, prefix / "kv.json", values)
         return {
             "name": metadata["name"],
@@ -901,7 +948,7 @@ class TransferService:
                 raise ValueError("同名插件已存在于其他目录，不自动改名或替换。")
         if not code.exists():
             return None
-        source = self._source(plugin["directory"])
+        source = self._source(plugin["directory"], require_runtime_identity=True)
         if (
             source["metadata"]["name"] != plugin["name"]
             or source["metadata"]["plugin_id"] != plugin["plugin_id"]

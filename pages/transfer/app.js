@@ -81,7 +81,7 @@ function applySavedRule() {
 function manifestMode() {return elements["export-format"].value === "manifest";}
 function sourceRecord(directory) {return managementState.plugins.find(record => record.local.directory === directory);}
 function active(record) {return record.bindings.find(binding => binding.id === record.active_binding_id);}
-function official(record) {return record && record.bindings.some(binding => binding.kind === "market" && binding.registry_url === null);}
+function official(record) {return record && record.bindings.some(binding => binding.kind === "market" && binding.registry_url === null && binding.verification !== "metadata_changed");}
 function eligible(record) {return record && !record.local.reserved && !record.local.problem && !record.identity_changed && official(record);}
 function sourceText(binding) {return binding ? (binding.kind === "market" ? (binding.registry_url ? "自定义市场 / " : "官方市场 / ") + binding.market_plugin_id : binding.repo_url) : "未绑定更新源";}
 function sourceKind(binding) {return !binding ? "未绑定" : binding.kind === "market" ? (binding.registry_url ? "自定义市场" : "官方市场") : "Git 仓库";}
@@ -104,6 +104,18 @@ function button(text, action, disabled = false) {
   element.disabled = requesting || busy || disabled;
   element.addEventListener("click", () => runRequest(action));
   return element;
+}
+function metadataNotice(plugin, record) {
+  const changed = record && managementStatus === "ready" ? record.metadata_changed : plugin.metadata_changed;
+  if (!changed) return null;
+  const notice = node("div", "plugin-notice");
+  notice.append(node("span", "", record?.metadata_notice || plugin.metadata_notice || "插件信息已变更。"));
+  const update = button("更新信息", () => syncMetadata(plugin.directory), !record || !managementState.csrf || managementStatus !== "ready" || record.identity_changed || Boolean(record.local.problem));
+  update.className = "text-button metadata-sync";
+  update.title = "同步插件管家记录，不重载插件";
+  update.setAttribute("aria-label", "更新 " + (plugin.name || plugin.directory) + " 的插件信息");
+  notice.append(update);
+  return notice;
 }
 function renderFormats() {
   const isManifest = manifestMode();
@@ -197,6 +209,8 @@ function renderPlugins() {
     const title = titleCell(plugin, true);
     if (manifestMode()) title.append(node("div", eligible(record) ? "plugin-detail" : "plugin-error", eligible(record) ? "可分享 · 已关联官方市场" : "暂不能分享 · 请在来源管理中校验并关联官方市场"));
     else if (plugin.blocked) title.append(node("div", "plugin-error", plugin.blocked));
+    const notice = metadataNotice(plugin, record);
+    if (notice) title.append(notice);
     const dataCell = node("td"); dataCell.dataset.zipOnly = "";
     const dataCheck = checkbox("附带 " + plugin.name + " 的标准数据", choice.data, !choice.selected || !plugin.data_available || Boolean(plugin.blocked), checked => {choice.data = checked; renderSummary();});
     dataCheck.append(document.createTextNode(plugin.data_available ? "标准数据" : "不可用"));
@@ -522,6 +536,13 @@ async function initialize() {
 
 function updateManagement(updated) {
   managementState = updated;
+  for (const plugin of state.plugins) {
+    const record = sourceRecord(plugin.directory);
+    if (record && record.local.name === plugin.name) {
+      plugin.metadata_changed = record.metadata_changed;
+      plugin.metadata_notice = record.metadata_notice;
+    }
+  }
   manifestSelections = new Set(Array.from(manifestSelections).filter(directory => eligible(sourceRecord(directory))));
   if (!selectedRecord) return;
   const refreshed = sourceRecord(selectedRecord.local.directory);
@@ -547,13 +568,22 @@ async function loadManagement(snapshot = state) {
   }
 }
 async function managementPost(action, body) {return bridge.apiPost("manage/" + action, {csrf: managementState.csrf, ...body});}
+async function syncMetadata(directory) {
+  const record = sourceRecord(directory);
+  if (!record) throw new Error("插件信息尚未读取完成，请稍后重试。");
+  await managementPost("metadata-sync", {directory, revision: record.revision});
+  bindingPreview = null;
+  await loadState(true);
+  await loadManagement();
+  message("插件管家记录已更新，插件运行状态保持不变。");
+}
 async function openSource(directory) {
   await loadManagement();
   selectedRecord = managementState.plugins.find(record => record.local.directory === directory); bindingPreview = null;
   if (!selectedRecord) throw new Error("该插件暂无可管理的来源记录，请刷新列表。");
   elements["source-message"].hidden = true;
   elements["source-install-details"].open = false; elements["source-history-details"].open = false;
-  elements["binding-value"].value = ""; elements["activate-binding"].checked = false;
+  elements["binding-value"].value = "";
   renderSource(); elements["source-dialog"].showModal();
 }
 function renderSource() {
@@ -566,6 +596,8 @@ function renderSource() {
   const summary = elements["source-summary"]; summary.replaceChildren();
   summary.append(sourceAddress("source-current-value", current ? (current.kind === "market" ? current.market_plugin_id : current.repo_url) : "未绑定更新源"), node("p", "source-current-note", current ? "AstrBot 更新时使用此来源。" : "可在下方关联来源，并将其设为更新源。"));
   if (local.problem || record.identity_changed) summary.append(node("p", "plugin-error", local.problem || "目录身份已变化，旧来源记录已隔离。"));
+  const notice = metadataNotice(local, record);
+  if (notice) summary.append(notice);
   elements["source-install-method"].textContent = sourceLabels[record.provenance.method] || record.provenance.method;
   const provenance = elements["source-provenance"]; provenance.replaceChildren();
   const facts = [
@@ -587,7 +619,7 @@ function renderSource() {
     content.append(heading, sourceAddress("binding-address", binding.kind === "market" ? binding.market_plugin_id : binding.repo_url));
     if (binding.kind === "market" && binding.repo_url) content.append(sourceAddress("binding-repo", binding.repo_url));
     const verified = binding.verification === "identity_matched";
-    content.append(node("p", "detail", verified ? "名称与作者已匹配" + (binding.checked_at ? " · " + sourceTime(binding.checked_at) : "") : "AstrBot 来源记录 · 尚未重新校验"));
+    content.append(node("p", "detail", verified ? "名称与作者已匹配" + (binding.checked_at ? " · " + sourceTime(binding.checked_at) : "") : binding.verification === "metadata_changed" ? "作者信息已变更 · 请重新校验后分享清单" : "AstrBot 来源记录 · 尚未重新校验"));
     card.append(content);
     if (!isCurrent && (binding.kind === "repository" || binding.registry_url === null)) card.append(button("设为更新源", async () => {
       if (!await confirmOperation("切换更新源", [{name: local.name, directory: local.directory, description: sourceText(binding)}], "将重新校验该来源并同步到 AstrBot，后续原生 WebUI 更新使用此来源。最初安装记录保留。")) return;
@@ -599,7 +631,7 @@ function renderSource() {
   }
   if (!record.bindings.length) list.append(node("p", "source-empty", "尚未关联来源，可在下方添加。"));
   const blocked = local.reserved || local.problem || record.identity_changed;
-  for (const id of ["binding-value", "binding-kind", "activate-binding"]) elements[id].disabled = requesting || busy || Boolean(blocked);
+  for (const id of ["binding-value", "binding-kind"]) elements[id].disabled = requesting || busy || Boolean(blocked);
   elements["preview-binding"].disabled = requesting || busy || Boolean(blocked);
   elements["save-binding"].disabled = requesting || busy || Boolean(blocked) || !bindingPreview;
   const repository = elements["binding-kind"].value === "repository";
@@ -616,7 +648,7 @@ function renderSource() {
   }
   const history = elements["source-history"]; history.replaceChildren();
   elements["source-history-count"].textContent = record.history.length;
-  const labels = {installed: "管家安装", uninstalled: "管家卸载", binding_added: "保存来源关联", active_changed: "切换当前更新源", core_observed: "观察到 AstrBot 来源变更", bundle_imported: "迁移包覆盖代码，原更新源已清除"};
+  const labels = {installed: "管家安装", uninstalled: "管家卸载", binding_added: "保存来源关联", active_changed: "切换当前更新源", core_observed: "观察到 AstrBot 来源变更", metadata_synced: "同步插件信息", bundle_imported: "迁移包覆盖代码，原更新源已清除"};
   for (const event of record.history.slice().reverse()) {const row = node("div", "history-row"); row.append(node("span", "history-event", labels[event.action] || event.action), node("span", "history-meta", sourceTime(event.at) + " · " + event.actor)); history.append(row);}
   if (!record.history.length) history.append(node("p", "source-empty", "暂无管家操作记录。"));
 }
@@ -661,9 +693,9 @@ function bindManagementEvents() {
   elements["save-binding"].addEventListener("click", () => runRequest(async () => {
     if (!selectedRecord || !bindingPreview) return;
     const directory = selectedRecord.local.directory;
-    const result = await managementPost("source-bind", {id: bindingPreview.id, activate: elements["activate-binding"].checked, acknowledged: true});
+    const result = await managementPost("source-bind", {id: bindingPreview.id, activate: true, acknowledged: true});
     if (selectedRecord && selectedRecord.local.directory === directory) selectedRecord = result;
-    bindingPreview = null; await loadManagement(); message("来源关联已保存，安装历史保留。");
+    bindingPreview = null; await loadManagement(); message("来源关联已保存并设为当前更新源。");
   }));
   elements["manifest-file"].addEventListener("change", () => runRequest(async () => {
     manifestPreview = null; installChoices.clear(); renderManifest();

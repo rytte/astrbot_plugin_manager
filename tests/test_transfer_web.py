@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock
 import httpx
 import jwt
 import pytest
+import yaml
 from astrbot.dashboard.api.files import legacy_router as file_router
 from astrbot.dashboard.api.plugins import router
 from astrbot.dashboard.responses import ApiError
@@ -222,9 +223,7 @@ async def test_export_current_selection_without_saving_through_router(web_client
 
 
 @pytest.mark.parametrize("action", ["export-preview", "export"])
-@pytest.mark.parametrize(
-    "selections", [None, {}, [], [{"directory": "../outside"}]]
-)
+@pytest.mark.parametrize("selections", [None, {}, [], [{"directory": "../outside"}]])
 async def test_invalid_current_export_selection_does_not_fall_back_to_rule(
     web_client, action, selections
 ):
@@ -336,6 +335,47 @@ async def test_malformed_upload_returns_400_and_removes_staging(web_client):
 
 def management_endpoint(action):
     return "/api/v1/plugins/extensions/astrbot_plugin_manager/manage/" + action
+
+
+async def test_metadata_sync_uses_csrf_and_only_updates_manager_records(web_client):
+    env, client = web_client
+    target = env.make_transfer_plugin(active=True)
+    old_author = target.author
+    await env.plugin.sources.detail(target.root_dir_name)
+    path = env.plugin.transfers.code_root / target.root_dir_name / "metadata.yaml"
+    metadata = yaml.safe_load(path.read_text(encoding="utf-8"))
+    metadata["author"] = "New Author"
+    path.write_text(yaml.safe_dump(metadata), encoding="utf-8")
+    state = (await client.get(management_endpoint("state"))).json()["data"]
+    record = next(
+        item
+        for item in state["plugins"]
+        if item["local"]["directory"] == target.root_dir_name
+    )
+    assert record["metadata_changed"]
+    plugins = (await client.get(endpoint("state"))).json()["data"]["plugins"]
+    plugin = next(item for item in plugins if item["directory"] == target.root_dir_name)
+    assert plugin["status"] == "enabled" and not plugin["blocked"]
+    body = {
+        "csrf": "wrong",
+        "directory": target.root_dir_name,
+        "revision": record["revision"],
+    }
+    assert (
+        await client.post(management_endpoint("metadata-sync"), json=body)
+    ).status_code == 403
+    body.update(csrf=state["csrf"], revision="stale")
+    assert (
+        await client.post(management_endpoint("metadata-sync"), json=body)
+    ).status_code == 400
+    body["revision"] = record["revision"]
+    response = await client.post(management_endpoint("metadata-sync"), json=body)
+    assert response.status_code == 200, response.text
+    assert not response.json()["data"]["metadata_changed"]
+    assert target.author == old_author and target.activated
+    env.manager.load.assert_not_awaited()
+    env.manager._terminate_plugin.assert_not_awaited()
+    assert not env.plugin.transfers.jobs
 
 
 async def test_management_binding_requires_csrf_confirmation_and_authentication(

@@ -87,6 +87,13 @@ async function main() {
         return {id: "preview", binding};
       }
       if (endpoint === "manage/source-bind") return structuredClone(record);
+      if (endpoint === "manage/metadata-sync") {
+        assert.equal(body.directory, record.local.directory);
+        assert.equal(body.revision, "metadata-r1");
+        record.metadata_changed = false; record.metadata_notice = "";
+        record.revision = "metadata-r2";
+        return structuredClone(record);
+      }
       if (endpoint === "manage/source-select") {record.active_binding_id = body.binding_id; record.revision = "r3"; return structuredClone(record);}
       if (endpoint === "manage/manifest-export") return {id: "export-id"};
       if (endpoint === "manage/manifest-install") return {id: "install-id"};
@@ -226,7 +233,6 @@ async function main() {
   assert.equal(elements["source-message"].hidden, false);
   await elements["binding-form"].trigger("submit");
   assert.equal(elements["save-binding"].disabled, false);
-  elements["activate-binding"].checked = true;
   await elements["save-binding"].trigger("click");
   assert.equal(posts.find(item => item.endpoint === "manage/source-bind").body.activate, true);
   assert.equal(elements["save-binding"].disabled, true);
@@ -312,6 +318,22 @@ async function main() {
   assert.match(elements["plugin-list"].children[0].children.at(-1).textContent, /自定义市场/);
   record.active_binding_id = null; await refresh();
   assert.match(elements["plugin-list"].children[0].children.at(-1).textContent, /未绑定更新源/);
+
+  // Editing the author keeps the plugin selectable; sync only updates its record.
+  elements["export-format"].value = "zip"; await elements["export-format"].trigger("change");
+  record.metadata_changed = true; record.metadata_notice = "插件信息已变更：作者。";
+  record.revision = "metadata-r1";
+  await refresh();
+  assert.match(elements["plugin-list"].textContent, /插件信息已变更：作者/);
+  assert.match(elements["plugin-list"].children[0].textContent, /已打开/);
+  const updateInfo = descendants(elements["plugin-list"]).find(element => element.tagName === "button" && element.textContent === "更新信息");
+  assert.equal(updateInfo.disabled, false);
+  const beforeSync = vm.runInContext("JSON.stringify(selections())", context);
+  await updateInfo.trigger("click");
+  assert.ok(posts.some(item => item.endpoint === "manage/metadata-sync"));
+  assert.doesNotMatch(elements["plugin-list"].textContent, /插件信息已变更：作者/);
+  assert.equal(vm.runInContext("JSON.stringify(selections())", context), beforeSync);
+  assert.ok(posts.every(item => !item.endpoint.includes("reload")));
 
   // Task execution locks selection controls without changing saved UI choices.
   elements["export-format"].value = "zip"; await elements["export-format"].trigger("change");

@@ -131,12 +131,16 @@ class ManifestService:
                 (
                     binding
                     for binding in record["bindings"]
-                    if binding["kind"] == "market" and binding["registry_url"] is None
+                    if binding["kind"] == "market"
+                    and binding["registry_url"] is None
+                    and binding.get("verification") != "metadata_changed"
                 ),
                 None,
             )
             if not binding:
-                raise ValueError(f"{directory} 尚未关联官方市场 ID，请先校验并绑定。")
+                raise ValueError(
+                    f"{directory} 尚未关联有效的官方市场 ID，请先校验并绑定。"
+                )
             local = record["local"]
             entry = {
                 "market_plugin_id": binding["market_plugin_id"],

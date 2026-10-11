@@ -86,14 +86,16 @@
       <section class="source-section source-add" aria-labelledby="binding-form-title">
         <form id="binding-form">
           <h3 id="binding-form-title">关联新来源</h3>
-          <p class="source-description">填写市场 ID 或 HTTPS Git 仓库，校验后保存关联。</p>
+          <p class="source-description">填写市场 ID 或 HTTPS Git 仓库，校验并保存后设为当前更新源。</p>
           <div class="binding-fields">
             <label class="binding-kind-field" for="binding-kind">来源类型<select id="binding-kind"><option value="market">官方市场</option><option value="repository">Git 仓库</option></select></label>
             <label class="binding-value-field" for="binding-value"><span id="binding-value-label">市场 ID</span><input id="binding-value" type="text" maxlength="2048" placeholder="作者/astrbot_plugin_example" required></label>
-            <button id="preview-binding" type="submit" class="button secondary">校验身份</button>
+            <div class="binding-actions">
+              <button id="preview-binding" type="submit" class="button secondary">校验身份</button>
+              <button id="save-binding" type="button" class="button primary" disabled>保存关联</button>
+            </div>
           </div>
           <div id="binding-preview" class="binding-preview" aria-live="polite" hidden></div>
-          <div class="binding-save-row"><label class="check"><input id="activate-binding" type="checkbox"><span>同时设为当前更新源<small>同步到 AstrBot</small></span></label><button id="save-binding" type="button" class="button primary" disabled>保存关联</button></div>
         </form>
       </section>
       <details id="source-install-details" class="source-details"><summary>安装记录<span id="source-install-method" class="source-detail-summary"></span></summary><dl id="source-provenance" class="source-facts"></dl></details>

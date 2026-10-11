@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import yaml
 from astrbot_plugin_manager.transfer_bundle import (
     load_json,
     remove_path,
@@ -110,6 +111,83 @@ async def test_export_rechecks_files_after_page_statistics(transfer_env):
     assert not (transfers.job_directory(job["id"]) / "package.zip").exists()
 
 
+@pytest.mark.parametrize("active", [False, True])
+async def test_author_edits_keep_real_status_and_original_kv_scope(
+    transfer_env, active
+):
+    env = transfer_env
+    target = env.make_transfer_plugin(active=active)
+    transfers = env.plugin.transfers
+    metadata_path = transfers.code_root / target.root_dir_name / "metadata.yaml"
+    metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
+    metadata["author"] = "New Author"
+    metadata_path.write_text(yaml.safe_dump(metadata), encoding="utf-8")
+    config = transfers.config_root / (target.root_dir_name + "_config.json")
+    config.write_text('{"enabled": true}', encoding="utf-8")
+    old_id, new_id = target.plugin_id, f"new author/{target.name}"
+    env.kv_values[("plugin", old_id)] = {"original": "runtime value"}
+    env.kv_values[("plugin", new_id)] = {"unrelated": "other value", "extra": 1}
+    entry = next(
+        item
+        for item in await transfers.inventory(statistics=True)
+        if item["directory"] == target.root_dir_name
+    )
+    assert entry["status"] == ("enabled" if active else "disabled")
+    assert not entry["blocked"] and entry["metadata_changed"]
+    assert entry["config_available"] and entry["data_available"]
+    assert entry["plugin_id"] == new_id and entry["data_plugin_id"] == old_id
+    assert entry["kv_count"] == 1
+    preview = await transfers.export_preview(
+        [{"directory": target.root_dir_name, "config": True, "data": False}]
+    )
+    assert preview["plugins"][0]["config"]
+    if active:
+        with pytest.raises(ValueError, match="先停用"):
+            await transfers.export_preview(
+                [{"directory": target.root_dir_name, "config": False, "data": True}]
+            )
+        env.manager._terminate_plugin.assert_not_awaited()
+    else:
+        preview = await transfers.export_preview(
+            [{"directory": target.root_dir_name, "config": False, "data": True}]
+        )
+        started = await transfers.start_export(
+            "admin", None, True, selections=preview["selections"]
+        )
+        await transfers.task
+        package = transfers.download(started["id"], "admin", "package")
+        stage = env.root / "edited-author-export"
+        manifest = unpack(package, stage)
+        assert manifest["plugins"][0]["plugin_id"] == new_id
+        assert set(load_json(stage / "payload" / target.root_dir_name / "kv.json")) == {
+            "original"
+        }
+        assert env.kv_values[("plugin", new_id)]["unrelated"] == "other value"
+        env.preferences.put_async.assert_not_awaited()
+        env.manager.load.assert_not_awaited()
+
+
+async def test_metadata_name_conflicts_do_not_invent_loading_failure(transfer_env):
+    env = transfer_env
+    target = env.make_transfer_plugin(active=True)
+    transfers = env.plugin.transfers
+    path = transfers.code_root / target.root_dir_name / "metadata.yaml"
+    metadata = yaml.safe_load(path.read_text(encoding="utf-8"))
+    metadata["name"] = "another_plugin"
+    path.write_text(yaml.safe_dump(metadata), encoding="utf-8")
+    entry = next(
+        item
+        for item in await transfers.inventory()
+        if item["directory"] == target.root_dir_name
+    )
+    assert entry["status"] == "enabled"
+    assert entry["blocked"] and not entry["data_available"]
+    with pytest.raises(ValueError, match="插件名"):
+        await transfers.export_preview(
+            [{"directory": target.root_dir_name, "config": False, "data": False}]
+        )
+
+
 @pytest.mark.parametrize("fail_after_source_change", [False, True])
 async def test_code_migration_clears_bindings_and_rollback_restores_original_source(
     transfer_env, monkeypatch, fail_after_source_change
@@ -203,9 +281,7 @@ async def test_current_selection_export_is_independent_of_saved_rule(
     assert job["status"] == "completed", job
     package = transfers.download(job["id"], "admin", "package")
     manifest = unpack(package, env.root / "current-export")
-    assert [item["directory"] for item in manifest["plugins"]] == [
-        target.root_dir_name
-    ]
+    assert [item["directory"] for item in manifest["plugins"]] == [target.root_dir_name]
     assert not job["rule"]["selections"][0]["data"]
     assert transfers.rule() == saved_after
     assert transfers.rule_path.exists() == existing_rule
@@ -588,7 +664,7 @@ async def test_busy_jobs_owner_expiration_and_interruptions_are_explicit(
 
 async def test_registered_routes_are_removed_on_termination(transfer_env):
     env = transfer_env
-    assert len(env.context.registered_web_apis) == 20
+    assert len(env.context.registered_web_apis) == 21
     await env.plugin.terminate()
     assert env.context.registered_web_apis == []
     assert env.plugin.transfers.closing

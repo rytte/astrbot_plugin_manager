@@ -27,6 +27,14 @@ SOURCE_LABELS = {
     "unknown": "来源未知",
     "builtin": "AstrBot 内置",
 }
+METADATA_FIELDS = ("name", "author", "display_name", "version", "repo")
+METADATA_LABELS = {
+    "name": "插件名",
+    "author": "作者",
+    "display_name": "显示名称",
+    "version": "版本",
+    "repo": "仓库地址",
+}
 
 
 def now() -> str:
@@ -137,6 +145,9 @@ class SourceService:
                 ),
                 "problem": "",
             }
+            record["runtime_metadata"] = {
+                field: record[field] for field in METADATA_FIELDS
+            }
             if not record["reserved"]:
                 try:
                     component(directory, module=True)
@@ -152,12 +163,9 @@ class SourceService:
                         )
                         if not isinstance(metadata, dict):
                             raise ValueError("插件元数据不是映射。")
-                        if plugin and any(
-                            metadata.get(field) != record[field]
-                            for field in ("name", "author")
-                        ):
+                        if plugin and metadata.get("name") != record["name"]:
                             raise ValueError(
-                                "磁盘与运行时身份不同，请先重载或检查插件。"
+                                "磁盘插件名与运行时不同，请先重载或检查插件。"
                             )
                         for field in (
                             "name",
@@ -173,6 +181,10 @@ class SourceService:
                         raise ValueError("插件身份不完整，暂不能绑定或导出清单。")
                 except (ValueError, OSError, yaml.YAMLError, UnicodeError) as exc:
                     record["problem"] = redact(str(exc))
+            if plugin is None:
+                record["runtime_metadata"] = {
+                    field: record[field] for field in METADATA_FIELDS
+                }
             result.append(record)
         return result
 
@@ -212,16 +224,19 @@ class SourceService:
             return None
         if core.get("root_dir_name") not in (None, local["directory"]):
             return None
-        if any(
-            core.get(field) not in (None, "", local[field])
-            for field in ("name", "author")
-        ):
+        if core.get("name") not in (None, "", local["name"]):
             return None
         return core
 
     def _view(self, local: dict, core: dict | None, store: dict) -> dict:
         saved = copy.deepcopy(store["plugins"].get(local["directory"], {}))
-        mismatch = bool(saved and saved.get("identity") != self._identity(local))
+        mismatch = bool(
+            saved
+            and any(
+                saved.get("identity", {}).get(field) != local[field]
+                for field in ("directory", "name")
+            )
+        )
         if mismatch:
             saved = {}
             core = None
@@ -229,7 +244,10 @@ class SourceService:
         if not saved:
             saved = {
                 "record_id": uuid.uuid4().hex,
-                "identity": self._identity(local),
+                "identity": {
+                    **self._identity(local),
+                    "author": local["runtime_metadata"]["author"] or local["author"],
+                },
                 "provenance": {
                     "method": "builtin"
                     if local["reserved"]
@@ -240,18 +258,39 @@ class SourceService:
                 },
                 "bindings": [],
                 "history": [],
+                "metadata_snapshot": copy.deepcopy(local["runtime_metadata"]),
             }
             if core:
                 saved["provenance"]["source"] = self._binding(core)
                 saved["provenance"]["reported_installed_at"] = core.get("installed_at")
+        if "metadata_snapshot" not in saved:
+            saved["metadata_snapshot"] = {
+                **local["runtime_metadata"],
+                "name": saved["identity"]["name"],
+                "author": saved["identity"]["author"],
+            }
+        changes = [
+            field
+            for field in METADATA_FIELDS
+            if saved["metadata_snapshot"].get(field, "") != local[field]
+        ]
         active = self._binding(core)
         if active and not any(item["id"] == active["id"] for item in saved["bindings"]):
             saved["bindings"].append(active)
+        if saved["identity"]["author"] != local["author"]:
+            for binding in saved["bindings"]:
+                binding["verification"] = "metadata_changed"
         saved.update(
             local=local,
             active_binding_id=active["id"] if active else None,
             core_revision=fingerprint(core),
             identity_changed=mismatch,
+            metadata_changed=bool(changes) and not mismatch and not local["problem"],
+            metadata_notice="插件信息已变更："
+            + "、".join(METADATA_LABELS[field] for field in changes)
+            + "。"
+            if changes
+            else "",
         )
         saved["revision"] = fingerprint(
             {
@@ -297,6 +336,51 @@ class SourceService:
                 return record
         raise ValueError("插件目录不存在，请刷新列表。")
 
+    async def sync_metadata(self, owner: str, directory: str, revision: str) -> dict:
+        """Acknowledge local metadata without reloading or changing core state."""
+        self.operations.ensure_writable()
+        self.transfers._ensure_idle()
+        async with self.transfers.operation_lock, self.operations.manager._pm_lock:
+            self.transfers._ensure_idle()
+            self.operations.ensure_writable()
+            record = await self.detail(directory)
+            self._editable(record)
+            if record["revision"] != revision:
+                raise ValueError("插件信息已变化，请刷新后重试。")
+            if not record["metadata_changed"]:
+                return record
+            old_identity = record["identity"]
+            local = record["local"]
+            # Only revise matching saved selections; never adopt a reused name.
+            rule = self.transfers.rule()
+            old_id = "/".join(
+                old_identity[field].lower().replace("/", "_")
+                for field in ("author", "name")
+            )
+            new_id = "/".join(
+                local[field].lower().replace("/", "_") for field in ("author", "name")
+            )
+            changed_rule = False
+            for selection in rule["selections"]:
+                if (
+                    selection["directory"] == directory
+                    and selection["name"] == local["name"]
+                    and selection["plugin_id"] == old_id
+                    and old_id != new_id
+                ):
+                    selection["plugin_id"] = new_id
+                    changed_rule = True
+            if changed_rule:
+                rule["updated_at"] = time.time()
+                await asyncio.to_thread(write_json, self.transfers.rule_path, rule)
+            record["identity"] = self._identity(local)
+            record["metadata_snapshot"] = {
+                field: local[field] for field in METADATA_FIELDS
+            }
+            self._event(record, "metadata_synced", owner)
+            await self._save_record(record)
+        return await self.detail(directory)
+
     @staticmethod
     def _editable(record: dict) -> None:
         if record["local"]["reserved"] or record["local"]["problem"]:
@@ -321,6 +405,8 @@ class SourceService:
         record = await self.detail(directory)
         self._editable(record)
         local = record["local"]
+        if record["identity"]["author"] != local["author"]:
+            raise ValueError("作者信息已变更，请先点击「更新信息」，再校验来源。")
         notice = None
         if kind == "market":
             if not is_market_id(value):
@@ -494,6 +580,7 @@ class SourceService:
                 "bindings",
                 "history",
                 "last_core_revision",
+                "metadata_snapshot",
             )
             if key in record
         }

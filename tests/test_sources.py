@@ -4,6 +4,7 @@ import copy
 from unittest.mock import AsyncMock
 
 import pytest
+import yaml
 from astrbot_plugin_manager.sources import SourceService, same_repository
 
 
@@ -177,17 +178,109 @@ async def test_directory_reuse_never_inherits_trust(env):
     target = env.add_target()
     env.prefs["plugin_install_sources"] = {target.root_dir_name: core_source(target)}
     first = await env.plugin.sources.detail(target.root_dir_name)
-    target.author = "someone_else"
+    target.name = "another_plugin"
     changed = await env.plugin.sources.detail(target.root_dir_name)
     assert changed["identity_changed"]
     assert changed["active_binding_id"] is None
     assert changed["provenance"]["method"] == "unknown"
     with pytest.raises(ValueError, match="复用"):
         env.plugin.sources._editable(changed)
-    target.author = first["identity"]["author"]
+    target.name = first["identity"]["name"]
     assert (await env.plugin.sources.detail(target.root_dir_name))[
         "record_id"
     ] == first["record_id"]
+
+
+@pytest.mark.parametrize("first_seen_after_edit", [False, True])
+async def test_author_edit_can_sync_records_without_reloading_or_losing_sources(
+    transfer_env, first_seen_after_edit, monkeypatch
+):
+    env = transfer_env
+    target = env.make_transfer_plugin(active=True)
+    old_author = target.author
+    other = env.make_transfer_plugin(name="other", directory="other_dir")
+    sources, transfers = env.plugin.sources, env.plugin.transfers
+    env.prefs["plugin_install_sources"] = {target.root_dir_name: core_source(target)}
+    core_before = copy.deepcopy(env.prefs)
+    rule = await transfers.save_rule(
+        [
+            {"directory": target.root_dir_name, "config": False, "data": False},
+            {"directory": other.root_dir_name, "config": False, "data": False},
+        ]
+    )
+    if not first_seen_after_edit:
+        await sources.detail(target.root_dir_name)
+    path = transfers.code_root / target.root_dir_name / "metadata.yaml"
+    metadata = yaml.safe_load(path.read_text(encoding="utf-8"))
+    metadata["author"] = "Edited Author"
+    path.write_text(yaml.safe_dump(metadata), encoding="utf-8")
+    disk_before = path.read_bytes()
+    before = await sources.detail(target.root_dir_name)
+    assert before["metadata_changed"] and not before["identity_changed"]
+    assert not before["local"]["problem"]
+    assert before["local"]["status"] == "enabled"
+    assert before["active_binding_id"]
+    assert before["bindings"][0]["verification"] == "metadata_changed"
+    sources._editable(before)
+    with pytest.raises(ValueError, match="更新信息"):
+        await sources.preview_binding(
+            "admin", target.root_dir_name, "repository", "https://github.com/test/demo"
+        )
+    synced = await sources.sync_metadata(
+        "admin", target.root_dir_name, before["revision"]
+    )
+    assert not synced["metadata_changed"] and not synced["identity_changed"]
+    assert synced["local"]["author"] == "Edited Author"
+    assert synced["record_id"] == before["record_id"]
+    assert synced["provenance"] == before["provenance"]
+    assert synced["bindings"] == before["bindings"]
+    assert synced["active_binding_id"] == before["active_binding_id"]
+    assert synced["history"][-1]["action"] == "metadata_synced"
+    assert (
+        transfers.rule()["selections"][0]["plugin_id"] == f"edited author/{target.name}"
+    )
+    assert transfers.rule()["selections"][1] == rule["selections"][1]
+    restarted = SourceService(env.plugin.service, transfers)
+    assert not (await restarted.detail(target.root_dir_name))["metadata_changed"]
+    assert target.author == old_author
+    assert target.activated
+    assert env.prefs == core_before and path.read_bytes() == disk_before
+    env.manager.load.assert_not_awaited()
+    env.manager._terminate_plugin.assert_not_awaited()
+    env.preferences.global_put.assert_not_awaited()
+    monkeypatch.setattr(
+        env.manager,
+        "inspect_plugin_repository",
+        AsyncMock(return_value={"name": target.name, "author": "Edited Author"}),
+        raising=False,
+    )
+    preview = await sources.preview_binding(
+        "admin", target.root_dir_name, "repository", "https://github.com/test/demo"
+    )
+    rebound = await sources.bind("admin", preview["id"], False, True)
+    assert any(
+        binding["verification"] == "identity_matched" for binding in rebound["bindings"]
+    )
+    assert not rebound["metadata_changed"]
+
+
+async def test_metadata_sync_rejects_changes_since_display(transfer_env):
+    env = transfer_env
+    target = env.make_transfer_plugin()
+    sources = env.plugin.sources
+    await sources.detail(target.root_dir_name)
+    path = env.plugin.transfers.code_root / target.root_dir_name / "metadata.yaml"
+    metadata = yaml.safe_load(path.read_text(encoding="utf-8"))
+    metadata["author"] = "First Edit"
+    path.write_text(yaml.safe_dump(metadata), encoding="utf-8")
+    shown = await sources.detail(target.root_dir_name)
+    metadata["author"] = "Second Edit"
+    path.write_text(yaml.safe_dump(metadata), encoding="utf-8")
+    with pytest.raises(ValueError, match="信息已变化"):
+        await sources.sync_metadata("admin", target.root_dir_name, shown["revision"])
+    assert (await sources.detail(target.root_dir_name))["metadata_changed"]
+    assert not env.plugin.transfers.rule_path.exists()
+    env.manager.load.assert_not_awaited()
 
 
 async def test_bundle_import_invalidates_bindings_and_can_restore_source_snapshot(env):

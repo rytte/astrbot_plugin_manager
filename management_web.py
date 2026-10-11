@@ -36,6 +36,7 @@ class ManagementWeb(TransferWeb):
             "source-preview": "POST",
             "source-bind": "POST",
             "source-select": "POST",
+            "metadata-sync": "POST",
             "manifest-export": "POST",
             "manifest-download": "GET",
             "manifest-upload": "POST",
@@ -112,7 +113,14 @@ class ManagementWeb(TransferWeb):
                 if not isinstance(body, dict):
                     raise ValueError("请求必须是 JSON 对象。")
                 self._check_nonce(owner, body.get("csrf"))
-                if action == "source-preview":
+                if action == "metadata-sync":
+                    exact_keys(body, {"csrf", "directory", "revision"})
+                    data = redact(
+                        await self.sources.sync_metadata(
+                            owner, body["directory"], body["revision"]
+                        )
+                    )
+                elif action == "source-preview":
                     exact_keys(body, {"csrf", "directory", "kind", "value"})
                     data = await self.sources.preview_binding(
                         owner, body["directory"], body["kind"], body["value"]
