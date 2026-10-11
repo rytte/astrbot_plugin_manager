@@ -10,6 +10,10 @@ let busy = false;
 let requesting = false;
 let previousBusy = false;
 let confirmationResolve = null;
+let managementState;
+let selectedRecord = null, bindingPreview = null, manifestPreview = null;
+let manifestSelections = new Set(), installChoices = new Set();
+const sourceLabels = {market: "插件市场", repository: "代码仓库", upload: "上传安装", bundle: "迁移包导入", unknown: "来源未知", builtin: "AstrBot 内置"};
 
 function node(tag, className, text) {
   const element = document.createElement(tag);
@@ -29,6 +33,11 @@ function message(text, error = false) {
   elements.message.textContent = text;
   elements.message.classList.toggle("error", error);
   elements.message.hidden = !text;
+  if (elements["source-dialog"].open) {
+    elements["source-message"].textContent = text;
+    elements["source-message"].hidden = !text;
+    elements["source-message"].classList.toggle("error", error);
+  }
 }
 
 function selections() {
@@ -43,6 +52,28 @@ function isDirty() {
   return JSON.stringify(selections()) !== JSON.stringify(savedSelections());
 }
 
+function manifestMode() {return elements["export-format"].value === "manifest";}
+function sourceRecord(directory) {return managementState.plugins.find(record => record.local.directory === directory);}
+function active(record) {return record.bindings.find(binding => binding.id === record.active_binding_id);}
+function official(record) {return record && record.bindings.some(binding => binding.kind === "market" && binding.registry_url === null);}
+function eligible(record) {return record && !record.local.reserved && !record.local.problem && !record.identity_changed && official(record);}
+function sourceText(binding) {return binding ? (binding.kind === "market" ? (binding.registry_url ? "自定义市场 / " : "官方市场 / ") + binding.market_plugin_id : binding.repo_url) : "未绑定更新源";}
+function button(text, action, disabled = false) {
+  const element = node("button", "button secondary source-action", text);
+  element.disabled = requesting || busy || disabled;
+  element.addEventListener("click", () => runRequest(action));
+  return element;
+}
+function renderFormats() {
+  const isManifest = manifestMode();
+  document.documentElement.dataset.exportFormat = isManifest ? "manifest" : "zip";
+  elements["zip-summary"].hidden = isManifest;
+  elements["manifest-summary"].hidden = !isManifest;
+  elements["export-hint"].textContent = isManifest ? "接收者从官方市场安装当前版本；现有插件跳过。" : "保存规则不产生备份。导出读取执行时的实际内容。";
+  const importingManifest = elements["import-format"].value === "manifest";
+  elements["bundle-import"].hidden = importingManifest;
+  elements["manifest-import"].hidden = !importingManifest;
+}
 function visiblePlugins() {
   const term = elements.search.value.trim().toLowerCase();
   const filter = elements["status-filter"].value;
@@ -77,35 +108,42 @@ function renderPlugins() {
   const plugins = visiblePlugins();
   elements["plugin-count"].textContent = state.plugins.length + " 个插件";
   for (const plugin of plugins) {
-    const choice = choices.get(plugin.directory);
+    const record = sourceRecord(plugin.directory);
+    const blocked = manifestMode() ? !eligible(record) : Boolean(plugin.blocked);
+    const choice = manifestMode() ? {selected: manifestSelections.has(plugin.directory), data: false, config: false} : choices.get(plugin.directory);
     const row = node("tr", choice.selected ? "selected" : "");
     const selectCell = node("td", "check-cell");
-    selectCell.append(checkbox("选择插件 " + plugin.name, choice.selected, Boolean(plugin.blocked) && !choice.selected, checked => {choice.selected = checked; renderPlugins(); renderSummary();}));
+    selectCell.append(checkbox("选择插件 " + plugin.name, choice.selected, blocked && !choice.selected, checked => {if (manifestMode()) {checked ? manifestSelections.add(plugin.directory) : manifestSelections.delete(plugin.directory);} else choice.selected = checked; renderPlugins(); renderSummary();}));
     const title = titleCell(plugin);
-    if (plugin.blocked) title.append(node("div", "plugin-error", plugin.blocked));
-    const dataCell = node("td");
+    if (manifestMode()) title.append(node("div", eligible(record) ? "plugin-detail" : "plugin-error", eligible(record) ? "可分享 · 已关联官方市场" : "暂不能分享 · 请在来源管理中校验并关联官方市场"));
+    else if (plugin.blocked) title.append(node("div", "plugin-error", plugin.blocked));
+    const dataCell = node("td"); dataCell.dataset.zipOnly = "";
     const dataCheck = checkbox("附带 " + plugin.name + " 的标准数据", choice.data, !choice.selected || !plugin.data_available || Boolean(plugin.blocked), checked => {choice.data = checked; renderSummary();});
     dataCheck.append(document.createTextNode(plugin.data_available ? "标准数据" : "不可用"));
     dataCell.append(dataCheck, node("div", "range-label", plugin.data_available ? formatSize(plugin.data_size) + " · " + plugin.kv_count + " 个 KV" : "归属未知或自身数据"));
     dataCell.title = (plugin.ranges || []).join("\n");
-    const configCell = node("td");
+    const configCell = node("td"); configCell.dataset.zipOnly = "";
     const configCheck = checkbox("附带 " + plugin.name + " 的当前配置", choice.config, !choice.selected || !plugin.config_available || Boolean(plugin.blocked), checked => {choice.config = checked; renderSummary();});
     configCheck.append(document.createTextNode(plugin.config_available ? "当前配置" : "无已保存配置"));
     configCell.append(configCheck);
-    row.append(selectCell, title, dataCell, configCell, node("td", "numeric", formatSize(plugin.code_size)));
+    const sizeCell = node("td", "numeric", formatSize(plugin.code_size)); sizeCell.dataset.zipOnly = "";
+    const sourceCell = node("td");
+    sourceCell.append(button("来源管理", () => openSource(plugin.directory), !record));
+    row.append(selectCell, title, dataCell, configCell, sizeCell, sourceCell);
     body.append(row);
   }
   if (!plugins.length) {
     const row = node("tr");
     const cell = node("td", "empty", "没有匹配的插件。");
-    cell.colSpan = 5;
+    cell.colSpan = manifestMode() ? 3 : 6;
     row.append(cell);
     body.append(row);
   }
 }
 
 function renderSummary() {
-  const selected = selections();
+  renderFormats();
+  const selected = manifestMode() ? Array.from(manifestSelections, directory => ({directory, config: false, data: false})) : selections();
   const selectedPlugins = state.plugins.filter(plugin => choices.get(plugin.directory)?.selected);
   const dirty = isDirty();
   elements["selected-count"].textContent = selected.length;
@@ -115,7 +153,12 @@ function renderSummary() {
   elements["rule-status"].textContent = dirty ? "有未保存改动 · 请先保存规则" : state.rule.updated_at ? "规则已保存 · " + new Date(state.rule.updated_at * 1000).toLocaleString("zh-CN") : "尚未保存导出规则";
   elements["rule-status"].classList.toggle("dirty", dirty);
   elements["save-rule"].disabled = busy || requesting || !dirty;
-  elements.export.disabled = busy || requesting || dirty || !state.rule.selections.length;
+  elements.export.textContent = manifestMode() ? "导出清单 JSON" : "按已保存规则导出 ↗";
+  elements.export.disabled = busy || requesting || (manifestMode() ? !manifestSelections.size || Array.from(manifestSelections).some(directory => !eligible(sourceRecord(directory))) : dirty || !state.rule.selections.length);
+  elements["export-format"].disabled = requesting;
+  elements["import-format"].disabled = requesting;
+  elements["manifest-file"].disabled = busy || requesting;
+  elements["install-manifest"].disabled = busy || requesting || !manifestPreview || !installChoices.size;
   elements["bundle-file"].disabled = busy || requesting;
   elements["execute-import"].disabled = busy || requesting || !preview || !Array.from(importChoices.values()).some(choice => choice.code || choice.config || choice.data);
   for (const identifier of ["bulk-data", "bulk-config", "select-visible", "clear-visible"]) elements[identifier].disabled = busy || requesting;
@@ -155,8 +198,9 @@ async function post(action, body = {}) {
 }
 
 async function loadState(preserve = false) {
-  const updated = await bridge.apiGet("transfer/state");
+  const [updated, management] = await Promise.all([bridge.apiGet("transfer/state"), bridge.apiGet("manage/state")]);
   state = updated;
+  updateManagement(management);
   busy = state.busy;
   if (!preserve) {
     choices = new Map(state.plugins.map(plugin => [plugin.directory, {selected: false, config: false, data: false}]));
@@ -173,6 +217,7 @@ async function loadState(preserve = false) {
   renderPlugins();
   renderSummary();
   renderJobs(state.jobs);
+  if (selectedRecord) renderSource();
 }
 
 async function runRequest(operation) {
@@ -180,9 +225,10 @@ async function runRequest(operation) {
   requesting = true;
   renderPlugins();
   renderSummary();
+  if (selectedRecord) {elements["source-message"].hidden = true; renderSource();}
   try { await operation(); }
   catch (error) { message(error.message || "操作失败，请检查服务端日志。", true); }
-  finally { requesting = false; renderPlugins(); renderSummary(); if (preview) renderImportPreview(); }
+  finally { requesting = false; renderPlugins(); renderSummary(); if (preview) renderImportPreview(); if (manifestPreview) renderManifest(); if (selectedRecord) renderSource(); }
 }
 
 function renderImportPreview() {
@@ -218,7 +264,7 @@ function renderJobs(jobs) {
   for (const job of jobs) {
     const card = node("article", "job-card");
     const heading = node("div", "job-heading");
-    heading.append(node("span", "job-title", job.kind === "export" ? "导出插件包" : "导入插件包"), node("span", "pill", labels[job.status] || job.status));
+    heading.append(node("span", "job-title", ({export: "导出插件包", import: "导入插件包", manifest_export: "导出插件清单", manifest_install: "清单安装"}[job.kind] || job.kind)), node("span", "pill", labels[job.status] || job.status));
     card.append(heading, node("div", "job-meta", new Date(job.created_at * 1000).toLocaleString("zh-CN") + " · " + job.id.slice(0, 8)), node("div", "job-phase", job.phase));
     if (job.results.length) {
       const results = node("ul", "job-results");
@@ -241,22 +287,30 @@ function renderJobs(jobs) {
       });
       actions.append(button);
     }
+    if (job.kind === "manifest_export" && job.status === "completed") {
+      const download = button(job.expired ? "文件已过保留期" : "下载清单 JSON ↓", () => bridge.download("manage/manifest-download", {id: job.id}, "plugins.astrbot-plugin-manifest.json"), job.expired);
+      actions.append(download);
+    }
     if (actions.childNodes.length) card.append(actions);
     list.append(card);
   }
-  if (!jobs.length) list.append(node("p", "empty", "暂无任务。保存规则或导入一个插件包，开始你的第一次迁移。"));
+  if (!jobs.length) list.append(node("p", "empty", "暂无任务。导出插件包或清单，或上传文件开始迁移。"));
 }
 
 function bindEvents() {
+  bindManagementEvents();
+  elements["export-format"].addEventListener("change", () => {renderPlugins(); renderSummary();});
+  elements["import-format"].addEventListener("change", renderFormats);
   for (const button of document.querySelectorAll("[data-tab]")) button.addEventListener("click", () => showTab(button.dataset.tab));
   elements.search.addEventListener("input", renderPlugins);
   elements["status-filter"].addEventListener("change", renderPlugins);
-  elements["select-visible"].addEventListener("click", () => {for (const plugin of visiblePlugins()) if (!plugin.blocked) choices.get(plugin.directory).selected = true; renderPlugins(); renderSummary();});
-  elements["clear-visible"].addEventListener("click", () => {for (const plugin of visiblePlugins()) choices.get(plugin.directory).selected = false; renderPlugins(); renderSummary();});
+  elements["select-visible"].addEventListener("click", () => {for (const plugin of visiblePlugins()) {if (manifestMode()) {if (eligible(sourceRecord(plugin.directory))) manifestSelections.add(plugin.directory);} else if (!plugin.blocked) choices.get(plugin.directory).selected = true;} renderPlugins(); renderSummary();});
+  elements["clear-visible"].addEventListener("click", () => {for (const plugin of visiblePlugins()) {if (manifestMode()) manifestSelections.delete(plugin.directory); else choices.get(plugin.directory).selected = false;} renderPlugins(); renderSummary();});
   for (const kind of ["data", "config"]) elements["bulk-" + kind].addEventListener("change", event => {for (const plugin of state.plugins) if (choices.get(plugin.directory).selected && plugin[kind + "_available"] && !plugin.blocked) choices.get(plugin.directory)[kind] = event.target.checked; renderPlugins(); renderSummary();});
   elements.refresh.addEventListener("click", () => runRequest(() => loadState(true)));
   elements["save-rule"].addEventListener("click", () => runRequest(async () => {state.rule = await post("rule", {selections: selections()}); message("导出规则已保存。导出按钮将读取这套规则。");}));
   elements.export.addEventListener("click", () => runRequest(async () => {
+    if (manifestMode()) {await exportManifest(); return;}
     const checked = await post("export-preview");
     const accepted = await confirmOperation("检查本次导出", checked.plugins.map(plugin => ({...plugin, description: "代码" + (plugin.config ? " + 当前配置" : "") + (plugin.data ? " + 标准数据 / KV" : "") + (plugin.pause_required ? " · 将短暂暂停" : "")})), "配置和数据按原样备份，不会自动脱敏。附带数据时会暂停相关插件并尝试恢复原运行状态；外部写入可能导致快照失败。");
     if (!accepted) return;
@@ -273,7 +327,7 @@ function bindEvents() {
     elements["import-preview"].hidden = true;
     if (file.size > state.limits.archive_bytes) throw new Error("文件超过上传限制，请减小插件包。");
     elements["file-label"].textContent = "正在上传并校验：" + file.name;
-    preview = await bridge.upload("transfer/upload?csrf=" + encodeURIComponent(state.csrf), file);
+    preview = await bridge.upload("transfer/upload/" + encodeURIComponent(state.csrf), file);
     importChoices = new Map(preview.plugins.map(plugin => [plugin.directory, {code: !plugin.exists && !plugin.problem, config: false, data: false}]));
     elements["file-label"].textContent = "预检完成：" + file.name + " · " + formatSize(file.size);
     renderImportPreview();
@@ -306,6 +360,7 @@ async function pollJobs() {
     message("任务已结束，请查看任务记录、下载文件或按提示处理警告。");
   }
   if (busy !== previousBusy) renderPlugins();
+  if (selectedRecord) await loadManagement();
   previousBusy = busy;
 }
 
@@ -322,6 +377,124 @@ async function initialize() {
     elements["boot-error"].hidden = false;
     elements["boot-error"].textContent = error.message || "插件页面初始化失败。";
   }
+}
+
+
+function updateManagement(updated) {
+  managementState = updated;
+  manifestSelections = new Set(Array.from(manifestSelections).filter(directory => eligible(sourceRecord(directory))));
+  if (!selectedRecord) return;
+  const refreshed = sourceRecord(selectedRecord.local.directory);
+  if (!refreshed) {elements["source-dialog"].close(); selectedRecord = null; bindingPreview = null;}
+  else {if (refreshed.revision !== selectedRecord.revision) bindingPreview = null; selectedRecord = refreshed;}
+}
+async function loadManagement() {
+  updateManagement(await bridge.apiGet("manage/state"));
+  renderPlugins(); renderSummary();
+  if (selectedRecord) renderSource();
+}
+async function managementPost(action, body) {return bridge.apiPost("manage/" + action, {csrf: managementState.csrf, ...body});}
+async function openSource(directory) {
+  await loadManagement();
+  selectedRecord = managementState.plugins.find(record => record.local.directory === directory); bindingPreview = null;
+  if (!selectedRecord) throw new Error("该插件暂无可管理的来源记录，请刷新列表。");
+  elements["source-message"].hidden = true;
+  elements["binding-value"].value = ""; elements["activate-binding"].checked = false;
+  renderSource(); elements["source-dialog"].showModal();
+}
+function renderSource() {
+  if (!selectedRecord) return;
+  const record = selectedRecord, local = record.local;
+  elements["source-title"].textContent = local.display_name || local.name || local.directory;
+  const summary = elements["source-summary"]; summary.replaceChildren();
+  for (const text of [local.name + " / " + local.directory, "当前更新源：" + sourceText(active(record)), "安装记录：" + (sourceLabels[record.provenance.method] || record.provenance.method), "记录依据：" + (record.provenance.evidence === "manager_operation" ? "管家实际执行安装" : record.provenance.evidence === "core_record_observed" ? "首次观察到 AstrBot 绑定记录；不能据此还原最初安装历史" : "缺少安装证据"), "安装时间：" + (record.provenance.installed_at || "未知"), "首次观察：" + record.provenance.observed_at]) summary.append(node("p", "detail", text));
+  if (record.provenance.reported_installed_at) summary.append(node("p", "detail", "AstrBot 记录的时间：" + record.provenance.reported_installed_at + "（仅供参考）"));
+  if (local.problem || record.identity_changed) summary.append(node("p", "plugin-error", local.problem || "目录身份已变化，旧来源记录已隔离。"));
+  const list = elements["binding-list"]; list.replaceChildren();
+  for (const binding of record.bindings) {
+    const card = node("article", "binding-card"); card.append(node("strong", "plugin-id", sourceText(binding)), node("div", "detail", binding.verification === "identity_matched" ? "名称与作者已匹配 · " + binding.checked_at : "来自 AstrBot 的来源记录，尚未重新校验"));
+    if (binding.id === record.active_binding_id) card.append(node("span", "badge", "当前更新源"));
+    else if (binding.kind === "repository" || binding.registry_url === null) card.append(button("设为更新源", async () => {
+      if (!await confirmOperation("切换更新源", [{name: local.name, directory: local.directory, description: sourceText(binding)}], "将重新校验该来源并同步到 AstrBot，后续原生 WebUI 更新使用此来源。最初安装记录保留。")) return;
+      const result = await managementPost("source-select", {directory: local.directory, binding_id: binding.id, revision: record.revision, acknowledged: true});
+      if (selectedRecord && selectedRecord.local.directory === local.directory) selectedRecord = result;
+      bindingPreview = null; await loadManagement(); message("当前更新源已切换并同步到 AstrBot。");
+    }));
+    list.append(card);
+  }
+  if (!record.bindings.length) list.append(node("p", "detail", "尚无来源关联。可先校验官方市场 ID 或仓库 URL。"));
+  const blocked = local.reserved || local.problem || record.identity_changed;
+  for (const id of ["binding-value", "binding-kind", "activate-binding"]) elements[id].disabled = requesting || busy || Boolean(blocked);
+  elements["preview-binding"].disabled = requesting || busy || Boolean(blocked);
+  elements["save-binding"].disabled = requesting || busy || Boolean(blocked) || !bindingPreview;
+  elements["binding-preview"].hidden = !bindingPreview;
+  elements["binding-preview"].textContent = bindingPreview ? "作者和插件名与本机一致：\n" + sourceText(bindingPreview.binding) + (bindingPreview.binding.kind === "market" ? "\n" + bindingPreview.binding.repo_url : "") + "\n此结果只证明元数据匹配，不证明代码安全。" + (bindingPreview.notice ? "\n" + bindingPreview.notice : "") : "";
+  const history = elements["source-history"]; history.replaceChildren();
+  const labels = {installed: "管家安装", uninstalled: "管家卸载", binding_added: "保存来源关联", active_changed: "切换当前更新源", core_observed: "观察到 AstrBot 来源变更", bundle_imported: "迁移包覆盖代码，原更新源已清除"};
+  for (const event of record.history.slice().reverse()) history.append(node("div", "history-row", new Date(event.at).toLocaleString("zh-CN") + " · " + (labels[event.action] || event.action) + " · " + event.actor));
+  if (!record.history.length) history.append(node("p", "detail", "暂无管家操作记录。"));
+}
+
+async function exportManifest() {
+  const job = await managementPost("manifest-export", {directories: Array.from(manifestSelections)});
+  await pollJobs();
+  await bridge.download("manage/manifest-download", {id: job.id}, "plugins.astrbot-plugin-manifest.json");
+  message("插件清单已导出，可分享给对方从官方市场安装。清单不包含配置和数据。");
+}
+function renderManifest() {
+  elements["manifest-preview"].hidden = !manifestPreview;
+  if (!manifestPreview) return;
+  elements["preview-expiry"].textContent = "有效至 " + new Date(manifestPreview.expires_at * 1000).toLocaleString("zh-CN");
+  const body = elements["manifest-list"]; body.replaceChildren();
+  for (const plugin of manifestPreview.plugins) {
+    const row = node("tr"), choice = node("td"), status = node("td");
+    choice.append(checkbox("安装 " + plugin.name, installChoices.has(plugin.market_plugin_id), plugin.status !== "install", checked => {checked ? installChoices.add(plugin.market_plugin_id) : installChoices.delete(plugin.market_plugin_id); renderSummary();}));
+    const title = titleCell({...plugin, version: "", status: ""});
+    title.append(node("div", "plugin-id", plugin.market_plugin_id));
+    status.append(node("div", plugin.status === "blocked" ? "plugin-error" : "plugin-detail", {install: "可安装 · 保持停用", skip: "本机已有 · 跳过", blocked: "无法安装"}[plugin.status]), node("div", "plugin-detail", plugin.problem || "下载后再次核对包内身份与依赖"));
+    row.append(choice, title, node("td", "", (plugin.observed_version || "未声明") + " / " + (plugin.version || "未知")), status); body.append(row);
+  }
+  const warnings = manifestPreview.job.warnings || [];
+  elements["manifest-warnings"].hidden = !warnings.length;
+  elements["manifest-warnings"].textContent = warnings.join("\n");
+}
+function bindManagementEvents() {
+  const closeSource = () => {elements["source-dialog"].close(); selectedRecord = null; bindingPreview = null;};
+  elements["close-source"].addEventListener("click", closeSource);
+  elements["source-dialog"].addEventListener("cancel", closeSource);
+  const invalidate = () => {bindingPreview = null; if (selectedRecord) renderSource();};
+  elements["binding-value"].addEventListener("input", invalidate); elements["binding-kind"].addEventListener("change", invalidate);
+  elements["binding-form"].addEventListener("submit", event => {
+    event.preventDefault(); return runRequest(async () => {
+      if (!selectedRecord) return;
+      const directory = selectedRecord.local.directory;
+      const preview = await managementPost("source-preview", {directory, kind: elements["binding-kind"].value, value: elements["binding-value"].value.trim()});
+      if (selectedRecord && selectedRecord.local.directory === directory) bindingPreview = preview;
+    });
+  });
+  elements["save-binding"].addEventListener("click", () => runRequest(async () => {
+    if (!selectedRecord || !bindingPreview) return;
+    const directory = selectedRecord.local.directory;
+    const result = await managementPost("source-bind", {id: bindingPreview.id, activate: elements["activate-binding"].checked, acknowledged: true});
+    if (selectedRecord && selectedRecord.local.directory === directory) selectedRecord = result;
+    bindingPreview = null; await loadManagement(); message("来源关联已保存，安装历史保留。");
+  }));
+  elements["manifest-file"].addEventListener("change", () => runRequest(async () => {
+    manifestPreview = null; installChoices.clear(); renderManifest();
+    const file = elements["manifest-file"].files[0]; if (!file) return;
+    if (file.size > 8 * 1024 * 1024) throw new Error("清单超过 8 MiB 限制。");
+    manifestPreview = await bridge.upload("manage/manifest-upload/" + encodeURIComponent(managementState.csrf), file);
+    installChoices = new Set(manifestPreview.plugins.filter(plugin => plugin.status === "install").map(plugin => plugin.market_plugin_id));
+    renderManifest(); message("清单预检完成，请核对要从官方市场安装的新插件。");
+  }));
+  elements["install-manifest"].addEventListener("click", () => runRequest(async () => {
+    if (!manifestPreview || !installChoices.size) return;
+    const selected = manifestPreview.plugins.filter(plugin => installChoices.has(plugin.market_plugin_id));
+    if (!await confirmOperation("安装 " + selected.length + " 个新插件", selected.map(plugin => ({...plugin, description: plugin.market_plugin_id + " · 市场版本 " + plugin.version})), "仅从官方市场安装新插件，不覆盖已有插件，不自动安装依赖或启用。单项失败会记录结果；安装后请重启扫描并手动启用。")) return;
+    await managementPost("manifest-install", {id: manifestPreview.job.id, ids: Array.from(installChoices), acknowledged: true});
+    manifestPreview = null; installChoices.clear(); renderManifest(); busy = true;
+    showTab("history-panel"); await pollJobs(); message("清单安装任务已启动，请在任务记录查看逐项结果。");
+  }));
 }
 
 initialize();

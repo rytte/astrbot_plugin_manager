@@ -17,7 +17,10 @@ from astrbot.dashboard.services.plugin_service import (
     PluginServiceWarning,
 )
 
+from .management_web import ManagementWeb
+from .manifests import ManifestService
 from .service import INSTALL_USAGE, PluginOperations, PluginTarget
+from .sources import SourceService
 from .transfer_web import TransferWeb
 from .transfers import TransferService
 
@@ -29,6 +32,7 @@ USAGE = (
     "/pm search <关键词> [--page <页码>]\n"
     "/pm help\n"
     "/pm info <插件名或目录名>\n"
+    "/pm source <插件名或目录名>\n"
     "/pm add <仓库地址或市场ID>\n"
     "/pm enable <插件名或目录名>\n"
     "/pm disable <插件名或目录名>\n"
@@ -70,6 +74,12 @@ class Main(Star):
         self._removals: dict[tuple[str, str], PendingRemoval] = {}
         self.transfers = TransferService(self.service, self._operations)
         self.transfer_web = TransferWeb(context, self.transfers)
+        self.sources = SourceService(self.service, self.transfers)
+        self.service.sources = self.sources
+        self.manifests = ManifestService(self.sources, self.transfers)
+        self.management_web = ManagementWeb(
+            context, self.transfers, self.sources, self.manifests
+        )
 
     async def initialize(self) -> None:
         """Reject conflicting command names before serving requests."""
@@ -77,7 +87,9 @@ class Main(Star):
         if conflicts:
             raise RuntimeError("插件管家命令冲突：" + "、".join(conflicts))
         await self.transfers.initialize()
+        await self.sources.initialize()
         self.transfer_web.register()
+        self.management_web.register()
         self.ready = True
 
     async def reply(self, event: AstrMessageEvent, text: str) -> None:
@@ -117,7 +129,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
         "pm",
-        desc="管理员插件管理：list/cmds/tools/search/help/info/add/enable/disable/reload/remove。",
+        desc="管理员插件管理：list/cmds/tools/search/help/info/source/add/enable/disable/reload/remove。",
     )
     async def plugin(
         self, event: AstrMessageEvent, arguments: GreedyStr
@@ -168,6 +180,12 @@ class Main(Star):
                 if len(args) != 1:
                     raise ValueError("用法：/pm info <插件名或目录名>。")
                 await self.reply(event, self.service.plugin_info(args[0]))
+                yield
+                return
+            if action == "source":
+                if len(args) != 1:
+                    raise ValueError("用法：/pm source <插件名或目录名>。")
+                await self.reply(event, await self.sources.describe(args[0]))
                 yield
                 return
             if action == "search":
@@ -268,7 +286,7 @@ class Main(Star):
             await self.reply(
                 event,
                 "查询失败，请检查 AstrBot 日志。"
-                if action in {"list", "cmds", "tools", "info", "search"}
+                if action in {"list", "cmds", "tools", "info", "search", "source"}
                 else "操作失败，可能已发生部分变更；请检查 AstrBot 日志，并通过 WebUI 检查或恢复插件。",
             )
             yield
@@ -347,4 +365,5 @@ class Main(Star):
         """Invalidate pending requests and confirmations when unloading."""
         self.ready = False
         self._removals.clear()
+        await self.management_web.close()
         await self.transfer_web.close()

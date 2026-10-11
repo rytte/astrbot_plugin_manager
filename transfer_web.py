@@ -33,10 +33,11 @@ class TransferWeb:
             "export-preview": "POST",
             "export": "POST",
             "upload": "POST",
+            "upload/<csrf_token>": "POST",
             "import": "POST",
         }
         for action, method in routes.items():
-            handler = functools.partial(self.dispatch, action)
+            handler = functools.partial(self.dispatch, action.split("/")[0])
             self.handlers.append(handler)
             self.context.register_web_api(
                 f"/astrbot_plugin_manager/transfer/{action}",
@@ -91,7 +92,7 @@ class TransferWeb:
         ):
             raise PermissionError("操作确认凭据已过期或无效，请刷新页面后重试。")
 
-    async def dispatch(self, action: str):
+    async def dispatch(self, action: str, csrf_token: str | None = None):
         """Authorize every handler independently of frontend or framework routing."""
         try:
             owner = self._authorize()
@@ -130,7 +131,10 @@ class TransferWeb:
                     },
                 )
             elif action == "upload":
-                self._check_nonce(owner, request.query.get("csrf"))
+                self._check_nonce(
+                    owner,
+                    csrf_token if csrf_token is not None else request.query.get("csrf"),
+                )
                 data = await self._upload(owner)
             else:
                 body = await request.json()

@@ -422,9 +422,7 @@ class PluginOperations:
             raise ValueError("关键词不能为空，页码必须为正整数。")
         try:
             data, notice = await asyncio.wait_for(
-                self.web.get_online_plugins(
-                    custom_registry=None, force_refresh=False
-                ),
+                self.web.get_online_plugins(custom_registry=None, force_refresh=False),
                 timeout=MARKET_QUERY_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError as exc:
@@ -531,7 +529,17 @@ class PluginOperations:
                     "Installed plugin identity does not match the marketplace request.",
                     public_message="安装包的作者或插件名与市场 ID 不一致，可能已产生部分变更",
                 )
-        return f"插件 {target.name} 已安装（{'已启用' if target.plugin.activated else '已停用'}）。"
+        message = f"插件 {target.name} 已安装（{'已启用' if target.plugin.activated else '已停用'}）。"
+        if hasattr(self, "sources"):
+            try:
+                await self.sources.observe_install(
+                    target.directory,
+                    payload.get("install_method", "repository"),
+                    "chat",
+                )
+            except Exception:
+                message += "来源历史保存失败，请在插件页面检查；安装已完成。"
+        return message
 
     async def disable(self, target: PluginTarget) -> str:
         """Disable using the core service and verify the resulting state.
@@ -672,4 +680,9 @@ class PluginOperations:
         if remaining:
             return f"插件 {target.name} 的卸载服务已执行，但未完全清理：{'、'.join(remaining)}。请在 WebUI 和日志中检查，不要视为彻底删除成功。"
         scope = "配置和数据已删除。" if delete_all else "配置和数据保留。"
+        if hasattr(self, "sources"):
+            try:
+                await self.sources.retire(target.directory, "chat_admin")
+            except Exception:
+                scope += "来源历史归档失败，请检查日志和来源页面。"
         return f"插件 {target.name} 已卸载；{scope}"

@@ -1,6 +1,7 @@
 """End-to-end transfer behavior with real registries and isolated side effects."""
 
 import asyncio
+import copy
 import shutil
 import time
 import zipfile
@@ -30,6 +31,48 @@ async def prepare(env, path):
     shutil.copyfile(path, transfers.job_directory(job["id"]) / "upload.zip")
     result = await transfers.prepare_import(job)
     return job, result
+
+
+@pytest.mark.parametrize("fail_after_source_change", [False, True])
+async def test_code_migration_clears_bindings_and_rollback_restores_original_source(
+    transfer_env, monkeypatch, fail_after_source_change
+):
+    env = transfer_env
+    target = env.make_transfer_plugin()
+    sources, transfers = env.plugin.sources, env.plugin.transfers
+    env.prefs["plugin_install_sources"] = {
+        target.root_dir_name: {
+            "install_method": "market",
+            "registry_url": None,
+            "market_plugin_id": f"{target.author}/{target.name}",
+            "repo": "https://github.com/test/demo",
+        }
+    }
+    original_core = copy.deepcopy(env.prefs["plugin_install_sources"])
+    original_record = await sources.detail(target.root_dir_name)
+    package = await export_package(env, target)
+    job, _ = await prepare(env, package)
+    if fail_after_source_change:
+        saved = sources.note_bundle
+
+        async def fail(directory, actor):
+            await saved(directory, actor)
+            raise OSError("failure after clearing old source")
+
+        monkeypatch.setattr(sources, "note_bundle", fail)
+    await transfers.start_import(job["id"], "admin", [restore_selection(target)], True)
+    await transfers.task
+    current = await sources.detail(target.root_dir_name)
+    rollback = load_json(transfers.job_directory(job["id"]) / "rollback.json")
+    assert "source_state" in rollback["plugins"][0]
+    if fail_after_source_change:
+        assert job["status"] == "failed", job
+        assert current["bindings"] == original_record["bindings"]
+        assert env.prefs["plugin_install_sources"] == original_core
+    else:
+        assert job["status"] == "completed", job
+        assert not current["bindings"] and current["active_binding_id"] is None
+        assert target.root_dir_name not in env.prefs["plugin_install_sources"]
 
 
 async def test_rule_persists_components_and_can_be_cleared(transfer_env):
@@ -399,7 +442,7 @@ async def test_busy_jobs_owner_expiration_and_interruptions_are_explicit(
 
 async def test_registered_routes_are_removed_on_termination(transfer_env):
     env = transfer_env
-    assert len(env.context.registered_web_apis) == 9
+    assert len(env.context.registered_web_apis) == 19
     await env.plugin.terminate()
     assert env.context.registered_web_apis == []
     assert env.plugin.transfers.closing

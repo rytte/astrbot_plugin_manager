@@ -196,6 +196,7 @@ async def env(monkeypatch, tmp_path, request):
         range_get_async=AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(service_module, "sp", preferences)
+    monkeypatch.setattr("astrbot.dashboard.services.plugin_service.sp", preferences)
     sync = AsyncMock()
     monkeypatch.setattr(PluginService, "sync_skills_after_plugin_change", sync)
     monkeypatch.setattr(PluginService, "remove_plugin_install_source", AsyncMock())

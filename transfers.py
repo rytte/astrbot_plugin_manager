@@ -126,6 +126,7 @@ class TransferService:
                     "before",
                     "rollback.zip",
                     "rollback.json",
+                    "plugins.astrbot-plugin-manifest.json",
                 ):
                     remove_path(directory, name)
                 job["expired"] = True
@@ -474,7 +475,8 @@ class TransferService:
                 self._phase(job, "完成")
         except asyncio.CancelledError:
             job.update(
-                status="interrupted", error="任务被插件关闭中断；正式目录未开始修改。"
+                status="interrupted",
+                error="任务被插件关闭中断；请核对任务结果和已完成的插件，不自动续跑。",
             )
             self._phase(job, "中断")
         except Exception as exc:
@@ -1015,6 +1017,10 @@ class TransferService:
             in await self.preferences.global_get("inactivated_plugins", []),
             "components": {},
         }
+        if selection["code"] and hasattr(self.operations, "sources"):
+            record["source_state"] = await self.operations.sources.source_snapshot(
+                plugin["directory"], plugin["name"]
+            )
         for kind, (root, relative) in self._paths(plugin).items():
             if not selection[kind]:
                 continue
@@ -1116,6 +1122,9 @@ class TransferService:
         if record["was_inactive"]:
             inactive.append(module)
         await self.preferences.global_put("inactivated_plugins", inactive)
+
+        if "source_state" in record:
+            await self.operations.sources.restore_sources(record["source_state"])
 
     async def _import(self, job: dict) -> None:
         incoming = {
@@ -1230,6 +1239,10 @@ class TransferService:
                                 source["metadata"]["name"], module
                             )
                         self.manager.failed_plugin_dict.pop(plugin["directory"], None)
+                        if selection["code"] and hasattr(self.operations, "sources"):
+                            await self.operations.sources.note_bundle(
+                                plugin["directory"], job["owner"]
+                            )
                         job["results"].append(
                             {
                                 "directory": plugin["directory"],

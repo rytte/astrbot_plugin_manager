@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 async def test_native_page_discovery_assets_and_chinese_title(
     transfer_env, monkeypatch
 ):
+    page_name, title = "transfer", "插件备份与迁移"
     env = transfer_env
     root = ROOT
     service = PluginPageService(
@@ -26,7 +27,7 @@ async def test_native_page_discovery_assets_and_chinese_title(
     secret = env.context.get_config()["dashboard"]["jwt_secret"]
     token = service.issue_plugin_page_asset_token(
         plugin_name=metadata.name,
-        page_name="transfer",
+        page_name=page_name,
         jwt_secret=secret,
         username="admin",
         locale="zh-CN",
@@ -34,7 +35,7 @@ async def test_native_page_discovery_assets_and_chinese_title(
     context = service.build_initial_context(
         asset_token=token, jwt_secret=secret, locale="zh-CN", theme="dark"
     )
-    assert context["pageTitle"] == "插件备份与迁移"
+    assert context["pageTitle"] == title
     assert context["isDark"] is True
     for asset, expected_type in (
         ("", "text/html"),
@@ -43,7 +44,7 @@ async def test_native_page_discovery_assets_and_chinese_title(
     ):
         payload = await service.serve_page_content(
             plugin_name=metadata.name,
-            page_name="transfer",
+            page_name=page_name,
             asset_path=asset,
             asset_token=token,
             jwt_secret=secret,
@@ -53,6 +54,11 @@ async def test_native_page_discovery_assets_and_chinese_title(
         )
         assert payload.content_type.startswith(expected_type)
         if not asset:
+            assert 'aria-label="迁移功能"' in payload.content
+            assert 'id="source-dialog"' in payload.content
+            assert 'id="export-format"' in payload.content
+            assert 'id="import-format"' in payload.content
+            assert "open-manage" not in payload.content
             assert 'data-theme="dark"' in payload.content
             assert "bridge-sdk.js" in payload.content
             assert "style.css?" in payload.content
@@ -109,6 +115,8 @@ async function main() {
   });
   elements["boot-error"].hidden = true;
   elements["status-filter"].value = "all";
+  elements["export-format"].value = "zip";
+  elements["import-format"].value = "zip";
   const document = {
     hidden: false, documentElement: {dataset: {}},
     querySelectorAll(selector) {return selector === "[id]" ? Object.values(elements) : tabs;},
@@ -129,7 +137,10 @@ async function main() {
   let posts = 0;
   const bridge = {
     async ready() {}, onContext(handler) {handler({isDark: true});},
-    async apiGet() {return structuredClone(state);},
+    async apiGet(endpoint) {
+      if (endpoint === "manage/state") return {csrf: "source-test", busy: false, plugins: [], jobs: []};
+      return structuredClone(state);
+    },
     async apiPost(endpoint, body) {
       posts += 1;
       if (endpoint === "transfer/rule") {
@@ -139,7 +150,8 @@ async function main() {
       if (endpoint === "transfer/export-preview") return {plugins: [{...plugin, config: false, data: false}]};
       throw new Error("Unexpected endpoint " + endpoint);
     },
-    async upload() {
+    async upload(endpoint) {
+      assert.equal(endpoint, "transfer/upload/test");
       return {
         job: {id: "import-id", warnings: []}, astrbot_version: "4.27.4",
         plugins: [{...plugin, exists: true, config: true, data: false, problem: ""},
@@ -186,6 +198,21 @@ main().catch(error => {console.error(error); process.exitCode = 1;});
 """
     result = subprocess.run(
         [executable, "-e", script, str(root)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_management_frontend_selection_binding_polling_and_manifest_confirmation():
+    executable = shutil.which("node")
+    if not executable:
+        pytest.skip("Node.js is required for frontend state tests")
+    result = subprocess.run(
+        [executable, str(ROOT / "tests/transfer_page_state.cjs"), str(ROOT)],
         capture_output=True,
         text=True,
         encoding="utf-8",

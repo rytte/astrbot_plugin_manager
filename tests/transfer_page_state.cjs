@@ -1,0 +1,203 @@
+"use strict";
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const vm = require("node:vm");
+
+class Element {
+  constructor(tag) {
+    this.tagName = tag; this.children = []; this.dataset = {}; this.listeners = {};
+    this.value = ""; this.hidden = false; this.disabled = false; this.checked = false;
+    this.classList = {toggle() {}}; this.content = "";
+  }
+  set textContent(value) {this.content = String(value); this.children = [];}
+  get textContent() {return this.content + this.children.map(child => child.textContent).join("");}
+  get childNodes() {return this.children;}
+  append(...children) {this.children.push(...children);}
+  replaceChildren(...children) {this.children = children; this.content = "";}
+  setAttribute() {}
+  addEventListener(event, handler) {(this.listeners[event] ||= []).push(handler);}
+  async trigger(event) {for (const handler of this.listeners[event] || []) await handler({target: this, preventDefault() {}});}
+  showModal() {this.open = true;}
+  close() {this.open = false;}
+}
+const settle = () => new Promise(resolve => setImmediate(resolve));
+function descendants(element) {return element.children.flatMap(child => [child, ...descendants(child)]);}
+
+async function main() {
+  const root = process.argv[2];
+  const html = fs.readFileSync(path.join(root, "pages/transfer/index.html"), "utf8");
+  const elements = Object.fromEntries(Array.from(html.matchAll(/id="([^"]+)"/g), match => {
+    const element = new Element("div"); element.id = match[1]; return [match[1], element];
+  }));
+  const tabs = Array.from(html.matchAll(/data-tab="([^"]+)"/g), match => {
+    const element = new Element("button"); element.dataset.tab = match[1]; return element;
+  });
+  elements["boot-error"].hidden = true; elements["status-filter"].value = "all";
+  elements["export-format"].value = "zip"; elements["import-format"].value = "zip";
+  const document = {
+    hidden: false, documentElement: {dataset: {}},
+    querySelectorAll(selector) {return selector === "[id]" ? Object.values(elements) : tabs;},
+    createElement(tag) {return new Element(tag);},
+    createTextNode(text) {const element = new Element("text"); element.textContent = text; return element;},
+  };
+  const binding = {id: "official", kind: "market", registry_url: null, market_plugin_id: "Alice/demo", repo_url: "https://github.com/alice/demo", verification: "observed"};
+  const record = {
+    revision: "r1", identity_changed: false, active_binding_id: binding.id, bindings: [binding], history: [],
+    provenance: {method: "market", evidence: "core_record_observed", observed_at: "2026-10-11"},
+    local: {directory: "demo_dir", name: "demo", author: "Alice", display_name: "<img src=x onerror=alert(1)>", status: "enabled", version: "1.0.0", problem: "", reserved: false},
+  };
+  const unbound = structuredClone(record); unbound.local.directory = "unknown_dir"; unbound.local.name = "unknown"; unbound.bindings = []; unbound.active_binding_id = null; unbound.provenance.method = "unknown";
+  const management = {csrf: "source-token", busy: false, plugins: [record, unbound], jobs: []};
+  const plugin = {...record.local, blocked: "", ranges: [], data_available: true, config_available: true, code_size: 1024, config_size: 32, data_size: 2048, kv_count: 1};
+  const state = {csrf: "zip-token", busy: false, plugins: [plugin, {...plugin, ...unbound.local}], jobs: [], rule: {updated_at: null, selections: []}, limits: {archive_bytes: 268435456}};
+  const posts = [], downloads = [], uploads = [];
+  let delayedPreview, failPreview = false;
+  const bridge = {
+    async ready() {}, onContext(handler) {handler({isDark: true});},
+    async apiGet(endpoint) {
+      if (endpoint === "manage/state") return structuredClone(management);
+      if (endpoint === "transfer/state") return structuredClone(state);
+      if (endpoint === "transfer/jobs") return {busy: state.busy, jobs: structuredClone(state.jobs)};
+      throw new Error("Unexpected endpoint " + endpoint);
+    },
+    async apiPost(endpoint, body) {
+      posts.push({endpoint, body});
+      if (endpoint.startsWith("manage/")) assert.equal(body.csrf, "source-token");
+      if (endpoint === "manage/source-preview") {
+        if (failPreview) throw new Error("仓库身份不一致");
+        if (delayedPreview) return new Promise(resolve => {delayedPreview.resolve = resolve;});
+        return {id: "preview", binding};
+      }
+      if (endpoint === "manage/source-bind") return structuredClone(record);
+      if (endpoint === "manage/source-select") {record.active_binding_id = body.binding_id; record.revision = "r3"; return structuredClone(record);}
+      if (endpoint === "manage/manifest-export") return {id: "export-id"};
+      if (endpoint === "manage/manifest-install") return {id: "install-id"};
+      throw new Error("Unexpected endpoint " + endpoint);
+    },
+    async upload(endpoint) {
+      uploads.push(endpoint);
+      assert.ok(!endpoint.includes("?"), "AstrBot native bridge rejects query strings in upload endpoints");
+      if (endpoint === "transfer/upload/zip-token") return {job: {id: "zip-id", warnings: []}, astrbot_version: "4.27", plugins: [{...plugin, exists: false, config: true, data: true, problem: ""}]};
+      assert.equal(endpoint, "manage/manifest-upload/source-token");
+      return {job: {id: "install-id", warnings: []}, expires_at: 2000000000, plugins: [
+        {market_plugin_id: "Alice/new", name: "new", directory: "new_dir", status: "install", observed_version: "1.0", version: "2.0"},
+        {market_plugin_id: "Alice/existing", name: "existing", status: "skip", observed_version: "1.0", version: "2.0"},
+        {market_plugin_id: "Alice/conflict", name: "conflict", status: "blocked", problem: "身份冲突"},
+      ]};
+    },
+    async download(...args) {downloads.push(args);},
+  };
+  const context = vm.createContext({document, window: {AstrBotPluginPage: bridge, setInterval() {}}, console});
+  const source = fs.readFileSync(path.join(root, "pages/transfer/app.js"), "utf8");
+  assert.ok(!source.includes("innerHTML"));
+  assert.ok(!source.includes("page-entry"));
+  vm.runInContext(source.slice(0, source.lastIndexOf("initialize();")) + "globalThis.boot = initialize();", context);
+  await context.boot;
+  assert.equal(elements["boot-error"].hidden, true, elements["boot-error"].textContent);
+  assert.equal(document.documentElement.dataset.theme, "dark");
+  assert.ok(elements["plugin-list"].textContent.includes(record.local.display_name));
+
+  // Format changes retain unsaved ZIP choices and maintain a separate JSON selection.
+  await elements["select-visible"].trigger("click");
+  elements["bulk-data"].checked = true; await elements["bulk-data"].trigger("change");
+  const zipSelections = vm.runInContext("JSON.stringify(selections())", context);
+  assert.equal(elements["selected-count"].textContent, "2");
+  elements["export-format"].value = "manifest"; await elements["export-format"].trigger("change");
+  assert.equal(elements["selected-count"].textContent, "0");
+  assert.equal(elements.export.disabled, true);
+  await elements["select-visible"].trigger("click");
+  assert.equal(elements["selected-count"].textContent, "1");
+  assert.equal(elements.export.disabled, false);
+  assert.match(elements["plugin-list"].textContent, /暂不能分享/);
+  await elements.export.trigger("click");
+  assert.deepEqual(Array.from(posts.find(item => item.endpoint === "manage/manifest-export").body.directories), ["demo_dir"]);
+  assert.equal(downloads[0][0], "manage/manifest-download");
+  elements["export-format"].value = "zip"; await elements["export-format"].trigger("change");
+  assert.equal(vm.runInContext("JSON.stringify(selections())", context), zipSelections);
+  assert.equal(elements["save-rule"].disabled, false);
+  assert.equal(elements.export.disabled, true);
+
+  // Source management opens from the plugin row and handles errors in its dialog.
+  const sourceButton = descendants(elements["plugin-list"]).find(element => element.tagName === "button" && element.textContent === "来源管理");
+  await sourceButton.trigger("click");
+  assert.equal(elements["source-dialog"].open, true);
+  elements["binding-kind"].value = "repository"; elements["binding-value"].value = binding.repo_url;
+  failPreview = true; await elements["binding-form"].trigger("submit"); failPreview = false;
+  assert.equal(elements["source-message"].textContent, "仓库身份不一致");
+  assert.equal(elements["source-message"].hidden, false);
+  await elements["binding-form"].trigger("submit");
+  assert.equal(elements["save-binding"].disabled, false);
+  elements["activate-binding"].checked = true;
+  await elements["save-binding"].trigger("click");
+  assert.equal(posts.find(item => item.endpoint === "manage/source-bind").body.activate, true);
+  assert.equal(elements["save-binding"].disabled, true);
+  await elements["binding-form"].trigger("submit");
+  // External changes invalidate the preview and update the current source.
+  record.revision = "r2"; record.active_binding_id = null;
+  await vm.runInContext("pollJobs()", context);
+  assert.equal(elements["save-binding"].disabled, true);
+  assert.ok(elements["source-summary"].textContent.includes("未绑定更新源"));
+  const selectSource = descendants(elements["binding-list"]).find(element => element.tagName === "button");
+  const selecting = selectSource.trigger("click"); await settle();
+  assert.equal(elements.confirmation.open, true);
+  elements.acknowledged.checked = true; await elements["confirmation-form"].trigger("submit"); await selecting;
+  assert.ok(posts.some(item => item.endpoint === "manage/source-select" && item.body.revision === "r2"));
+  // Closing during remote validation must not resurrect the dialog or preview.
+  delayedPreview = {};
+  const checking = elements["binding-form"].trigger("submit");
+  assert.equal(elements["binding-value"].disabled, true);
+  await elements["close-source"].trigger("click");
+  delayedPreview.resolve({id: "late", binding}); await checking;
+  assert.equal(vm.runInContext("bindingPreview", context), null);
+  assert.equal(elements["source-dialog"].open, false);
+
+  // Both import formats keep their previews when users switch between them.
+  elements["bundle-file"].files = [{name: "plugins.zip", size: 100}];
+  await elements["bundle-file"].trigger("change");
+  const zipPreview = vm.runInContext("preview.job.id", context);
+  elements["import-format"].value = "manifest"; await elements["import-format"].trigger("change");
+  elements["manifest-file"].files = [{name: "plugins.json", size: 100}];
+  await elements["manifest-file"].trigger("change");
+  assert.equal(elements["manifest-preview"].hidden, false);
+  assert.equal(vm.runInContext("installChoices.size", context), 1);
+  const importChecks = descendants(elements["manifest-list"]).filter(element => element.tagName === "input");
+  assert.deepEqual(importChecks.map(element => [element.checked, element.disabled]), [[true, false], [false, true], [false, true]]);
+  elements["import-format"].value = "zip"; await elements["import-format"].trigger("change");
+  assert.equal(elements["bundle-import"].hidden, false);
+  assert.equal(vm.runInContext("preview.job.id", context), zipPreview);
+  elements["import-format"].value = "manifest"; await elements["import-format"].trigger("change");
+  assert.equal(vm.runInContext("manifestPreview.job.id", context), "install-id");
+  assert.equal(elements["install-manifest"].disabled, false);
+  const cancelled = elements["install-manifest"].trigger("click"); await settle();
+  assert.equal(elements.confirmation.open, true);
+  await elements["confirmation-cancel"].trigger("click"); await cancelled;
+  assert.equal(posts.filter(item => item.endpoint === "manage/manifest-install").length, 0);
+  const installing = elements["install-manifest"].trigger("click"); await settle();
+  elements.acknowledged.checked = true;
+  await elements["confirmation-form"].trigger("submit"); await installing;
+  const installation = posts.find(item => item.endpoint === "manage/manifest-install");
+  assert.deepEqual(Array.from(installation.body.ids), ["Alice/new"]);
+  assert.equal(installation.body.acknowledged, true);
+  assert.equal(elements["manifest-preview"].hidden, true);
+  assert.equal(vm.runInContext("preview.job.id", context), zipPreview);
+  assert.equal(elements["history-panel"].hidden, false);
+
+  // A shared history supports all four task kinds and the correct downloads.
+  const job = {status: "completed", created_at: 100, phase: "完成", results: [], warnings: [], expired: false};
+  state.jobs = [{...job, kind: "export", id: "zip-out"}, {...job, kind: "import", id: "zip-in", backup_ready: true}, {...job, kind: "manifest_export", id: "json-out"}, {...job, kind: "manifest_install", id: "json-in"}];
+  await vm.runInContext("pollJobs()", context);
+  assert.equal(elements["job-count"].textContent, "4");
+  for (const text of ["导出插件包", "导入插件包", "导出插件清单", "清单安装"]) assert.ok(elements["job-list"].textContent.includes(text));
+  const downloadButtons = descendants(elements["job-list"]).filter(element => element.tagName === "button");
+  assert.equal(downloadButtons.length, 3);
+  for (const button of downloadButtons) await button.trigger("click");
+  assert.deepEqual(downloads.slice(1).map(args => [args[0], args[1].kind || "manifest"]), [["transfer/download", "package"], ["transfer/download", "rollback"], ["manage/manifest-download", "manifest"]]);
+  // If the official association disappears, stale sharing selections are cleared.
+  record.bindings = [];
+  await vm.runInContext("loadState(true)", context);
+  elements["export-format"].value = "manifest"; await elements["export-format"].trigger("change");
+  assert.equal(elements["selected-count"].textContent, "0");
+  assert.equal(elements.export.disabled, true);
+}
+main().catch(error => {console.error(error); process.exitCode = 1;});
