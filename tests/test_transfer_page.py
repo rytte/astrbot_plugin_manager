@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 async def test_native_page_discovery_assets_and_chinese_title(
     transfer_env, monkeypatch
 ):
-    page_name, title = "transfer", "插件备份与迁移"
+    page_name, title = "transfer", "插件管家"
     env = transfer_env
     root = ROOT
     service = PluginPageService(
@@ -41,6 +41,7 @@ async def test_native_page_discovery_assets_and_chinese_title(
         ("", "text/html"),
         ("style.css", "text/css"),
         ("app.js", "application/javascript"),
+        ("logo.png", "image/png"),
     ):
         payload = await service.serve_page_content(
             plugin_name=metadata.name,
@@ -63,6 +64,8 @@ async def test_native_page_discovery_assets_and_chinese_title(
             assert "bridge-sdk.js" in payload.content
             assert "style.css?" in payload.content
             assert "app.js?" in payload.content
+        if asset == "logo.png":
+            assert payload.content == (root / "logo.png").read_bytes()
 
 
 def test_frontend_selection_save_confirmation_and_import_defaults():
@@ -169,7 +172,8 @@ async function main() {
   assert.equal(document.documentElement.dataset.theme, "dark");
   assert.ok(elements["plugin-list"].textContent.includes(plugin.display_name));
   assert.equal(elements.export.disabled, true);
-  await elements["select-visible"].trigger("click");
+  elements["select-all"].checked = true;
+  await elements["select-all"].trigger("change");
   assert.equal(elements["selected-count"].textContent, "1");
   assert.equal(elements["save-rule"].disabled, false);
   assert.equal(elements.export.disabled, true);

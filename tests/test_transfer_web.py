@@ -2,14 +2,17 @@
 
 import json
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
 import jwt
 import pytest
+from astrbot.dashboard.api.files import legacy_router as file_router
 from astrbot.dashboard.api.plugins import router
 from astrbot.dashboard.responses import ApiError
+from astrbot.dashboard.services.file_service import FileService
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
@@ -28,7 +31,9 @@ async def web_client(transfer_env):
 
     app.state.jwt_secret = env.context.get_config()["dashboard"]["jwt_secret"]
     app.state.core_lifecycle = SimpleNamespace(star_context=env.context)
+    app.state.services = SimpleNamespace(files=FileService())
     app.include_router(router, prefix="/api/v1")
+    app.include_router(file_router)
     token = jwt.encode(
         {"username": "admin", "exp": time.time() + 3600},
         app.state.jwt_secret,
@@ -44,6 +49,78 @@ async def web_client(transfer_env):
 
 def endpoint(action):
     return "/api/v1/plugins/extensions/astrbot_plugin_manager/transfer/" + action
+
+
+async def test_plugin_icons_use_native_file_tokens_and_refresh_after_consumption(
+    web_client,
+):
+    env, client = web_client
+    target = env.make_transfer_plugin()
+    logo = Path(env.manager.plugin_store_path) / target.root_dir_name / "logo.png"
+    content = b"\x89PNG\r\n\x1a\nicon fixture"
+    logo.write_bytes(content)
+    response = await client.get(endpoint("state"))
+    assert response.status_code == 200, response.text
+    plugins = response.json()["data"]["plugins"]
+    entry = next(item for item in plugins if item["directory"] == target.root_dir_name)
+    assert entry["logo"].startswith("/api/file/")
+    assert str(logo) not in response.text
+    assert any(item["logo"] is None for item in plugins)
+    downloaded = await client.get(entry["logo"], headers={"Authorization": ""})
+    assert downloaded.status_code == 200
+    assert downloaded.headers["content-type"].startswith("image/png")
+    assert downloaded.content == content
+    assert (await client.get(entry["logo"])).status_code == 404
+    refreshed = (await client.get(endpoint("state"))).json()["data"]["plugins"]
+    updated = next(
+        item for item in refreshed if item["directory"] == target.root_dir_name
+    )
+    assert updated["logo"] != entry["logo"]
+    assert (await client.get(updated["logo"])).content == content
+
+
+async def test_plugin_icon_failure_does_not_block_page_state(web_client, monkeypatch):
+    env, client = web_client
+    target = env.make_transfer_plugin()
+    logo = Path(env.manager.plugin_store_path) / target.root_dir_name / "logo.png"
+    logo.write_bytes(b"icon fixture")
+    monkeypatch.setattr(
+        env.plugin.service.web, "get_plugin_logo_token", AsyncMock(return_value=None)
+    )
+    response = await client.get(endpoint("state"))
+    assert response.status_code == 200
+    entry = next(
+        item
+        for item in response.json()["data"]["plugins"]
+        if item["directory"] == target.root_dir_name
+    )
+    assert entry["logo"] is None
+    assert not entry["blocked"]
+
+
+async def test_plugin_icon_cannot_expose_linked_file_outside_plugin(
+    web_client, monkeypatch
+):
+    env, client = web_client
+    target = env.make_transfer_plugin()
+    outside = env.root / "outside.png"
+    outside.write_bytes(b"private fixture")
+    logo = Path(env.manager.plugin_store_path) / target.root_dir_name / "logo.png"
+    try:
+        logo.symlink_to(outside)
+    except OSError:
+        pytest.skip("Symlink creation is unavailable")
+    register = AsyncMock(return_value="must-not-be-issued")
+    monkeypatch.setattr(env.plugin.service.web, "get_plugin_logo_token", register)
+    response = await client.get(endpoint("state"))
+    assert response.status_code == 200
+    entry = next(
+        item
+        for item in response.json()["data"]["plugins"]
+        if item["directory"] == target.root_dir_name
+    )
+    assert entry["logo"] is None
+    register.assert_not_awaited()
 
 
 async def test_state_rules_and_csrf_through_real_extension_router(web_client):

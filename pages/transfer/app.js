@@ -4,6 +4,7 @@ const elements = Object.fromEntries(Array.from(document.querySelectorAll("[id]")
 let bridge;
 let state;
 let choices = new Map();
+const pluginIcons = new Map();
 let preview = null;
 let importChoices = new Map();
 let busy = false;
@@ -92,13 +93,47 @@ function checkbox(label, checked, disabled, changed) {
   return wrapper;
 }
 
-function titleCell(plugin) {
+function titleCell(plugin, showIcon = false) {
   const cell = node("td");
-  const symbols = {enabled: "✅", disabled: "⏸️", failed: "❌", pending: "◌"};
-  const marker = symbols[plugin.status] || "";
-  cell.append(node("span", "plugin-title", marker + " " + (plugin.display_name || plugin.name)));
-  cell.append(node("span", "plugin-id", plugin.name + (plugin.directory !== plugin.name ? " / " + plugin.directory : "")));
-  if (plugin.version) cell.append(node("div", "plugin-detail", "版本 " + plugin.version));
+  const details = node("div", "plugin-copy");
+  const heading = node("div", "plugin-heading");
+  heading.append(node("span", "plugin-title", plugin.display_name || plugin.name));
+  const statuses = {enabled: "已打开", disabled: "已关闭", failed: "加载失败", pending: "待加载"};
+  if (statuses[plugin.status]) {
+    const status = node("span", "plugin-status " + plugin.status);
+    const icon = node("span", "plugin-status-icon");
+    icon.setAttribute("aria-hidden", "true");
+    status.append(icon, document.createTextNode(statuses[plugin.status]));
+    if (plugin.status === "pending") status.title = "需要重启 AstrBot 扫描插件";
+    heading.append(status);
+  }
+  const metadata = node("div", "plugin-meta");
+  metadata.append(node("span", "plugin-id", plugin.name + (plugin.directory !== plugin.name ? " / " + plugin.directory : "")));
+  if (plugin.version) metadata.append(node("span", "plugin-version", "v" + plugin.version.replace(/^v/i, "")));
+  details.append(heading, metadata);
+  if (showIcon) {
+    const url = plugin.logo || "/favicon.svg";
+    let cached = pluginIcons.get(plugin.directory);
+    // Keep image nodes across redraws: AstrBot's file tokens are single use.
+    if (!cached || cached.url !== url) {
+      const icon = node("span", "plugin-icon");
+      icon.setAttribute("aria-hidden", "true");
+      icon.append(node("span", "plugin-icon-placeholder"));
+      const image = node("img");
+      image.alt = ""; image.width = 40; image.height = 40;
+      image.loading = "lazy"; image.decoding = "async"; image.referrerPolicy = "no-referrer";
+      let fallback = !plugin.logo;
+      image.addEventListener("error", () => {
+        if (fallback) image.hidden = true;
+        else {fallback = true; image.src = "/favicon.svg";}
+      });
+      image.src = url;
+      icon.append(image);
+      cached = {url, icon}; pluginIcons.set(plugin.directory, cached);
+    }
+    const summary = node("div", "plugin-summary");
+    summary.append(cached.icon, details); cell.append(summary);
+  } else cell.append(details);
   return cell;
 }
 
@@ -107,6 +142,11 @@ function renderPlugins() {
   body.replaceChildren();
   const plugins = visiblePlugins();
   elements["plugin-count"].textContent = state.plugins.length + " 个插件";
+  const selectable = plugins.filter(plugin => (manifestMode() ? eligible(sourceRecord(plugin.directory)) : !plugin.blocked) || (manifestMode() ? manifestSelections.has(plugin.directory) : choices.get(plugin.directory).selected));
+  const selectedVisible = selectable.filter(plugin => manifestMode() ? manifestSelections.has(plugin.directory) : choices.get(plugin.directory).selected).length;
+  elements["select-all"].checked = selectable.length > 0 && selectedVisible === selectable.length;
+  elements["select-all"].indeterminate = selectedVisible > 0 && selectedVisible < selectable.length;
+  elements["select-all"].disabled = busy || requesting || !selectable.length;
   for (const plugin of plugins) {
     const record = sourceRecord(plugin.directory);
     const blocked = manifestMode() ? !eligible(record) : Boolean(plugin.blocked);
@@ -114,21 +154,28 @@ function renderPlugins() {
     const row = node("tr", choice.selected ? "selected" : "");
     const selectCell = node("td", "check-cell");
     selectCell.append(checkbox("选择插件 " + plugin.name, choice.selected, blocked && !choice.selected, checked => {if (manifestMode()) {checked ? manifestSelections.add(plugin.directory) : manifestSelections.delete(plugin.directory);} else choice.selected = checked; renderPlugins(); renderSummary();}));
-    const title = titleCell(plugin);
+    const title = titleCell(plugin, true);
     if (manifestMode()) title.append(node("div", eligible(record) ? "plugin-detail" : "plugin-error", eligible(record) ? "可分享 · 已关联官方市场" : "暂不能分享 · 请在来源管理中校验并关联官方市场"));
     else if (plugin.blocked) title.append(node("div", "plugin-error", plugin.blocked));
     const dataCell = node("td"); dataCell.dataset.zipOnly = "";
     const dataCheck = checkbox("附带 " + plugin.name + " 的标准数据", choice.data, !choice.selected || !plugin.data_available || Boolean(plugin.blocked), checked => {choice.data = checked; renderSummary();});
     dataCheck.append(document.createTextNode(plugin.data_available ? "标准数据" : "不可用"));
-    dataCell.append(dataCheck, node("div", "range-label", plugin.data_available ? formatSize(plugin.data_size) + " · " + plugin.kv_count + " 个 KV" : "归属未知或自身数据"));
+    dataCell.append(dataCheck, node("div", "range-label", plugin.data_available ? "文件 " + formatSize(plugin.data_size) : "归属未知或自身数据"));
     dataCell.title = (plugin.ranges || []).join("\n");
+    if (plugin.data_available) dataCell.title += (dataCell.title ? "\n" : "") + "键值存储：" + plugin.kv_count + " 条记录（随标准数据备份）";
     const configCell = node("td"); configCell.dataset.zipOnly = "";
     const configCheck = checkbox("附带 " + plugin.name + " 的当前配置", choice.config, !choice.selected || !plugin.config_available || Boolean(plugin.blocked), checked => {choice.config = checked; renderSummary();});
     configCheck.append(document.createTextNode(plugin.config_available ? "当前配置" : "无已保存配置"));
     configCell.append(configCheck);
     const sizeCell = node("td", "numeric", formatSize(plugin.code_size)); sizeCell.dataset.zipOnly = "";
-    const sourceCell = node("td");
-    sourceCell.append(button("来源管理", () => openSource(plugin.directory), !record));
+    const sourceCell = node("td", "plugin-source");
+    const binding = record && active(record);
+    const sourceLabel = node("span", "source-label" + (binding ? "" : " unbound"), binding ? (binding.kind === "market" ? (binding.registry_url ? "自定义市场" : "官方市场") : "Git 仓库") : record ? "未绑定更新源" : "来源待读取");
+    sourceLabel.title = sourceText(binding) + (record ? "\n安装记录：" + (sourceLabels[record.provenance.method] || record.provenance.method) : "\n尚未读取来源记录，请刷新页面。");
+    const manageButton = button("来源管理", () => openSource(plugin.directory), !record);
+    manageButton.className = "text-button source-manage";
+    manageButton.setAttribute("aria-label", "管理 " + plugin.name + " 的插件来源");
+    sourceCell.append(sourceLabel, manageButton);
     row.append(selectCell, title, dataCell, configCell, sizeCell, sourceCell);
     body.append(row);
   }
@@ -147,6 +194,8 @@ function renderSummary() {
   const selectedPlugins = state.plugins.filter(plugin => choices.get(plugin.directory)?.selected);
   const dirty = isDirty();
   elements["selected-count"].textContent = selected.length;
+  elements["selection-label"].textContent = "已选 " + selected.length + " 个插件";
+  elements["clear-selection"].disabled = busy || requesting || !selected.length;
   elements["data-count"].textContent = selected.filter(selection => selection.data).length + " 个";
   elements["config-count"].textContent = selected.filter(selection => selection.config).length + " 个";
   elements["selected-size"].textContent = formatSize(selectedPlugins.reduce((total, plugin) => total + plugin.code_size + (choices.get(plugin.directory).data ? plugin.data_size : 0) + (choices.get(plugin.directory).config ? plugin.config_size : 0), 0));
@@ -161,10 +210,19 @@ function renderSummary() {
   elements["install-manifest"].disabled = busy || requesting || !manifestPreview || !installChoices.size;
   elements["bundle-file"].disabled = busy || requesting;
   elements["execute-import"].disabled = busy || requesting || !preview || !Array.from(importChoices.values()).some(choice => choice.code || choice.config || choice.data);
-  for (const identifier of ["bulk-data", "bulk-config", "select-visible", "clear-visible"]) elements[identifier].disabled = busy || requesting;
+  for (const kind of ["data", "config"]) {
+    const available = selectedPlugins.filter(plugin => plugin[kind + "_available"] && !plugin.blocked);
+    const included = available.filter(plugin => choices.get(plugin.directory)[kind]).length;
+    const bulk = elements["bulk-" + kind];
+    bulk.checked = available.length > 0 && included === available.length;
+    bulk.indeterminate = included > 0 && included < available.length;
+    bulk.disabled = busy || requesting || manifestMode() || !available.length;
+  }
 }
 
 function showTab(identifier) {
+  document.documentElement.dataset.pageTab = identifier;
+  elements["export-sidebar"].hidden = identifier !== "export-panel";
   for (const button of document.querySelectorAll("[data-tab]")) {
     const selected = button.dataset.tab === identifier;
     button.classList.toggle("active", selected);
@@ -304,9 +362,16 @@ function bindEvents() {
   for (const button of document.querySelectorAll("[data-tab]")) button.addEventListener("click", () => showTab(button.dataset.tab));
   elements.search.addEventListener("input", renderPlugins);
   elements["status-filter"].addEventListener("change", renderPlugins);
-  elements["select-visible"].addEventListener("click", () => {for (const plugin of visiblePlugins()) {if (manifestMode()) {if (eligible(sourceRecord(plugin.directory))) manifestSelections.add(plugin.directory);} else if (!plugin.blocked) choices.get(plugin.directory).selected = true;} renderPlugins(); renderSummary();});
-  elements["clear-visible"].addEventListener("click", () => {for (const plugin of visiblePlugins()) {if (manifestMode()) manifestSelections.delete(plugin.directory); else choices.get(plugin.directory).selected = false;} renderPlugins(); renderSummary();});
-  for (const kind of ["data", "config"]) elements["bulk-" + kind].addEventListener("change", event => {for (const plugin of state.plugins) if (choices.get(plugin.directory).selected && plugin[kind + "_available"] && !plugin.blocked) choices.get(plugin.directory)[kind] = event.target.checked; renderPlugins(); renderSummary();});
+  elements["select-all"].addEventListener("change", event => {
+    if (busy || requesting) return;
+    for (const plugin of visiblePlugins()) {
+      if (manifestMode()) {if (!event.target.checked) manifestSelections.delete(plugin.directory); else if (eligible(sourceRecord(plugin.directory))) manifestSelections.add(plugin.directory);}
+      else if (!event.target.checked || !plugin.blocked) choices.get(plugin.directory).selected = event.target.checked;
+    }
+    renderPlugins(); renderSummary();
+  });
+  elements["clear-selection"].addEventListener("click", () => {if (busy || requesting) return; if (manifestMode()) manifestSelections.clear(); else for (const choice of choices.values()) choice.selected = false; renderPlugins(); renderSummary();});
+  for (const kind of ["data", "config"]) elements["bulk-" + kind].addEventListener("change", event => {if (busy || requesting || manifestMode()) return; for (const plugin of state.plugins) if (choices.get(plugin.directory).selected && plugin[kind + "_available"] && !plugin.blocked) choices.get(plugin.directory)[kind] = event.target.checked; renderPlugins(); renderSummary();});
   elements.refresh.addEventListener("click", () => runRequest(() => loadState(true)));
   elements["save-rule"].addEventListener("click", () => runRequest(async () => {state.rule = await post("rule", {selections: selections()}); message("导出规则已保存。导出按钮将读取这套规则。");}));
   elements.export.addEventListener("click", () => runRequest(async () => {
@@ -372,6 +437,7 @@ async function initialize() {
     bridge.onContext(context => {document.documentElement.dataset.theme = context.isDark ? "dark" : "light";});
     await loadState();
     bindEvents();
+    showTab("export-panel");
     window.setInterval(() => {if (!requesting && !document.hidden) pollJobs().catch(error => message(error.message || "任务状态读取失败，请刷新页面。", true));}, 2000);
   } catch (error) {
     elements["boot-error"].hidden = false;

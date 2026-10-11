@@ -12,7 +12,7 @@ import jwt
 from astrbot.api.web import error_response, file_response, json_response, request
 from astrbot.core.workspace import API_KEY_USERNAME_PREFIX
 
-from .transfer_bundle import MAX_ARCHIVE, exact_keys, remove_path
+from .transfer_bundle import MAX_ARCHIVE, exact_keys, remove_path, safe_path
 
 
 class TransferWeb:
@@ -97,9 +97,26 @@ class TransferWeb:
         try:
             owner = self._authorize()
             if action == "state":
+                plugins = await self.transfers.inventory()
+                for plugin in plugins:
+                    plugin["logo"] = None
+                    if plugin["blocked"]:
+                        continue
+                    try:
+                        path = safe_path(
+                            self.transfers.code_root, f"{plugin['directory']}/logo.png"
+                        )
+                        if path.is_file() and path.stat().st_nlink == 1:
+                            token = await self.transfers.operations.web.get_plugin_logo_token(
+                                str(path)
+                            )
+                            if token:
+                                plugin["logo"] = f"/api/file/{token}"
+                    except (ValueError, OSError):
+                        pass
                 data = {
                     "csrf": self._nonce(owner),
-                    "plugins": await self.transfers.inventory(),
+                    "plugins": plugins,
                     "rule": self.transfers.rule(),
                     "jobs": self.transfers.history(owner),
                     "limits": self.transfers.limits(),

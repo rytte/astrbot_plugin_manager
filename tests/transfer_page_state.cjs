@@ -49,8 +49,8 @@ async function main() {
   };
   const unbound = structuredClone(record); unbound.local.directory = "unknown_dir"; unbound.local.name = "unknown"; unbound.bindings = []; unbound.active_binding_id = null; unbound.provenance.method = "unknown";
   const management = {csrf: "source-token", busy: false, plugins: [record, unbound], jobs: []};
-  const plugin = {...record.local, blocked: "", ranges: [], data_available: true, config_available: true, code_size: 1024, config_size: 32, data_size: 2048, kv_count: 1};
-  const state = {csrf: "zip-token", busy: false, plugins: [plugin, {...plugin, ...unbound.local}], jobs: [], rule: {updated_at: null, selections: []}, limits: {archive_bytes: 268435456}};
+  const plugin = {...record.local, logo: "/api/file/icon-token", blocked: "", ranges: [], data_available: true, config_available: true, code_size: 1024, config_size: 32, data_size: 2048, kv_count: 1};
+  const state = {csrf: "zip-token", busy: false, plugins: [plugin, {...plugin, ...unbound.local, logo: null}], jobs: [], rule: {updated_at: null, selections: []}, limits: {archive_bytes: 268435456}};
   const posts = [], downloads = [], uploads = [];
   let delayedPreview, failPreview = false;
   const bridge = {
@@ -97,17 +97,74 @@ async function main() {
   assert.equal(elements["boot-error"].hidden, true, elements["boot-error"].textContent);
   assert.equal(document.documentElement.dataset.theme, "dark");
   assert.ok(elements["plugin-list"].textContent.includes(record.local.display_name));
+  assert.match(elements["plugin-list"].children[0].children.at(-1).textContent, /官方市场/);
+  assert.match(elements["plugin-list"].children[1].children.at(-1).textContent, /未绑定更新源/);
+  const icon = descendants(elements["plugin-list"]).find(element => element.tagName === "img");
+  assert.equal(icon.src, plugin.logo);
+  assert.equal(descendants(elements["plugin-list"]).filter(element => element.tagName === "img")[1].src, "/favicon.svg");
+
+  // The export sidebar is specific to its tab; switching keeps the current choices.
+  assert.equal(elements["export-sidebar"].hidden, false);
+  await tabs[1].trigger("click");
+  assert.equal(elements["export-sidebar"].hidden, true);
+  assert.equal(elements["import-panel"].hidden, false);
+  assert.equal(document.documentElement.dataset.pageTab, "import-panel");
+  await tabs[2].trigger("click");
+  assert.equal(elements["export-sidebar"].hidden, true);
+  assert.equal(elements["history-panel"].hidden, false);
+  await tabs[0].trigger("click");
+  assert.equal(elements["export-sidebar"].hidden, false);
+
+  // Select-all follows the filter and preserves hidden selections.
+  assert.equal(elements["bulk-data"].disabled, true);
+  assert.equal(elements["clear-selection"].disabled, true);
+  const firstChoice = descendants(elements["plugin-list"]).find(element => element.tagName === "input");
+  firstChoice.checked = true; await firstChoice.trigger("change");
+  assert.equal(elements["select-all"].indeterminate, true);
+  elements.search.value = "unknown"; await elements.search.trigger("input");
+  assert.equal(elements["select-all"].checked, false);
+  assert.equal(elements["select-all"].indeterminate, false);
+  elements["select-all"].checked = true; await elements["select-all"].trigger("change");
+  assert.equal(elements["selection-label"].textContent, "已选 2 个插件");
+  elements["select-all"].checked = false; await elements["select-all"].trigger("change");
+  assert.equal(elements["selection-label"].textContent, "已选 1 个插件");
+  elements.search.value = ""; await elements.search.trigger("input");
+  assert.equal(elements["select-all"].indeterminate, true);
+  state.plugins[1].blocked = "无法导出"; await vm.runInContext("loadState(true)", context);
+  elements["select-all"].checked = true; await elements["select-all"].trigger("change");
+  assert.equal(elements["selected-count"].textContent, "1");
+  state.plugins[1].blocked = ""; await vm.runInContext("loadState(true)", context);
+  await elements["clear-selection"].trigger("click");
+  assert.equal(elements["selected-count"].textContent, "0");
+  assert.equal(elements["select-all"].indeterminate, false);
 
   // Format changes retain unsaved ZIP choices and maintain a separate JSON selection.
-  await elements["select-visible"].trigger("click");
+  elements["select-all"].checked = true; await elements["select-all"].trigger("change");
+  // Redrawing selections must preserve the decoded image: its token cannot be reused.
+  assert.equal(descendants(elements["plugin-list"]).find(element => element.tagName === "img"), icon);
+  await icon.trigger("error");
+  assert.equal(icon.src, "/favicon.svg");
+  await icon.trigger("error");
+  assert.equal(icon.hidden, true);
+  elements["bulk-data"].checked = true; await elements["bulk-data"].trigger("change");
+  const firstDataChoice = descendants(elements["plugin-list"].children[0]).filter(element => element.tagName === "input")[1];
+  firstDataChoice.checked = false; await firstDataChoice.trigger("change");
+  assert.equal(elements["bulk-data"].indeterminate, true);
+  assert.equal(elements["bulk-data"].checked, false);
   elements["bulk-data"].checked = true; await elements["bulk-data"].trigger("change");
   const zipSelections = vm.runInContext("JSON.stringify(selections())", context);
   assert.equal(elements["selected-count"].textContent, "2");
   elements["export-format"].value = "manifest"; await elements["export-format"].trigger("change");
+  assert.equal(descendants(elements["plugin-list"]).find(element => element.tagName === "img"), icon);
   assert.equal(elements["selected-count"].textContent, "0");
   assert.equal(elements.export.disabled, true);
-  await elements["select-visible"].trigger("click");
+  elements["select-all"].checked = true; await elements["select-all"].trigger("change");
   assert.equal(elements["selected-count"].textContent, "1");
+  assert.equal(elements["select-all"].checked, true);
+  assert.equal(elements["bulk-data"].disabled, true);
+  elements.search.value = "unknown"; await elements.search.trigger("input");
+  assert.equal(elements["select-all"].disabled, true);
+  elements.search.value = ""; await elements.search.trigger("input");
   assert.equal(elements.export.disabled, false);
   assert.match(elements["plugin-list"].textContent, /暂不能分享/);
   await elements.export.trigger("click");
@@ -182,6 +239,7 @@ async function main() {
   assert.equal(elements["manifest-preview"].hidden, true);
   assert.equal(vm.runInContext("preview.job.id", context), zipPreview);
   assert.equal(elements["history-panel"].hidden, false);
+  assert.equal(elements["export-sidebar"].hidden, true);
 
   // A shared history supports all four task kinds and the correct downloads.
   const job = {status: "completed", created_at: 100, phase: "完成", results: [], warnings: [], expired: false};
@@ -199,5 +257,30 @@ async function main() {
   elements["export-format"].value = "manifest"; await elements["export-format"].trigger("change");
   assert.equal(elements["selected-count"].textContent, "0");
   assert.equal(elements.export.disabled, true);
+
+  // Source labels use the active binding, independently of installation history.
+  record.provenance.method = "upload";
+  record.bindings = [{...binding, kind: "repository"}]; record.active_binding_id = binding.id;
+  await vm.runInContext("loadState(true)", context);
+  const sourceLabel = elements["plugin-list"].children[0].children.at(-1).children[0];
+  assert.equal(sourceLabel.textContent, "Git 仓库");
+  assert.ok(sourceLabel.title.includes(binding.repo_url));
+  assert.ok(sourceLabel.title.includes("上传安装"));
+  record.bindings = [{...binding, registry_url: "https://registry.example/plugins.json"}];
+  await vm.runInContext("loadState(true)", context);
+  assert.match(elements["plugin-list"].children[0].children.at(-1).textContent, /自定义市场/);
+  record.active_binding_id = null; await vm.runInContext("loadState(true)", context);
+  assert.match(elements["plugin-list"].children[0].children.at(-1).textContent, /未绑定更新源/);
+
+  // Task execution locks selection controls without changing saved UI choices.
+  elements["export-format"].value = "zip"; await elements["export-format"].trigger("change");
+  const beforeBusy = vm.runInContext("JSON.stringify(selections())", context);
+  state.busy = true; await vm.runInContext("loadState(true)", context);
+  assert.equal(elements["select-all"].disabled, true);
+  assert.equal(elements["clear-selection"].disabled, true);
+  assert.equal(elements["bulk-data"].disabled, true);
+  elements["select-all"].checked = false; await elements["select-all"].trigger("change");
+  await elements["clear-selection"].trigger("click");
+  assert.equal(vm.runInContext("JSON.stringify(selections())", context), beforeBusy);
 }
 main().catch(error => {console.error(error); process.exitCode = 1;});
