@@ -54,6 +54,7 @@ async function main() {
   const posts = [], downloads = [], uploads = [];
   const statisticsRequests = [], managementRequests = [];
   let delayStatistics = true, delayManagement = true, failStatistics = false, failManagement = false;
+  let failState = false, failMetadataSync = false;
   let delayedPreview, failPreview = false;
   const bridge = {
     async ready() {}, onContext(handler) {handler({isDark: true});},
@@ -65,6 +66,7 @@ async function main() {
         return response;
       }
       if (endpoint === "transfer/state") {
+        if (failState) throw new Error("插件状态读取失败");
         const response = structuredClone(state);
         for (const entry of response.plugins) Object.assign(entry, {statistics_status: entry.blocked ? "unavailable" : "pending", code_size: null, config_size: null, data_size: null, kv_count: null});
         return response;
@@ -88,6 +90,7 @@ async function main() {
       }
       if (endpoint === "manage/source-bind") return structuredClone(record);
       if (endpoint === "manage/metadata-sync") {
+        if (failMetadataSync) throw new Error("插件信息已变化，请刷新后重试。");
         assert.equal(body.directory, record.local.directory);
         assert.equal(body.revision, "metadata-r1");
         record.metadata_changed = false; record.metadata_notice = "";
@@ -231,6 +234,9 @@ async function main() {
   failPreview = true; await elements["binding-form"].trigger("submit"); failPreview = false;
   assert.equal(elements["source-message"].textContent, "仓库身份不一致");
   assert.equal(elements["source-message"].hidden, false);
+  await elements.refresh.trigger("click"); await settle();
+  assert.equal(elements.message.hidden, true);
+  assert.equal(elements["source-message"].hidden, true);
   await elements["binding-form"].trigger("submit");
   assert.equal(elements["save-binding"].disabled, false);
   await elements["save-binding"].trigger("click");
@@ -326,9 +332,21 @@ async function main() {
   await refresh();
   assert.match(elements["plugin-list"].textContent, /插件信息已变更：作者/);
   assert.match(elements["plugin-list"].children[0].textContent, /已打开/);
-  const updateInfo = descendants(elements["plugin-list"]).find(element => element.tagName === "button" && element.textContent === "更新信息");
+  let updateInfo = descendants(elements["plugin-list"]).find(element => element.tagName === "button" && element.textContent === "更新信息");
   assert.equal(updateInfo.disabled, false);
   const beforeSync = vm.runInContext("JSON.stringify(selections())", context);
+  // Refresh dismisses the stale action error, while a failed refresh shows its own error.
+  failMetadataSync = true; await updateInfo.trigger("click"); failMetadataSync = false;
+  assert.equal(elements.message.textContent, "插件信息已变化，请刷新后重试。");
+  assert.equal(elements.message.hidden, false);
+  failState = true; await elements.refresh.trigger("click"); failState = false;
+  assert.equal(elements.message.textContent, "插件状态读取失败");
+  assert.equal(elements.message.hidden, false);
+  await elements.refresh.trigger("click"); await settle();
+  assert.equal(elements.message.hidden, true);
+  assert.equal(elements.message.textContent, "");
+  assert.equal(vm.runInContext("JSON.stringify(selections())", context), beforeSync);
+  updateInfo = descendants(elements["plugin-list"]).find(element => element.tagName === "button" && element.textContent === "更新信息");
   await updateInfo.trigger("click");
   assert.ok(posts.some(item => item.endpoint === "manage/metadata-sync"));
   assert.doesNotMatch(elements["plugin-list"].textContent, /插件信息已变更：作者/);

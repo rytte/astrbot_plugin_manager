@@ -459,7 +459,10 @@ function bindEvents() {
   });
   elements["clear-selection"].addEventListener("click", () => {if (busy || requesting) return; if (manifestMode()) manifestSelections.clear(); else for (const choice of choices.values()) choice.selected = false; renderPlugins(); renderSummary();});
   for (const kind of ["data", "config"]) elements["bulk-" + kind].addEventListener("change", event => {if (busy || requesting || manifestMode()) return; for (const plugin of state.plugins) if (choices.get(plugin.directory).selected && plugin[kind + "_available"] && !plugin.blocked) choices.get(plugin.directory)[kind] = event.target.checked; renderPlugins(); renderSummary();});
-  elements.refresh.addEventListener("click", () => runRequest(() => loadState(true)));
+  elements.refresh.addEventListener("click", () => runRequest(() => {
+    message("");
+    return loadState(true);
+  }));
   elements["apply-rule"].addEventListener("click", applySavedRule);
   elements["save-rule"].addEventListener("click", () => runRequest(async () => {state.rule = await post("rule", {selections: selections()}); message(state.rule.selections.length ? "当前选择已保存为规则，下次可点击「应用已保存规则」恢复。" : "已清空保存的导出规则。");}));
   elements.export.addEventListener("click", () => runRequest(async () => {
