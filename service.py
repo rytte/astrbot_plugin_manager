@@ -23,7 +23,8 @@ from .redaction import redact
 
 PLUGIN_NAME_PREFIX = "astrbot_plugin_"
 CATALOG_PAGE_SIZE = 20
-MARKET_PAGE_SIZE = 10
+MARKET_PAGE_SIZE = 20
+MARKET_QUERY_TIMEOUT_SECONDS = 60
 INSTALL_USAGE = (
     "用法：/pm add <仓库地址或市场ID>；市场 ID 为作者/插件技术名，"
     "含空格时请用引号包住完整 ID。"
@@ -37,6 +38,19 @@ def is_market_id(identifier: str) -> bool:
     return bool(MARKET_ID_PATTERN.fullmatch(identifier)) and all(
         part == part.strip() for part in identifier.split("/")
     )
+
+
+def format_market_count(value: object) -> str:
+    """Render an official marketplace count without trusting arbitrary metadata."""
+    if isinstance(value, bool):
+        return "未提供"
+    if isinstance(value, float) and not value.is_integer():
+        return "未提供"
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return "未提供"
+    return str(count) if count >= 0 else "未提供"
 
 
 @dataclass(frozen=True)
@@ -406,9 +420,18 @@ class PluginOperations:
         keyword = " ".join(keyword.split())
         if not keyword or page < 1:
             raise ValueError("关键词不能为空，页码必须为正整数。")
-        data, notice = await self.web.get_online_plugins(
-            custom_registry=None, force_refresh=False
-        )
+        try:
+            data, notice = await asyncio.wait_for(
+                self.web.get_online_plugins(
+                    custom_registry=None, force_refresh=False
+                ),
+                timeout=MARKET_QUERY_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            raise PluginServiceError(
+                "官方插件市场查询超时",
+                public_message="官方插件市场响应超时，请稍后重试。",
+            ) from exc
         entries = []
         for identifier, entry in self.web.iter_market_plugin_entries(data):
             if not is_market_id(identifier):
@@ -446,17 +469,20 @@ class PluginOperations:
             version = " ".join(str(redact(entry.get("version") or "未声明")).split())[
                 :40
             ]
+            stars = format_market_count(entry.get("stars"))
+            downloads = format_market_count(entry.get("download_count"))
             description = " ".join(
                 str(redact(entry.get("desc") or "暂无简介")).split()
             )[:160]
             parts.append(
                 f"{index}. {title}｜{version}\n市场 ID：{identifier}\n"
+                f"⭐ Star：{stars}｜下载量：{downloads}\n"
                 f"简介：{description}\n安装：/pm add {shlex.quote(identifier)}"
             )
         if not selected:
             parts.append("没有找到匹配的插件，换个关键词试试。")
         if page < pages:
-            parts.append(f"下一页：/pm market {keyword} --page {page + 1}")
+            parts.append(f"下一页：/pm search {keyword} --page {page + 1}")
         return "\n\n".join(parts)
 
     async def install(self, identifier: str) -> str:

@@ -24,6 +24,8 @@ def market_data(
             "desc": "每日天气预报",
             "tags": ["weather", "forecast"],
             "version": "1.2.0",
+            "stars": 42,
+            "download_count": 1234,
             "repo": REPOSITORY,
             "download_url": download_url,
         },
@@ -213,12 +215,13 @@ async def test_market_search_matches_metadata_without_mutating_plugins(
     env, monkeypatch, keyword
 ):
     fetch = mock_registry(env, monkeypatch)
-    event = env.event(f"/pm market {keyword}", group="group")
+    event = env.event(f"/pm search {keyword}", group="group")
     await env.scheduler.execute(event)
     text = output(event)
     assert "官方插件市场" in text and "共 1 项" in text
     assert "天气助手｜1.2.0" in text
     assert f"市场 ID：{MARKET_ID}" in text
+    assert "⭐ Star：42｜下载量：1234" in text
     assert "简介：每日天气预报" in text
     assert f"安装：/pm add {MARKET_ID}" in text
     assert "different-owner" not in text
@@ -233,7 +236,7 @@ async def test_search_supports_multiword_keywords_and_explicit_paging(env, monke
     data = market_data()
     data[MARKET_ID]["desc"] = "Weather Station plugin"
     mock_registry(env, monkeypatch, data)
-    event = env.event("/pm market weather station --page 1")
+    event = env.event("/pm search weather station --page 1")
     await env.scheduler.execute(event)
     assert "共 1 项" in output(event)
 
@@ -242,43 +245,43 @@ async def test_market_results_are_sorted_and_paginated_with_copyable_commands(
     env, monkeypatch
 ):
     data = {"$meta": {"schema_version": 2}}
-    for index in reversed(range(13)):
+    for index in reversed(range(23)):
         name = f"astrbot_plugin_weather_{index:02}"
         data.update(market_data(name=name))
     mock_registry(env, monkeypatch, data)
-    first = env.event("/pm market weather")
+    first = env.event("/pm search weather")
     await env.scheduler.execute(first)
     text = output(first)
-    assert "共 13 项｜第 1/2 页" in text
-    assert text.count("安装：/pm add ") == 10
+    assert "共 23 项｜第 1/2 页" in text
+    assert text.count("安装：/pm add ") == 20
     assert "1. 天气助手" in text and "10. 天气助手" in text
     assert "astrbot_plugin_weather_00" in text
-    assert "astrbot_plugin_weather_10" not in text
-    assert "下一页：/pm market weather --page 2" in text
-    second = env.event("/pm market weather --page 2")
+    assert "astrbot_plugin_weather_20" not in text
+    assert "下一页：/pm search weather --page 2" in text
+    second = env.event("/pm search weather --page 2")
     await env.scheduler.execute(second)
     text = output(second)
     assert "第 2/2 页" in text
     assert text.count("安装：/pm add ") == 3
-    assert "11. 天气助手" in text
-    assert "astrbot_plugin_weather_09" not in text
+    assert "21. 天气助手" in text
+    assert "astrbot_plugin_weather_19" not in text
     assert "下一页" not in text
 
 
 @pytest.mark.parametrize(
     "arguments",
     [
-        "market",
-        "market --page 1",
-        "market weather --page",
-        "market weather --page 0",
-        "market weather --page -1",
-        "market weather --page １",
-        "market weather --page nope",
-        "market weather --page 1 extra",
-        "market --page 1 weather",
-        "market weather --page 1 --page 2",
-        "market weather --source unofficial",
+        "search",
+        "search --page 1",
+        "search weather --page",
+        "search weather --page 0",
+        "search weather --page -1",
+        "search weather --page １",
+        "search weather --page nope",
+        "search weather --page 1 extra",
+        "search --page 1 weather",
+        "search weather --page 1 --page 2",
+        "search weather --source unofficial",
     ],
 )
 async def test_invalid_market_search_arguments_do_not_fetch_data(
@@ -287,7 +290,7 @@ async def test_invalid_market_search_arguments_do_not_fetch_data(
     fetch = mock_registry(env, monkeypatch)
     event = env.event()
     await env.invoke(event, arguments)
-    assert "用法：/pm market" in output(event)
+    assert "用法：/pm search" in output(event)
     fetch.assert_not_awaited()
     assert event.is_stopped() and not env.model_calls
 
@@ -296,12 +299,12 @@ async def test_search_empty_results_cache_notice_and_out_of_range_page(
     env, monkeypatch
 ):
     mock_registry(env, monkeypatch, notice="使用缓存数据，可能不是最新版本")
-    empty = env.event("/pm market unknown")
+    empty = env.event("/pm search unknown")
     await env.scheduler.execute(empty)
     assert "共 0 项｜第 1/1 页" in output(empty)
     assert "没有找到匹配" in output(empty)
     assert "使用缓存数据，可能不是最新版本" in output(empty)
-    overflow = env.event("/pm market weather --page 2")
+    overflow = env.event("/pm search weather --page 2")
     await env.scheduler.execute(overflow)
     assert "页码超出范围，共 1 页" in output(overflow)
 
@@ -312,7 +315,7 @@ async def test_search_commands_quote_ids_and_can_be_used_for_installation(
 ):
     identifier = f"{author}/astrbot_plugin_weather"
     mock_registry(env, monkeypatch, market_data(author=author))
-    search = env.event("/pm market weather")
+    search = env.event("/pm search weather")
     await env.scheduler.execute(search)
     command = next(
         line.removeprefix("安装：")
@@ -338,7 +341,7 @@ async def test_search_sanitizes_metadata_redacts_credentials_and_bounds_descript
     data[MARKET_ID]["desc"] = "api_key=SECRET_MARKET_CREDENTIAL\n" + "天气" * 300
     data.update(market_data(author="bad\nauthor"))
     mock_registry(env, monkeypatch, data)
-    event = env.event("/pm market weather")
+    event = env.event("/pm search weather")
     await env.scheduler.execute(event)
     text = output(event)
     assert "共 1 项" in text
@@ -358,7 +361,7 @@ async def test_search_sanitizes_metadata_redacts_credentials_and_bounds_descript
 async def test_search_failure_is_reported_as_a_read_failure(env, monkeypatch, failure):
     fetch = mock_registry(env, monkeypatch)
     fetch.side_effect = failure
-    event = env.event("/pm market weather")
+    event = env.event("/pm search weather")
     await env.scheduler.execute(event)
     text = output(event)
     assert "查询未完成" in text or "查询失败" in text
@@ -372,7 +375,7 @@ async def test_demo_mode_allows_market_search_but_rejects_market_install(
 ):
     monkeypatch.setattr("astrbot.dashboard.services.plugin_service.DEMO_MODE", True)
     fetch = mock_registry(env, monkeypatch)
-    search = env.event("/pm market weather")
+    search = env.event("/pm search weather")
     await env.scheduler.execute(search)
     assert "共 1 项" in output(search)
     fetch.assert_awaited_once()

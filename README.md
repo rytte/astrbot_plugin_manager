@@ -20,7 +20,7 @@
 | `/pm reload <插件名>` | 重载插件 |
 | `/pm enable <插件名>` | 启用插件 |
 | `/pm disable <插件名>` | 停用插件 |
-| `/pm market <关键词> [--page <页码>]` | 搜索官方插件市场 |
+| `/pm search <关键词> [--page <页码>]` | 搜索官方插件市场 |
 | `/pm add <仓库地址或市场ID>` | 从仓库或市场安装插件 |
 | `/pm remove <插件名> [--all]` | 卸载插件 |
 | `/pm cmds [页码]` | 查看全部命令 |
@@ -31,13 +31,13 @@
 ## 🛍️ 逛市场，看到就装
 
 ```text
-/pm market 天气
-/pm market 天气 --page 2
+/pm search 天气
+/pm search 天气 --page 2
 /pm add alice/astrbot_plugin_weather
 /pm add https://github.com/alice/astrbot_plugin_weather
 ```
 
-搜索按名称、作者、简介、标签和市场 ID 查找，每页 10 项，并附可复制的安装命令。示例 ID 仅作演示，请以搜索结果为准。当前只查询官方市场，不使用 WebUI 中选择的自定义市场；读取缓存时会明确提示。
+搜索按名称、作者、简介、标签和市场 ID 查找，每页 20 项，并附可复制的安装命令。示例 ID 仅作演示，请以搜索结果为准。当前只查询官方市场，不使用 WebUI 中选择的自定义市场；读取缓存时会明确提示。
 
 - **作者/插件技术名**：按完整市场 ID 精确安装，不省略 `astrbot_plugin_` 前缀，也不把它当作 GitHub 仓库简写；找不到就报错，不自动换成仓库安装。ID 含空格时，用引号包住完整 ID。
 - **完整仓库地址**：从代码仓库安装，支持 AstrBot 接受的 HTTP(S)、SSH 和 SCP 风格 Git 地址。

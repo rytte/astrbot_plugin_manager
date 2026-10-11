@@ -26,7 +26,7 @@ USAGE = (
     "/pm list\n"
     "/pm cmds [页码]\n"
     "/pm tools [页码]\n"
-    "/pm market <关键词> [--page <页码>]\n"
+    "/pm search <关键词> [--page <页码>]\n"
     "/pm help\n"
     "/pm info <插件名或目录名>\n"
     "/pm add <仓库地址或市场ID>\n"
@@ -117,7 +117,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
         "pm",
-        desc="管理员插件管理：list/cmds/tools/market/help/info/add/enable/disable/reload/remove。",
+        desc="管理员插件管理：list/cmds/tools/search/help/info/add/enable/disable/reload/remove。",
     )
     async def plugin(
         self, event: AstrMessageEvent, arguments: GreedyStr
@@ -170,8 +170,8 @@ class Main(Star):
                 await self.reply(event, self.service.plugin_info(args[0]))
                 yield
                 return
-            if action == "market":
-                usage = "用法：/pm market <关键词> [--page <页码>]；页码必须为正整数。"
+            if action == "search":
+                usage = "用法：/pm search <关键词> [--page <页码>]；页码必须为正整数。"
                 page = 1
                 if "--page" in args:
                     if (
@@ -259,7 +259,7 @@ class Main(Star):
             await self.reply(
                 event,
                 f"市场查询未完成：{exc.public_message}。"
-                if action == "market"
+                if action == "search"
                 else f"操作未完成：{exc.public_message}。请检查 WebUI 中的插件状态。",
             )
             yield
@@ -268,7 +268,7 @@ class Main(Star):
             await self.reply(
                 event,
                 "查询失败，请检查 AstrBot 日志。"
-                if action in {"list", "cmds", "tools", "info", "market"}
+                if action in {"list", "cmds", "tools", "info", "search"}
                 else "操作失败，可能已发生部分变更；请检查 AstrBot 日志，并通过 WebUI 检查或恢复插件。",
             )
             yield
