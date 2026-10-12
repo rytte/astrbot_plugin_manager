@@ -64,6 +64,7 @@ async function main() {
   let pendingDownload = null;
   let delayedPreview, failPreview = false;
   let manifestResponse = null, failDraft = false;
+  let invalidManagerRule = false;
   let updateRequests = 0, failUpdate = false;
   let failRecovery = false;
   const recoveryResponse = {job: {id: "recovery-id", source_id: "zip-in", kind: "rollback", status: "preview", created_at: 100, phase: "还原预检完成", results: [], warnings: [], expired: false}, expires_at: 2000000000, plugins: [{directory: "demo_dir", name: "demo", display_name: "示例插件", components: {code: "replace", config: "remove", data: "replace"}, problem: ""}]};
@@ -100,6 +101,15 @@ async function main() {
     async apiPost(endpoint, body) {
       posts.push({endpoint, body});
       if (endpoint.startsWith("manage/")) assert.equal(body.csrf, "source-token");
+      if (endpoint === "manage/data-export") {
+        const job = {id: "manager-export", kind: "manager_data_export", name: body.name, download_filename: body.name + ".json", status: "completed", created_at: 100, phase: "管家数据已导出", results: [], warnings: [], expired: false};
+        state.jobs.unshift(job); return structuredClone(job);
+      }
+      if (endpoint === "manage/data-import") {
+        assert.equal(body.acknowledged, true);
+        const job = {id: "manager-import", kind: "manager_data_import", status: "completed", created_at: 100, phase: "完成", results: [], warnings: [], expired: false};
+        state.jobs.unshift(job); state.busy = false; return structuredClone(job);
+      }
       if (endpoint === "manage/check-updates") {
         assert.deepEqual(Object.keys(body), ["csrf"]);
         management.updates = {id: "check-id", status: "running", checked_at: "2026-10-12T10:00:00Z", done: 0, total: 2, results: record.bindings.map(source => ({directory: record.local.directory, binding_id: source.id, revision: record.revision, is_current: source.id === record.active_binding_id, status: "pending", local_version: "1.0.0", remote_version: "", message: "等待检查", can_update: false}))};
@@ -174,6 +184,11 @@ async function main() {
     async upload(endpoint) {
       uploads.push(endpoint);
       assert.ok(!endpoint.includes("?"), "AstrBot native bridge rejects query strings in upload endpoints");
+      if (endpoint === "manage/data-upload/source-token") return {id: "manager-preview", name: "管家迁移", expires_at: 2000000000, plugins: [
+        {id: "0", name: "new", display_name: "待恢复插件", directory: "new_dir", status: "ready", count: 2},
+        {id: "1", name: "existing", directory: "existing_dir", status: "skip", count: 0},
+        {id: "2", name: "conflict", directory: "", status: "blocked", problem: "身份不一致", count: 0},
+      ], rule: {ready: !invalidManagerRule, selections: [{directory: "new_dir", name: "new", plugin_id: "alice/new", data: false, config: false}], problem: invalidManagerRule ? "插件不存在" : ""}};
       if (endpoint === "transfer/upload/zip-token") return {job: {id: "zip-id", warnings: []}, astrbot_version: "4.27", plugins: [{...plugin, exists: false, config: true, data: true, problem: ""}]};
       assert.equal(endpoint, "manage/manifest-upload/source-token");
       manifestResponse = {ready: true, job: {id: "install-id", name: "生产环境备份", kind: "manifest_install", status: "preview", phase: "等待选择", preview_task: true, preview_expires_at: 2000000000, created_at: 100, results: [], warnings: []}, expires_at: 2000000000, plugins: [
@@ -819,6 +834,52 @@ async function main() {
   assert.equal(elements["source-dialog"].open, false);
   assert.equal(elements["source-message"].hidden, true);
   assert.equal(messageTimers.size, 0);
+
+  // Manager data has its own export, bounded preview, selection and confirmation.
+  vm.runInContext("clearManifestPreview(); busy = false; previousBusy = false; requesting = false", context);
+  state.busy = false; state.jobs = [];
+  await vm.runInContext("pollJobs()", context);
+  elements["export-name"].value = "管家迁移";
+  await elements["export-manager-data"].trigger("click");
+  assert.equal(posts.at(-1).endpoint, "manage/data-export");
+  assert.equal(posts.at(-1).body.name, "管家迁移");
+  assert.deepEqual(JSON.parse(JSON.stringify(downloads.at(-1))), ["manage/data-download", {id: "manager-export"}, "管家迁移.json"]);
+  assert.match(elements["job-list"].textContent, /下载管家数据 JSON/);
+  elements["import-format"].value = "manager-data"; await elements["import-format"].trigger("change");
+  assert.equal(elements["bundle-import"].hidden, true);
+  assert.equal(elements["manifest-import"].hidden, true);
+  assert.equal(elements["manager-data-import"].hidden, false);
+  elements["manager-data-file"].files = [{name: "manager.json", size: 100}];
+  await elements["manager-data-file"].trigger("change");
+  assert.equal(elements["manager-data-preview"].hidden, false);
+  assert.deepEqual(descendants(elements["manager-data-list"]).filter(element => element.tagName === "input").map(element => [element.checked, element.disabled]), [[true, false], [false, true], [false, true]]);
+  assert.match(elements["manager-data-list"].textContent, /新增 2 条关联/);
+  assert.equal(elements["manager-data-rule"].checked, true);
+  assert.equal(elements["restore-manager-data"].disabled, false);
+  elements["manager-data-rule"].checked = false; await elements["manager-data-rule"].trigger("change");
+  const beforeManagerRule = JSON.stringify(state.rule);
+  const canceledManagerImport = elements["restore-manager-data"].trigger("click"); await settle();
+  assert.equal(elements.confirmation.open, true);
+  await elements["confirmation-cancel"].trigger("click"); await canceledManagerImport;
+  assert.ok(!posts.some(item => item.endpoint === "manage/data-import"));
+  const managerImport = elements["restore-manager-data"].trigger("click"); await settle();
+  elements.acknowledged.checked = true; await elements["confirmation-form"].trigger("submit"); await managerImport;
+  const managerPost = posts.find(item => item.endpoint === "manage/data-import");
+  assert.deepEqual(JSON.parse(JSON.stringify(managerPost.body)), {id: "manager-preview", sources: ["0"], rule: false, acknowledged: true, csrf: "source-token"});
+  assert.equal(JSON.stringify(state.rule), beforeManagerRule);
+  assert.equal(elements["manager-data-preview"].hidden, true);
+  assert.equal(elements["history-panel"].hidden, false);
+  assert.match(elements["job-list"].textContent, /恢复管家数据/);
+  invalidManagerRule = true;
+  await elements["manager-data-file"].trigger("change");
+  assert.equal(elements["manager-data-rule"].checked, false);
+  assert.equal(elements["manager-data-rule"].disabled, true);
+  assert.match(elements["manager-data-rule-status"].textContent, /规则无法恢复.*插件不存在/);
+  assert.equal(elements["restore-manager-data"].disabled, false);
+  vm.runInContext("managerDataPreview.expires_at = -1; renderSummary()", context);
+  assert.equal(elements["restore-manager-data"].disabled, true);
+  assert.match(elements["manager-data-rule-status"].textContent, /预检已过期/);
+  vm.runInContext("managerDataPreview = null; managerDataChoices.clear(); renderSummary()", context);
 
   // An unavailable market cannot silently select a working repository.
   vm.runInContext(`busy = false; requesting = false; installChoices.clear(); installSources.clear();

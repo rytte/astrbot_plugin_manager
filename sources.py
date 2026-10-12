@@ -664,6 +664,11 @@ class SourceService:
             record["local"][field] != metadata[field] for field in ("name", "author")
         ):
             raise ValueError("快照期间插件来源身份变化，请重新导出。")
+        return self.portable_sources(record)
+
+    def portable_sources(self, record: dict) -> tuple[dict, list[str]]:
+        """Export a previously read record without repeating inventory scans."""
+        directory = record["local"]["directory"]
         warnings = []
 
         def portable(binding):
@@ -696,7 +701,7 @@ class SourceService:
         provenance = record["provenance"]
         data = {
             "schema_version": 1,
-            "identity": {field: metadata[field] for field in ("name", "author")},
+            "identity": {field: record["local"][field] for field in ("name", "author")},
             "provenance": {
                 "method": provenance["method"]
                 if provenance["method"] in METHODS
@@ -716,7 +721,7 @@ class SourceService:
             "bindings": list(bindings.values()),
             "active_binding_id": active_id,
         }
-        return validate_sources(data, metadata), warnings
+        return validate_sources(data, record["local"]), warnings
 
     async def note_bundle(
         self, directory: str, actor: str, incoming: dict | None = None

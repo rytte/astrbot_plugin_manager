@@ -26,11 +26,14 @@ from .transfer_web import TransferWeb
 
 
 class ManagementWeb(TransferWeb):
-    def __init__(self, context, transfers, sources, manifests, updates) -> None:
+    def __init__(
+        self, context, transfers, sources, manifests, updates, manager_data
+    ) -> None:
         super().__init__(context, transfers)
         self.sources = sources
         self.manifests = manifests
         self.updates = updates
+        self.manager_data = manager_data
 
     def register(self) -> None:
         for action, method in {
@@ -50,6 +53,10 @@ class ManagementWeb(TransferWeb):
             "manifest-draft": "POST",
             "manifest-recheck": "POST",
             "manifest-install": "POST",
+            "data-export": "POST",
+            "data-download": "GET",
+            "data-upload/<csrf_token>": "POST",
+            "data-import": "POST",
         }.items():
             handler = functools.partial(self.dispatch, action.split("/")[0])
             self.handlers.append(handler)
@@ -79,6 +86,24 @@ class ManagementWeb(TransferWeb):
                 data = await self.manifests.preview_with_logos(
                     owner, request.query.get("id")
                 )
+            elif action == "data-download":
+                job = self.transfers.get_job(request.query.get("id"), owner)
+                if job["kind"] != "manager_data_export" or job["status"] not in {
+                    "completed",
+                    "completed_with_warning",
+                }:
+                    raise ValueError("管家数据文件未就绪。")
+                return file_response(
+                    safe_path(
+                        self.transfers.job_directory(job["id"]), "manager-data.json"
+                    ),
+                    filename=export_filename(job, "manager_data"),
+                    content_type="application/json",
+                    headers={
+                        "Cache-Control": "no-store",
+                        "X-Content-Type-Options": "nosniff",
+                    },
+                )
             elif action == "manifest-download":
                 job = self.transfers.get_job(request.query.get("id"), owner)
                 if (
@@ -99,7 +124,7 @@ class ManagementWeb(TransferWeb):
                         "X-Content-Type-Options": "nosniff",
                     },
                 )
-            elif action == "manifest-upload":
+            elif action in {"manifest-upload", "data-upload"}:
                 self._check_nonce(
                     owner,
                     csrf_token if csrf_token is not None else request.query.get("csrf"),
@@ -120,7 +145,11 @@ class ManagementWeb(TransferWeb):
                         object_pairs_hook=_json_pairs,
                         parse_constant=_invalid_number,
                     )
-                    data = self.manifests.begin_preview(owner, value)
+                    data = (
+                        self.manifests.begin_preview(owner, value)
+                        if action == "manifest-upload"
+                        else await self.manager_data.preview(owner, value)
+                    )
                 finally:
                     await uploaded.close()
             else:
@@ -128,7 +157,19 @@ class ManagementWeb(TransferWeb):
                 if not isinstance(body, dict):
                     raise ValueError("请求必须是 JSON 对象。")
                 self._check_nonce(owner, body.get("csrf"))
-                if action == "check-updates":
+                if action == "data-export":
+                    exact_keys(body, {"csrf", "name"})
+                    data = await self.manager_data.export(owner, body["name"])
+                elif action == "data-import":
+                    exact_keys(body, {"csrf", "id", "sources", "rule", "acknowledged"})
+                    data = self.manager_data.start(
+                        owner,
+                        body["id"],
+                        body["sources"],
+                        body["rule"],
+                        body["acknowledged"],
+                    )
+                elif action == "check-updates":
                     exact_keys(body, {"csrf"})
                     data = await self.updates.start_check(owner)
                 elif action == "update-plugin":
@@ -253,3 +294,4 @@ class ManagementWeb(TransferWeb):
         ]
         self.nonces.clear()
         self.sources.previews.clear()
+        self.manager_data.previews.clear()

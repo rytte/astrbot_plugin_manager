@@ -235,9 +235,14 @@ class TransferService:
             key: copy.deepcopy(value) for key, value in job.items() if key in fields
         }
         result["expired"] = TransferService._expired(job)
-        if job["kind"] in {"export", "manifest_export"}:
+        if job["kind"] in {"export", "manifest_export", "manager_data_export"}:
             result["download_filename"] = export_filename(
-                job, "package" if job["kind"] == "export" else "manifest"
+                job,
+                {
+                    "export": "package",
+                    "manifest_export": "manifest",
+                    "manager_data_export": "manager_data",
+                }[job["kind"]],
             )
         if job["kind"] == "rollback" and job["status"] == "preview":
             result.update(

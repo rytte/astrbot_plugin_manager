@@ -24,6 +24,7 @@ let managementState = {plugins: []};
 let updateState = {id: null, status: "idle", results: [], done: 0, total: 0};
 let managementStatus = "loading", managementRequest = 0;
 let selectedRecord = null, bindingPreview = null, manifestPreview = null;
+let managerDataPreview = null, managerDataChoices = new Set();
 let manifestSelections = new Set(), installChoices = new Set();
 const installSources = new Map();
 let pendingManifestId = null, manifestPreviewRequest = 0, manifestPreviewLoading = false;
@@ -249,9 +250,10 @@ function renderFormats() {
   elements["zip-summary"].hidden = isManifest;
   elements["manifest-summary"].hidden = !isManifest;
   elements.export.title = isManifest ? "接收者可选择插件及安装来源；现有插件跳过。" : "按当前选择打包，读取导出时的实际内容。";
-  const importingManifest = elements["import-format"].value === "manifest";
-  elements["bundle-import"].hidden = importingManifest;
-  elements["manifest-import"].hidden = !importingManifest;
+  const importing = elements["import-format"].value;
+  elements["bundle-import"].hidden = importing !== "zip";
+  elements["manifest-import"].hidden = importing !== "manifest";
+  elements["manager-data-import"].hidden = importing !== "manager-data";
 }
 function visiblePlugins() {
   const term = elements.search.value.trim().toLowerCase();
@@ -397,6 +399,9 @@ function renderSummary() {
   elements["export-format"].disabled = requesting;
   elements["export-name"].disabled = requesting;
   elements["import-format"].disabled = requesting;
+  elements["export-manager-data"].disabled = busy || requesting || !managementState.csrf;
+  elements["manager-data-file"].disabled = busy || requesting || !managementState.csrf;
+  renderManagerData();
   elements["manifest-file"].disabled = busy || requesting || manifestDraftSaving || !managementState.csrf;
   elements["install-manifest"].disabled = busy || requesting || manifestDraftSaving || manifestDraftError || !manifestPreview || manifestPreviewExpired() || !installChoices.size;
   renderManifestDraftStatus();
@@ -605,10 +610,10 @@ async function downloadJob(job, kind) {
   downloadingJobs.add(key);
   message("");
   renderJobs(displayedJobs);
-  const manifest = kind === "manifest";
+  const manifest = kind === "manifest", managerData = kind === "manager_data";
   try {
-    await bridge.download(manifest ? "manage/manifest-download" : "transfer/download", manifest ? {id: job.id} : {id: job.id, kind}, kind === "rollback" ? "astrbot-rollback-" + job.id.slice(0, 8) + ".zip" : job.download_filename);
-    message("已发起" + (manifest ? "清单 JSON" : kind === "package" ? "插件包" : "恢复资料") + "下载，请查看浏览器下载记录。");
+    await bridge.download(managerData ? "manage/data-download" : manifest ? "manage/manifest-download" : "transfer/download", manifest || managerData ? {id: job.id} : {id: job.id, kind}, kind === "rollback" ? "astrbot-rollback-" + job.id.slice(0, 8) + ".zip" : job.download_filename);
+    message("已发起" + (managerData ? "管家数据 JSON" : manifest ? "清单 JSON" : kind === "package" ? "插件包" : "恢复资料") + "下载，请查看浏览器下载记录。");
   } catch (error) {
     message(error.message || "下载失败，请重试。", true);
   } finally {
@@ -618,7 +623,7 @@ async function downloadJob(job, kind) {
 }
 
 function confirmJobDeletion(job) {
-  const labels = {export: "导出插件包", import: "导入插件包", rollback: "还原到导入前", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件"};
+  const labels = {export: "导出插件包", import: "导入插件包", rollback: "还原到导入前", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件", manager_data_export: "导出管家数据", manager_data_import: "恢复管家数据"};
   elements["delete-job-title"].textContent = (job.name ? job.name + " · " : "") + (labels[job.kind] || job.kind) + " · " + job.id.slice(0, 8);
   elements["delete-job-time"].textContent = new Date(job.created_at * 1000).toLocaleString("zh-CN");
   elements["delete-recovery-warning"].hidden = !job.backup_ready && !["interrupted", "rollback_failed"].includes(job.status);
@@ -686,7 +691,7 @@ function renderJobs(jobs) {
     const card = node("article", "job-card");
     const heading = node("div", "job-heading");
     const title = node("div", "job-heading-main");
-    const taskLabel = job.preview_task && ["queued", "running"].includes(job.status) ? "清单预检" : ({export: "导出插件包", import: "导入插件包", rollback: "还原到导入前", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件"}[job.kind] || job.kind);
+    const taskLabel = job.preview_task && ["queued", "running"].includes(job.status) ? "清单预检" : ({export: "导出插件包", import: "导入插件包", rollback: "还原到导入前", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件", manager_data_export: "导出管家数据", manager_data_import: "恢复管家数据"}[job.kind] || job.kind);
     title.append(node("span", "job-title", (job.name ? job.name + " · " : "") + taskLabel), node("span", "pill job-status " + (job.preview_expired ? "expired" : job.status), job.preview_expired ? "预检已过期" : labels[job.status] || job.status));
     const menu = node("div", "job-menu");
     const toggle = node("button", "job-menu-toggle", "⋯");
@@ -739,11 +744,11 @@ function renderJobs(jobs) {
       actions.append(resume);
       if (job.preview_expired) card.append(node("p", "job-meta", "原预检结果已过期，点击重新预检即可使用已上传的清单。"));
     }
-    for (const kind of ["package", "rollback", "manifest"]) {
-      const available = kind === "package" ? job.kind === "export" && ["completed", "completed_with_warning"].includes(job.status) : kind === "manifest" ? job.kind === "manifest_export" && job.status === "completed" : job.backup_ready && !["queued", "running"].includes(job.status);
+    for (const kind of ["package", "rollback", "manifest", "manager_data"]) {
+      const available = kind === "manager_data" ? job.kind === "manager_data_export" && ["completed", "completed_with_warning"].includes(job.status) : kind === "package" ? job.kind === "export" && ["completed", "completed_with_warning"].includes(job.status) : kind === "manifest" ? job.kind === "manifest_export" && job.status === "completed" : job.backup_ready && !["queued", "running"].includes(job.status);
       if (!available) continue;
       const downloading = downloadingJobs.has(job.id + "/" + kind);
-      const download = node("button", "button secondary", job.expired ? "文件已被旧版清理" : downloading ? "正在下载…" : kind === "manifest" ? "下载清单 JSON ↓" : kind === "package" ? "下载插件包 ↓" : "下载恢复资料 ↓");
+      const download = node("button", "button secondary", job.expired ? "文件已被旧版清理" : downloading ? "正在下载…" : kind === "manager_data" ? "下载管家数据 JSON ↓" : kind === "manifest" ? "下载清单 JSON ↓" : kind === "package" ? "下载插件包 ↓" : "下载恢复资料 ↓");
       download.disabled = job.expired || downloading;
       download.addEventListener("click", () => downloadJob(job, kind));
       actions.append(download);
@@ -1014,7 +1019,7 @@ function renderSource() {
   }
   const history = elements["source-history"]; history.replaceChildren();
   elements["source-history-count"].textContent = record.history.length;
-  const labels = {installed: "管家安装", updated: "更新插件", uninstalled: "管家卸载", binding_added: "保存来源关联", active_changed: "切换当前更新源", core_observed: "观察到 AstrBot 来源变更", metadata_synced: "同步插件信息", bundle_imported: "从迁移包恢复代码", bundle_sources_imported: "恢复来源信息，等待重新校验"};
+  const labels = {installed: "管家安装", updated: "更新插件", uninstalled: "管家卸载", binding_added: "保存来源关联", active_changed: "切换当前更新源", core_observed: "观察到 AstrBot 来源变更", metadata_synced: "同步插件信息", bundle_imported: "从迁移包恢复代码", bundle_sources_imported: "恢复来源信息，等待重新校验", manager_data_imported: "导入来源关联，等待校验"};
   for (const event of record.history.slice().reverse()) {const row = node("div", "history-row"); row.append(node("span", "history-event", labels[event.action] || event.action), node("span", "history-meta", sourceTime(event.at) + " · " + event.actor)); history.append(row);}
   if (!record.history.length) history.append(node("p", "source-empty", "暂无管家操作记录。"));
 }
@@ -1153,7 +1158,51 @@ function renderManifest() {
   elements["manifest-warnings"].textContent = warnings.join("\n");
   renderManifestDraftStatus();
 }
+function renderManagerData() {
+  elements["manager-data-preview"].hidden = !managerDataPreview;
+  const expired = managerDataPreview && Date.now() / 1000 > managerDataPreview.expires_at;
+  elements["restore-manager-data"].disabled = busy || requesting || !managerDataPreview || expired || (!managerDataChoices.size && !elements["manager-data-rule"].checked);
+  if (!managerDataPreview) return;
+  elements["manager-data-name"].textContent = managerDataPreview.name;
+  const body = elements["manager-data-list"]; body.replaceChildren();
+  for (const plugin of managerDataPreview.plugins) {
+    const row = node("tr"), choice = node("td"), status = node("td", plugin.status === "blocked" ? "plugin-error" : "plugin-detail");
+    choice.append(checkbox("恢复 " + plugin.name + " 的来源关联", managerDataChoices.has(plugin.id), expired || plugin.status !== "ready", checked => {
+      checked ? managerDataChoices.add(plugin.id) : managerDataChoices.delete(plugin.id); renderSummary();
+    }));
+    status.textContent = plugin.status === "ready" ? "新增 " + plugin.count + " 条关联" : plugin.status === "skip" ? "已关联" : plugin.problem;
+    row.append(choice, titleCell({...plugin, directory: plugin.directory || plugin.name, status: "", version: ""}), status); body.append(row);
+  }
+  if (!managerDataPreview.plugins.length) {const row = node("tr"), cell = node("td", "empty", "没有来源关联"); cell.colSpan = 3; row.append(cell); body.append(row);}
+  elements["manager-data-rule"].disabled = busy || requesting || expired || !managerDataPreview.rule.ready;
+  elements["manager-data-rule-status"].textContent = expired ? "预检已过期，请重新上传。" : managerDataPreview.rule.ready ? "恢复 " + managerDataPreview.rule.selections.length + " 个插件的规则，将替换当前已保存的规则。" : "规则无法恢复：" + managerDataPreview.rule.problem;
+}
+
 function bindManagementEvents() {
+  elements["export-manager-data"].addEventListener("click", () => runRequest(async () => {
+    const job = await managementPost("data-export", {name: elements["export-name"].value});
+    await pollJobs(); await downloadJob(job, "manager_data");
+  }));
+  elements["manager-data-file"].addEventListener("change", () => runRequest(async () => {
+    managerDataPreview = null; managerDataChoices.clear(); elements["manager-data-rule"].checked = false;
+    const file = elements["manager-data-file"].files[0]; if (!file) return;
+    if (file.size > 8 * 1024 * 1024) throw new Error("管家数据超过 8 MiB 限制。");
+    managerDataPreview = await bridge.upload("manage/data-upload/" + encodeURIComponent(managementState.csrf), file);
+    managerDataChoices = new Set(managerDataPreview.plugins.filter(plugin => plugin.status === "ready").map(plugin => plugin.id));
+    elements["manager-data-rule"].checked = managerDataPreview.rule.ready;
+    message("管家数据预检完成，请核对来源关联及导出规则。");
+  }));
+  elements["manager-data-rule"].addEventListener("change", renderSummary);
+  elements["restore-manager-data"].addEventListener("click", () => runRequest(async () => {
+    if (!managerDataPreview) return;
+    const restoreRule = elements["manager-data-rule"].checked;
+    const selected = managerDataPreview.plugins.filter(plugin => managerDataChoices.has(plugin.id)).map(plugin => ({...plugin, description: "新增 " + plugin.count + " 条来源关联，等待校验"}));
+    if (restoreRule) selected.push({name: "导出规则", description: "替换为 " + managerDataPreview.rule.selections.length + " 个插件的规则"});
+    if (!await confirmOperation("确认恢复管家数据", selected, "来源按插件身份匹配后合并，不改变当前更新源。新关联需重新校验。" + (restoreRule ? "已保存的导出规则将被替换。" : ""))) return;
+    await managementPost("data-import", {id: managerDataPreview.id, sources: Array.from(managerDataChoices), rule: restoreRule, acknowledged: true});
+    managerDataPreview = null; managerDataChoices.clear(); elements["manager-data-rule"].checked = false;
+    busy = true; previousBusy = true; showTab("history-panel"); await pollJobs();
+  }));
   const closeSource = () => {dismissMessage(elements["source-message"]); elements["source-dialog"].close(); selectedRecord = null; bindingPreview = null;};
   elements["close-source"].addEventListener("click", closeSource);
   elements["source-dialog"].addEventListener("cancel", closeSource);
