@@ -940,7 +940,7 @@ function bindEvents() {
   }));
   elements["execute-import"].addEventListener("click", () => runRequest(async () => {
     const selected = Array.from(importChoices, ([directory, choice]) => ({directory, ...choice})).filter(choice => choice.code || choice.config || choice.data);
-    const accepted = await confirmOperation("确认恢复所选内容", selected.map(choice => {const plugin = preview.plugins.find(entry => entry.directory === choice.directory); return {...plugin, description: [choice.code && "替换代码", choice.config && "整体替换配置", choice.data && (plugin.manager_data ? "合并来源关联 + 替换导出规则" : "整体替换标准数据 / KV")].filter(Boolean).join(" + ")};}), "恢复前强制备份当前受影响内容。空数据也会清空目标数据，不做合并。一个插件失败会停止后续恢复。普通插件导入后保持停用，可点击「待加载」确认加载启用，或重启 AstrBot 后手动启用。管家仅合并来源关联、替换导出规则；新关联待校验，未安装或身份不匹配的来源项会跳过并提示，当前更新源保持不变。");
+    const accepted = await confirmOperation("确认恢复所选内容", selected.map(choice => {const plugin = preview.plugins.find(entry => entry.directory === choice.directory); return {...plugin, description: [choice.code && "替换代码", choice.config && "整体替换配置", choice.data && (plugin.manager_data ? "合并来源关联 + 替换导出规则" : "整体替换标准数据 / KV")].filter(Boolean).join(" + ")};}), "恢复前会自动备份，普通插件的配置和数据整体替换，空数据也会清空目标；失败后停止后续恢复。普通插件恢复后保持停用，可点击「待加载」启用。管家仅合并来源、替换导出规则，新来源需校验，当前更新源不变。");
     if (!accepted) return;
     await post("import", {id: preview.job.id, selections: selected, acknowledged: true});
     preview = null;
