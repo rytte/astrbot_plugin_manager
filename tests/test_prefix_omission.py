@@ -102,7 +102,9 @@ async def test_loaded_and_failed_plugin_matches_are_not_silently_prioritized(
         env.plugin.service.resolve("demo")
 
 
-@pytest.mark.parametrize("action", ["info", "enable", "disable", "reload", "remove"])
+@pytest.mark.parametrize(
+    "action", ["info", "update", "enable", "disable", "reload", "remove"]
+)
 async def test_all_named_commands_accept_prefix_omission_in_real_pipeline(env, action):
     target = env.add_target(
         "astrbot_plugin_demo", "astrbot_plugin_demo", active=action != "enable"
@@ -111,6 +113,7 @@ async def test_all_named_commands_accept_prefix_omission_in_real_pipeline(env, a
     await env.scheduler.execute(event)
     expected = {
         "info": f"插件名：{target.name}",
+        "update": "没有当前更新源",
         "enable": "已启用",
         "disable": "已停用",
         "reload": "已重载",
@@ -129,7 +132,9 @@ async def test_all_named_commands_accept_prefix_omission_in_real_pipeline(env, a
 
 
 @pytest.mark.parametrize("env", [{"allow_prefix_omission": False}], indirect=True)
-@pytest.mark.parametrize("action", ["info", "enable", "disable", "reload", "remove"])
+@pytest.mark.parametrize(
+    "action", ["info", "update", "enable", "disable", "reload", "remove"]
+)
 async def test_disabled_setting_rejects_omission_without_side_effects(env, action):
     env.add_target("astrbot_plugin_demo", "astrbot_plugin_demo")
     event = env.event(f"/pm {action} demo")
@@ -143,8 +148,12 @@ async def test_disabled_setting_rejects_omission_without_side_effects(env, actio
     assert event.is_stopped() and not env.model_calls
 
 
-@pytest.mark.parametrize("action", ["info", "enable", "disable", "reload", "remove"])
-async def test_exact_and_expanded_names_for_different_plugins_are_ambiguous(env, action):
+@pytest.mark.parametrize(
+    "action", ["info", "update", "enable", "disable", "reload", "remove"]
+)
+async def test_exact_and_expanded_names_for_different_plugins_are_ambiguous(
+    env, action
+):
     plain = env.add_target("demo", "plain_directory")
     prefixed = env.add_target("astrbot_plugin_demo", "prefixed_directory")
     event = env.event(f"/pm {action} demo")
@@ -165,7 +174,7 @@ async def test_disabled_setting_does_not_create_expanded_name_conflicts(env):
     assert env.plugin.service.resolve("demo").plugin is plain
 
 
-@pytest.mark.parametrize("action", ["disable", "remove"])
+@pytest.mark.parametrize("action", ["update", "disable", "remove"])
 async def test_omission_does_not_bypass_self_protection(env, action):
     event = env.event(f"/pm {action} manager")
     await env.scheduler.execute(event)
@@ -208,8 +217,12 @@ async def test_failed_plugin_removal_uses_the_complete_directory(env):
 
 
 @pytest.mark.parametrize("action", ["enable", "reload"])
-async def test_omitted_name_is_revalidated_after_waiting_for_the_manager_lock(env, action):
-    env.add_target("astrbot_plugin_demo", "astrbot_plugin_demo", active=action != "enable")
+async def test_omitted_name_is_revalidated_after_waiting_for_the_manager_lock(
+    env, action
+):
+    env.add_target(
+        "astrbot_plugin_demo", "astrbot_plugin_demo", active=action != "enable"
+    )
     event = env.event()
     await env.manager._pm_lock.acquire()
     task = asyncio.create_task(env.invoke(event, f"{action} demo"))

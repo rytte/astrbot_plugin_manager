@@ -50,6 +50,28 @@ class UpdateService:
             }
         )
 
+    @staticmethod
+    def _entry(record: dict, binding: dict) -> dict:
+        local = record["local"]
+        return {
+            "directory": local["directory"],
+            "revision": record["revision"],
+            "binding_id": binding["id"],
+            "is_current": binding["id"] == record["active_binding_id"],
+            "kind": binding["kind"],
+            "locator": binding["market_plugin_id"]
+            if binding["kind"] == "market"
+            else binding["repo_url"],
+            "registry_url": binding.get("registry_url"),
+            "local_version": local["version"],
+            "remote_version": "",
+            "status": "pending",
+            "message": "等待检查",
+            "can_update": False,
+            "_record": copy.deepcopy(record),
+            "_binding": copy.deepcopy(binding),
+        }
+
     async def start_check(self, owner: str) -> dict:
         """Start one bounded background check of all registered bindings."""
         async with self.lock:
@@ -57,30 +79,11 @@ class UpdateService:
             if self.closing or (self.task and not self.task.done()):
                 raise ValueError("已有来源检查正在运行或管家正在关闭，请稍后重试。")
             records = await self.sources.inventory()
-            entries = []
-            for record in records:
-                local = record["local"]
-                for binding in record["bindings"]:
-                    entries.append(
-                        {
-                            "directory": local["directory"],
-                            "revision": record["revision"],
-                            "binding_id": binding["id"],
-                            "is_current": binding["id"] == record["active_binding_id"],
-                            "kind": binding["kind"],
-                            "locator": binding["market_plugin_id"]
-                            if binding["kind"] == "market"
-                            else binding["repo_url"],
-                            "registry_url": binding.get("registry_url"),
-                            "local_version": local["version"],
-                            "remote_version": "",
-                            "status": "pending",
-                            "message": "等待检查",
-                            "can_update": False,
-                            "_record": copy.deepcopy(record),
-                            "_binding": copy.deepcopy(binding),
-                        }
-                    )
+            entries = [
+                self._entry(record, binding)
+                for record in records
+                for binding in record["bindings"]
+            ]
             self.report = {
                 "id": uuid.uuid4().hex,
                 "owner": owner,
@@ -93,6 +96,57 @@ class UpdateService:
             }
             self.task = asyncio.create_task(self._check(self.report))
             return self.state(owner)
+
+    async def check_all(self, owner: str) -> str:
+        """Wait for this caller's check and summarize only actionable findings."""
+        await self.start_check(owner)
+        report, task = self.report, self.task
+        await asyncio.shield(task)
+        if report["status"] != "completed":
+            raise ValueError(report["error"] or "更新检查未完成，请重新执行命令。")
+        if not report["total"]:
+            return "没有已关联来源可检查，请先在插件页面的「来源管理」中绑定来源。"
+        available, other, blocked, failed = [], [], [], []
+        for entry in report["results"]:
+            local = entry["_record"]["local"]
+            label = (
+                f"{local['display_name']}（{local['name']}）"
+                if local["display_name"]
+                else local["name"]
+            )
+            source = (
+                ("市场" if entry["kind"] == "market" else "仓库")
+                + "："
+                + entry["locator"]
+            )
+            versions = f"{entry['local_version']} → {entry['remote_version']}"
+            if entry["can_update"]:
+                available.append(
+                    f"- {label}：{versions}\n  /pm update {entry['directory']}"
+                )
+            elif entry["status"] == "update_available":
+                if entry["is_current"]:
+                    blocked.append(f"- {label}：{versions}；{entry['message']}")
+                else:
+                    other.append(f"- {label}：{versions}（{source}）")
+            elif entry["status"] == "error":
+                current = "当前更新源" if entry["is_current"] else "关联来源"
+                failed.append(f"- {label}（{current} · {source}）：{entry['message']}")
+        unchanged = sum(entry["status"] == "no_update" for entry in report["results"])
+        plugins = len({entry["directory"] for entry in report["results"]})
+        lines = [
+            f"更新检查完成：{plugins} 个插件，{report['total']} 个关联来源。",
+            f"可更新 {len(available)} 个插件 · 无版本更新 {unchanged} 个来源 · 检查失败 {len(failed)} 个来源",
+        ]
+        for title, entries in (
+            ("可更新：", available),
+            ("其他来源有新版本（请在来源管理中切换更新源）：", other),
+            ("当前来源有新版本，暂无法更新：", blocked),
+            ("检查失败：", failed),
+        ):
+            if entries:
+                lines.extend(["", title, *entries])
+        return redact("\n".join(lines))
 
     async def _fetch(self, binding: dict) -> object:
         """Fetch current metadata through AstrBot, rejecting offline market fallback."""
@@ -259,7 +313,45 @@ class UpdateService:
             job = self.transfers._new_job(owner, "plugin_update")
             job["update_plan"] = copy.deepcopy(entry)
             job["check_id"] = check_id
+            job["update_mode"] = "checked"
             entry.update(can_update=False, status="updating", message="正在更新")
+            return self.transfers._start(job, self._update)
+
+    async def start_current_update(self, owner: str, identifier: str) -> dict:
+        """Queue a direct command using only the plugin's current update source."""
+        self.operations.ensure_writable()
+        async with self.lock:
+            self.transfers._ensure_idle()
+            if self.closing:
+                raise ValueError("插件管家正在关闭，请稍后重试。")
+            target = self.operations.resolve(identifier)
+            self.operations.check_operation(target, "update")
+            record = await self.sources.detail(target.directory)
+            self.operations.revalidate(target)
+            if record["local"]["problem"] or record["identity_changed"]:
+                raise ValueError(
+                    record["local"]["problem"] or "插件目录身份已变化，请重新关联来源。"
+                )
+            if record["metadata_changed"]:
+                raise ValueError(
+                    "插件信息已变化，请先在插件页面点击「更新信息」后重试。"
+                )
+            binding = next(
+                (
+                    item
+                    for item in record["bindings"]
+                    if item["id"] == record["active_binding_id"]
+                ),
+                None,
+            )
+            if binding is None:
+                raise ValueError(
+                    "插件没有当前更新源，请先在插件页面的「来源管理」中绑定并设为更新源。"
+                )
+            job = self.transfers._new_job(owner, "plugin_update")
+            job["update_plan"] = self._entry(record, binding)
+            job["check_id"] = None
+            job["update_mode"] = "current"
             return self.transfers._start(job, self._update)
 
     async def _update(self, job: dict) -> None:
@@ -276,13 +368,25 @@ class UpdateService:
             binding = entry["_binding"]
             self.transfers._phase(job, "重新检查当前更新源")
             fresh = self._evaluate(record, binding, await self._fetch(binding))
-            if not fresh["can_update"] or fingerprint(
-                fresh["_metadata"]
-            ) != fingerprint(entry["_metadata"]):
-                raise ValueError("远端版本或来源已变化，请重新检查后更新。")
             record = await self.sources.detail(directory)
             if record["revision"] != entry["_record"]["revision"]:
                 raise ValueError("插件或来源已变化，请重新检查。")
+            if job["update_mode"] == "current":
+                if fresh["status"] == "no_update":
+                    job["results"].append(
+                        {
+                            "directory": directory,
+                            "status": "no_update",
+                            "message": "已是最新版本。",
+                        }
+                    )
+                    return
+                if not fresh["can_update"]:
+                    raise ValueError(fresh["message"])
+            elif not fresh["can_update"] or fingerprint(
+                fresh["_metadata"]
+            ) != fingerprint(entry["_metadata"]):
+                raise ValueError("远端版本或来源已变化，请重新检查后更新。")
             target = self.operations.resolve(directory)
             self.operations.check_operation(target, "update")
             core_record = self.sources._core(
@@ -333,13 +437,15 @@ class UpdateService:
             )
             status = "updated"
         except Exception as exc:
-            message = (
-                redact(exc.public_message)
-                if isinstance(exc, PluginServiceError)
-                else redact(str(exc))
-                if isinstance(exc, (ValueError, PluginServiceError))
-                else "更新失败，请检查 AstrBot 日志。"
-            )
+            if isinstance(exc, asyncio.TimeoutError) and not entered:
+                message = "当前更新源检查超时，请稍后重试。"
+            elif isinstance(exc, PluginServiceError):
+                message = redact(exc.public_message)
+            elif isinstance(exc, ValueError):
+                message = redact(str(exc))
+            else:
+                logger.exception("Plugin update failed.")
+                message = "更新失败，请检查 AstrBot 日志。"
             if entered:
                 message += "可能已修改插件文件，请通过官方插件页面检查或恢复。"
             job["results"].append(

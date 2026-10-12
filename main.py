@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shlex
 import time
 from collections.abc import AsyncIterator
@@ -33,6 +34,8 @@ USAGE = (
     "刷新市场   /pm refresh-market\n"
     "搜索插件   /pm search <关键词> [--page <页码>]\n"
     "安装插件   /pm add <仓库地址或市场ID>\n"
+    "检查更新   /pm check-update\n"
+    "更新插件   /pm update <插件名>\n"
     "卸载插件   /pm remove <插件名> [--all]\n"
     "插件信息   /pm info <插件名>\n"
     "启用插件   /pm enable <插件名>\n"
@@ -81,6 +84,7 @@ class Main(Star):
         self.manifests = ManifestService(self.sources, self.transfers)
         self.manager_data = ManagerDataService(self.sources, self.transfers)
         self.updates = UpdateService(self.sources, self.transfers)
+        self.chat_updates = UpdateService(self.sources, self.transfers)
         self.management_web = ManagementWeb(
             context,
             self.transfers,
@@ -138,7 +142,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
         "pm",
-        desc="管理员插件管理：list/cmds/tools/search/refresh-market/help/info/add/enable/disable/reload/remove。",
+        desc="管理员插件管理：list/cmds/tools/search/refresh-market/help/info/add/check-update/update/enable/disable/reload/remove。",
     )
     async def plugin(
         self, event: AstrMessageEvent, arguments: GreedyStr
@@ -225,6 +229,46 @@ class Main(Star):
                 await self.reply(event, await self.service.refresh_market())
                 yield
                 return
+            if action in {"check-update", "update"}:
+                if action == "check-update" and args:
+                    raise ValueError("用法：/pm check-update（不接受其他参数）。")
+                if action == "update" and (len(args) != 1 or args[0].startswith("--")):
+                    raise ValueError("用法：/pm update <插件名或目录名>。")
+                owner = "chat:" + json.dumps(
+                    [event.unified_msg_origin, event.get_sender_id()],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                if action == "check-update":
+                    await self.reply(event, "正在检查全部关联来源的更新，请稍候。")
+                    yield
+                    await self.reply(event, await self.chat_updates.check_all(owner))
+                else:
+                    started = await self.chat_updates.start_current_update(
+                        owner, args[0]
+                    )
+                    job = self.transfers.get_job(started["id"], owner)
+                    task = self.transfers.task
+                    name = job["update_plan"]["_record"]["local"]["name"]
+                    self.logger.info(
+                        "Plugin update by %s in %s: %s",
+                        event.get_sender_id(),
+                        event.unified_msg_origin,
+                        name,
+                    )
+                    await self.reply(event, f"正在检查并更新插件 {name}，请稍候。")
+                    yield
+                    await asyncio.shield(task)
+                    if job["status"] not in {"completed", "completed_with_warning"}:
+                        raise ValueError(
+                            f"插件 {name} 更新未完成："
+                            + (job["error"] or "请检查插件状态。")
+                        )
+                    await self.reply(
+                        event, f"插件 {name}：{job['results'][0]['message']}"
+                    )
+                yield
+                return
             if action not in {"add", "enable", "disable", "reload", "remove"}:
                 raise ValueError("未知子命令，请使用 /pm help 查看用法。")
             async with self._operations:
@@ -305,6 +349,7 @@ class Main(Star):
                     "info",
                     "search",
                     "refresh-market",
+                    "check-update",
                 }
                 else "操作失败，可能已发生部分变更；请检查 AstrBot 日志，并通过 WebUI 检查或恢复插件。",
             )
@@ -384,5 +429,6 @@ class Main(Star):
         """Invalidate pending requests and confirmations when unloading."""
         self.ready = False
         self._removals.clear()
+        await self.chat_updates.close()
         await self.management_web.close()
         await self.transfer_web.close()

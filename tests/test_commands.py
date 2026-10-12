@@ -37,6 +37,8 @@ async def test_pm_is_the_only_registered_entry_point(env):
         "/pm tools",
         "/pm search weather",
         "/pm refresh-market",
+        "/pm check-update",
+        "/pm update demo",
         "/pm info demo",
         "/pm add https://example.com/repo",
         "/pm add alice/astrbot_plugin_weather",
@@ -63,6 +65,8 @@ async def test_all_commands_require_admin_in_real_pipeline(env, command):
         "tools",
         "search weather",
         "refresh-market",
+        "check-update",
+        "update bad",
         "help",
         "info bad",
         "add bad",
@@ -92,9 +96,7 @@ async def test_bare_entry_shows_help_without_calling_model(env, command):
     assert "查看帮助   /pm help" in output(event).splitlines()
     assert "插件信息   /pm info <插件名>" in output(event).splitlines()
     commands = {
-        line.split()[2]
-        for line in output(event).splitlines()
-        if "   /pm " in line
+        line.split()[2] for line in output(event).splitlines() if "   /pm " in line
     }
     assert commands == {
         "list",
@@ -102,6 +104,8 @@ async def test_bare_entry_shows_help_without_calling_model(env, command):
         "tools",
         "search",
         "refresh-market",
+        "check-update",
+        "update",
         "help",
         "info",
         "add",
@@ -123,6 +127,7 @@ async def test_bare_entry_shows_help_without_calling_model(env, command):
         "commands",
         "market weather",
         "source demo_plugin",
+        "check",
     ],
 )
 async def test_old_subcommand_names_are_rejected_without_side_effects(
@@ -158,6 +163,13 @@ async def test_old_subcommand_names_are_rejected_without_side_effects(
         "info demo extra",
         "add",
         "add url extra",
+        "check-update demo",
+        "check-update --all",
+        "update",
+        "update demo extra",
+        "update demo confirm",
+        "update demo --all",
+        "update --all",
         "enable",
         "disable demo --force",
         "reload",
