@@ -90,13 +90,13 @@ async def test_bare_entry_shows_help_without_calling_model(env, command):
     assert "/pm remove" in output(event)
     assert "/plugin" not in output(event)
     assert "插件管家" in output(event)
-    assert "/pm list" in output(event).splitlines()
-    assert "/pm help" in output(event).splitlines()
-    assert "/pm info <插件名或目录名>" in output(event).splitlines()
+    assert "插件列表   /pm list" in output(event).splitlines()
+    assert "查看帮助   /pm help" in output(event).splitlines()
+    assert "插件信息   /pm info <插件名>" in output(event).splitlines()
     commands = {
-        line.split()[1]
+        line.split()[2]
         for line in output(event).splitlines()
-        if line.startswith("/pm ")
+        if "   /pm " in line
     }
     assert commands == {
         "list",

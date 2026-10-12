@@ -29,8 +29,10 @@ from .transfer_bundle import (
     MAX_CONTENT,
     MAX_FILE,
     MAX_FILES,
+    check_bundle_format,
     check_config,
     check_environment,
+    check_source_snapshot,
     component,
     copy_tree,
     decode_value,
@@ -1137,6 +1139,14 @@ class TransferService:
             raise ValueError("导入预检已过期或已使用，请重新上传。")
         if acknowledged is not True:
             raise ValueError("请确认来源可信、覆盖风险和敏感内容。")
+        check_bundle_format(job["manifest"])
+        for plugin in job["manifest"]["plugins"]:
+            await asyncio.to_thread(
+                check_source_snapshot,
+                self.job_directory(job["id"]) / "checked",
+                plugin,
+                job["manifest"]["files"],
+            )
         if not isinstance(selections, list) or not selections:
             raise ValueError("请选择需要恢复的插件和组件。")
         incoming = {
@@ -1170,6 +1180,9 @@ class TransferService:
     def _verify_checked(self, job: dict) -> None:
         root = safe_path(self.job_directory(job["id"]), "checked")
         manifest = job["manifest"]
+        check_bundle_format(manifest)
+        for plugin in manifest["plugins"]:
+            check_source_snapshot(root, plugin, manifest["files"])
         actual = {path.relative_to(root).as_posix() for path in tree_files(root)} - {
             "manifest.json"
         }
@@ -1438,11 +1451,9 @@ class TransferService:
                             )
                         self.manager.failed_plugin_dict.pop(plugin["directory"], None)
                         if selection["code"] and hasattr(self.operations, "sources"):
-                            incoming_sources = None
-                            if job["manifest"]["format_version"] >= 2:
-                                incoming_sources = await asyncio.to_thread(
-                                    load_json, prefix / "sources.json"
-                                )
+                            incoming_sources = await asyncio.to_thread(
+                                load_json, prefix / "sources.json"
+                            )
                             await self.operations.sources.note_bundle(
                                 plugin["directory"], job["owner"], incoming_sources
                             )

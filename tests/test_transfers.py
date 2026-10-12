@@ -74,7 +74,7 @@ async def test_code_only_backup_carries_sources_and_restores_them_pending(
     with zipfile.ZipFile(package) as archive:
         manifest = json.loads(archive.read("manifest.json"))
         data = json.loads(archive.read(f"payload/{target.root_dir_name}/sources.json"))
-    assert manifest["format_version"] == 2
+    assert manifest["format_version"] == 1
     assert not manifest["plugins"][0]["config"] and not manifest["plugins"][0]["data"]
     assert data["provenance"]["method"] == "market"
     assert data["provenance"]["reported_installed_at"].startswith("2025")
@@ -472,10 +472,9 @@ async def test_metadata_name_conflicts_do_not_invent_loading_failure(transfer_en
 
 
 @pytest.mark.parametrize("fail_after_source_change", [False, True])
-@pytest.mark.parametrize("legacy", [False, True])
 @pytest.mark.parametrize("legacy_source_key", [False, True])
 async def test_code_migration_restores_pending_sources_and_rollback_restores_original(
-    transfer_env, monkeypatch, fail_after_source_change, legacy, legacy_source_key
+    transfer_env, monkeypatch, fail_after_source_change, legacy_source_key
 ):
     env = transfer_env
     target = env.make_transfer_plugin()
@@ -491,24 +490,11 @@ async def test_code_migration_restores_pending_sources_and_rollback_restores_ori
     original_core = copy.deepcopy(env.prefs["plugin_install_sources"])
     original_record = await sources.detail(target.root_dir_name)
     package = await export_package(env, target)
-    if legacy:
-        with zipfile.ZipFile(package) as archive:
-            contents = {name: archive.read(name) for name in archive.namelist()}
-        manifest = json.loads(contents["manifest.json"])
-        manifest["format_version"] = 1
-        source_file = f"payload/{target.root_dir_name}/sources.json"
-        contents.pop(source_file)
-        manifest["files"].pop(source_file)
-        contents["manifest.json"] = json.dumps(manifest).encode()
-        package = env.root / "legacy.zip"
-        with zipfile.ZipFile(package, "w") as archive:
-            for name, content in contents.items():
-                archive.writestr(name, content)
     job, _ = await prepare(env, package)
     if fail_after_source_change:
         saved = sources.note_bundle
 
-        async def fail(directory, actor, incoming=None):
+        async def fail(directory, actor, incoming):
             await saved(directory, actor, incoming)
             raise OSError("failure after clearing old source")
 
@@ -525,19 +511,108 @@ async def test_code_migration_restores_pending_sources_and_rollback_restores_ori
     else:
         assert job["status"] == "completed", job
         assert current["active_binding_id"] is None
-        if legacy:
-            assert not current["bindings"]
-        else:
-            assert len(current["bindings"]) == len(original_record["bindings"])
-            assert (
-                current["provenance"]["method"]
-                == original_record["provenance"]["method"]
-            )
-            assert current["provenance"]["evidence"] == "bundle_record"
-            assert current["bindings"][0]["verification"] == "imported"
-            assert current["bindings"][0]["imported_active"]
+        assert len(current["bindings"]) == len(original_record["bindings"])
+        assert (
+            current["provenance"]["method"] == original_record["provenance"]["method"]
+        )
+        assert current["provenance"]["evidence"] == "bundle_record"
+        assert current["bindings"][0]["verification"] == "imported"
+        assert current["bindings"][0]["imported_active"]
         assert target.root_dir_name not in env.prefs["plugin_install_sources"]
         assert target.name not in env.prefs["plugin_install_sources"]
+
+
+@pytest.mark.parametrize("old_format", ["v1-without-sources", "v2"])
+async def test_old_bundle_formats_fail_preflight_without_changing_local_plugins(
+    transfer_env, old_format
+):
+    env = transfer_env
+    target = env.make_transfer_plugin(active=True)
+    transfers, sources = env.plugin.transfers, env.plugin.sources
+    env.prefs["plugin_install_sources"] = {
+        target.root_dir_name: {
+            "install_method": "repository",
+            "repo": "https://github.com/test/demo",
+        }
+    }
+    original_record = await sources.detail(target.root_dir_name)
+    original_core = copy.deepcopy(env.prefs["plugin_install_sources"])
+    code = transfers.code_root / target.root_dir_name / "main.py"
+    original_code = code.read_bytes()
+    package = await export_package(env, target)
+    with zipfile.ZipFile(package) as archive:
+        contents = {name: archive.read(name) for name in archive.namelist()}
+    manifest = json.loads(contents["manifest.json"])
+    if old_format == "v2":
+        manifest["format_version"] = 2
+        error = "版本不受支持"
+    else:
+        relative = f"payload/{target.root_dir_name}/sources.json"
+        contents.pop(relative)
+        manifest["files"].pop(relative)
+        error = "缺少来源快照"
+    contents["manifest.json"] = json.dumps(manifest).encode()
+    old_package = env.root / "old-format.zip"
+    with zipfile.ZipFile(old_package, "w") as archive:
+        for name, content in contents.items():
+            archive.writestr(name, content)
+    job = transfers.new_upload("admin")
+    shutil.copyfile(old_package, transfers.job_directory(job["id"]) / "upload.zip")
+    with pytest.raises(ValueError, match=error):
+        await transfers.prepare_import(job)
+    assert job["status"] == "failed"
+    assert "manifest" not in job
+    assert code.read_bytes() == original_code
+    assert (await sources.detail(target.root_dir_name))["bindings"] == original_record[
+        "bindings"
+    ]
+    assert env.prefs["plugin_install_sources"] == original_core
+    env.manager._terminate_plugin.assert_not_awaited()
+    env.manager.load.assert_not_awaited()
+
+
+@pytest.mark.parametrize("old_format", ["v1-without-sources", "v2"])
+@pytest.mark.parametrize("phase", ["confirmation", "execution"])
+async def test_retained_old_previews_are_rejected_before_modifying_plugins(
+    transfer_env, old_format, phase
+):
+    env = transfer_env
+    target = env.make_transfer_plugin(active=True)
+    transfers = env.plugin.transfers
+    job, _ = await prepare(env, await export_package(env, target))
+    if phase == "execution":
+        await env.manager._pm_lock.acquire()
+    try:
+        if phase == "execution":
+            await transfers.start_import(
+                job["id"], "admin", [restore_selection(target)], True
+            )
+        if old_format == "v2":
+            job["manifest"]["format_version"] = 2
+            error = "版本不受支持"
+        else:
+            relative = f"payload/{target.root_dir_name}/sources.json"
+            job["manifest"]["files"].pop(relative)
+            (transfers.job_directory(job["id"]) / "checked" / relative).unlink()
+            error = "缺少来源快照"
+        if phase == "confirmation":
+            transfers._save(job)
+            restarted = TransferService(env.plugin.service, env.plugin._operations)
+            await restarted.initialize()
+            with pytest.raises(ValueError, match=error):
+                await restarted.start_import(
+                    job["id"], "admin", [restore_selection(target)], True
+                )
+    finally:
+        if phase == "execution":
+            env.manager._pm_lock.release()
+    if phase == "execution":
+        await transfers.task
+        assert job["status"] == "failed" and error in job["error"]
+    assert target.activated
+    assert not (transfers.job_directory(job["id"]) / "before").exists()
+    env.manager._terminate_plugin.assert_not_awaited()
+    env.manager.load.assert_not_awaited()
 
 
 async def test_rule_persists_components_and_can_be_cleared(transfer_env):

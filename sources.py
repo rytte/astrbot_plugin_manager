@@ -723,12 +723,9 @@ class SourceService:
         }
         return validate_sources(data, record["local"]), warnings
 
-    async def note_bundle(
-        self, directory: str, actor: str, incoming: dict | None = None
-    ) -> None:
+    async def note_bundle(self, directory: str, actor: str, incoming: dict) -> None:
         record = await self.detail(directory)
-        if incoming is not None:
-            validate_sources(incoming, record["local"])
+        validate_sources(incoming, record["local"])
         records = await self.operations.web.get_plugin_install_sources()
         records.pop(directory, None)
         name = record["local"]["name"]
@@ -738,36 +735,26 @@ class SourceService:
         ):
             records.pop(name, None)
         await self.operations.web.save_plugin_install_sources(records)
-        record["bindings"] = []
-        if incoming is not None:
-            record["provenance"] = {
-                **copy.deepcopy(incoming["provenance"]),
-                "evidence": "bundle_record",
+        record["provenance"] = {
+            **copy.deepcopy(incoming["provenance"]),
+            "evidence": "bundle_record",
+        }
+        record["identity"] = self._identity(record["local"])
+        record["metadata_snapshot"] = {
+            field: record["local"][field] for field in METADATA_FIELDS
+        }
+        record["bindings"] = [
+            {
+                **copy.deepcopy(binding),
+                "verification": "imported",
+                "checked_at": None,
+                "imported_active": binding["id"] == incoming["active_binding_id"],
             }
-            record["identity"] = self._identity(record["local"])
-            record["metadata_snapshot"] = {
-                field: record["local"][field] for field in METADATA_FIELDS
-            }
-            record["bindings"] = [
-                {
-                    **copy.deepcopy(binding),
-                    "verification": "imported",
-                    "checked_at": None,
-                    "imported_active": binding["id"] == incoming["active_binding_id"],
-                }
-                for binding in incoming["bindings"]
-            ]
+            for binding in incoming["bindings"]
+        ]
         record["last_core_revision"] = fingerprint(None)
         self._event(record, "bundle_imported", actor)
-        if incoming is not None:
-            self._event(record, "bundle_sources_imported", actor)
-        if incoming is None and record["provenance"]["method"] == "unknown":
-            record["provenance"] = {
-                "method": "bundle",
-                "evidence": "manager_operation",
-                "installed_at": now(),
-                "observed_at": now(),
-            }
+        self._event(record, "bundle_sources_imported", actor)
         await self._save_record(record)
 
     async def observe_install(self, directory: str, method: str, actor: str) -> None:

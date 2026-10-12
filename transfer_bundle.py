@@ -27,7 +27,7 @@ from packaging.version import Version
 from .source_bundle import validate_sources
 
 FORMAT = "astrbot-plugin-manager"
-FORMAT_VERSION = 2
+FORMAT_VERSION = 1
 MAX_ARCHIVE = 256 * 1024 * 1024
 MAX_CONTENT = 1024 * 1024 * 1024
 MAX_FILE = 128 * 1024 * 1024
@@ -43,6 +43,28 @@ def exact_keys(value, expected: set[str]) -> None:
     """Reject missing, unknown or incorrectly shaped fields."""
     if not isinstance(value, dict) or set(value) != expected:
         raise ValueError("包或规则字段缺失、未知或格式不正确，请检查格式版本。")
+
+
+def check_bundle_format(manifest: dict) -> None:
+    """Accept only the current bundle schema, with mandatory source snapshots."""
+    if (
+        manifest["format"] != FORMAT
+        or type(manifest["format_version"]) is not int
+        or manifest["format_version"] != FORMAT_VERSION
+    ):
+        raise ValueError("插件包格式或版本不受支持；仅支持当前 v1 格式，请重新导出。")
+
+
+def check_source_snapshot(root: Path, plugin: dict, files) -> str:
+    """Require and validate the source snapshot in fresh and retained previews."""
+    relative = f"payload/{plugin['directory']}/sources.json"
+    path = safe_path(root, relative)
+    if relative not in files or not path.is_file():
+        raise ValueError(
+            "插件包缺少来源快照，不支持不含来源信息的旧 v1 包，请重新导出。"
+        )
+    validate_sources(load_json(path), plugin)
+    return relative
 
 
 def portable_path(value: str) -> str:
@@ -605,12 +627,7 @@ def _unpack(archive_path: Path, destination: Path) -> dict:
             "directories",
         },
     )
-    if (
-        manifest["format"] != FORMAT
-        or type(manifest["format_version"]) is not int
-        or manifest["format_version"] not in {1, FORMAT_VERSION}
-    ):
-        raise ValueError("插件包格式或格式版本不受支持。")
+    check_bundle_format(manifest)
     if (
         not isinstance(manifest["files"], dict)
         or not isinstance(manifest["plugins"], list)
@@ -664,12 +681,7 @@ def _unpack(archive_path: Path, destination: Path) -> dict:
             if type(plugin[key]) is not bool:
                 raise ValueError("组件标记必须是布尔值。")
         prefix = f"payload/{plugin['directory']}"
-        if manifest["format_version"] >= 2:
-            relative = prefix + "/sources.json"
-            if relative not in actual:
-                raise ValueError("包缺少来源快照。")
-            validate_sources(load_json(safe_path(destination, relative)), plugin)
-            allowed.add(relative)
+        allowed.add(check_source_snapshot(destination, plugin, actual))
         metadata = read_metadata(safe_path(destination, prefix + "/code"))
         for field in ("name", "author", "version", "plugin_id"):
             if metadata[field] != plugin[field]:

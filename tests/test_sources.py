@@ -500,7 +500,9 @@ async def test_metadata_sync_rejects_changes_since_display(transfer_env):
     env.manager.load.assert_not_awaited()
 
 
-async def test_bundle_import_invalidates_bindings_and_can_restore_source_snapshot(env):
+async def test_bundle_import_invalidates_source_trust_and_can_restore_source_snapshot(
+    env,
+):
     target = env.add_target()
     env.prefs["plugin_install_sources"] = {target.root_dir_name: core_source(target)}
     original = await env.plugin.sources.detail(target.root_dir_name)
@@ -508,15 +510,35 @@ async def test_bundle_import_invalidates_bindings_and_can_restore_source_snapsho
         target.root_dir_name, target.name
     )
     original_core = copy.deepcopy(env.prefs["plugin_install_sources"])
-    await env.plugin.sources.note_bundle(target.root_dir_name, "admin")
+    incoming, _ = await env.plugin.sources.export_sources(
+        target.root_dir_name, original["local"]
+    )
+    await env.plugin.sources.note_bundle(target.root_dir_name, "admin", incoming)
     modified = await env.plugin.sources.detail(target.root_dir_name)
-    assert not modified["bindings"] and not modified["active_binding_id"]
+    assert len(modified["bindings"]) == len(original["bindings"])
+    assert all(
+        binding["verification"] == "imported" for binding in modified["bindings"]
+    )
+    assert not modified["active_binding_id"]
     assert target.root_dir_name not in env.prefs["plugin_install_sources"]
     await env.plugin.sources.restore_sources(snapshot)
     assert env.prefs["plugin_install_sources"] == original_core
     assert (await env.plugin.sources.detail(target.root_dir_name))[
         "bindings"
     ] == original["bindings"]
+
+
+async def test_bundle_import_rejects_missing_source_snapshot_before_writing(env):
+    target = env.add_target()
+    sources = env.plugin.sources
+    env.prefs["plugin_install_sources"] = {target.root_dir_name: core_source(target)}
+    await sources.detail(target.root_dir_name)
+    original_sources = sources.path.read_bytes()
+    original_core = copy.deepcopy(env.prefs["plugin_install_sources"])
+    with pytest.raises(ValueError, match="来源快照"):
+        await sources.note_bundle(target.root_dir_name, "admin", None)
+    assert sources.path.read_bytes() == original_sources
+    assert env.prefs["plugin_install_sources"] == original_core
 
 
 @pytest.mark.parametrize(

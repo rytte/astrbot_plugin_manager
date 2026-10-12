@@ -329,7 +329,10 @@ async def test_bundle_checksums_extra_files_and_versions_are_rejected(
     for mode in (
         "checksum",
         "extra",
-        "version",
+        "version-zero",
+        "version-two",
+        "version-bool",
+        "version-string",
         "directory",
         "sources-checksum",
         "sources-identity",
@@ -342,8 +345,13 @@ async def test_bundle_checksums_extra_files_and_versions_are_rejected(
             changed[f"payload/{target.root_dir_name}/code/main.py"] = b"tampered"
         elif mode == "extra":
             changed["unexpected.txt"] = b"outside allowlist"
-        elif mode == "version":
-            manifest["format_version"] = 0
+        elif mode.startswith("version-"):
+            manifest["format_version"] = {
+                "version-zero": 0,
+                "version-two": 2,
+                "version-bool": True,
+                "version-string": "1",
+            }[mode]
             changed["manifest.json"] = json.dumps(manifest).encode()
         elif mode == "directory":
             manifest["directories"].append("forbidden/directory")
