@@ -1,11 +1,24 @@
 """Verify observed provenance, identities, switching, and persistence offline."""
 
+import asyncio
 import copy
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 import yaml
+from astrbot.dashboard.services.plugin_service import PluginService, PluginServiceError
 from astrbot_plugin_manager.sources import SourceService, same_repository
+
+
+@pytest.fixture(autouse=True)
+def market_cache(monkeypatch, tmp_path):
+    """Isolate AstrBot's shared marketplace cache for source verification."""
+    monkeypatch.setattr(
+        "astrbot.dashboard.services.plugin_service.get_astrbot_data_path",
+        lambda: str(tmp_path),
+    )
+    return Path(PluginService.build_registry_source(None).cache_file)
 
 
 def core_source(target, method="market"):
@@ -124,6 +137,157 @@ async def test_market_mismatch_cannot_be_bound(env, monkeypatch, changes):
         await env.plugin.sources.preview_binding(
             "admin", target.root_dir_name, "market", f"{target.author}/{target.name}"
         )
+    env.preferences.global_put.assert_not_awaited()
+
+
+async def test_cached_market_identity_can_be_verified_and_activated_without_network(
+    env, monkeypatch, market_cache
+):
+    target = env.add_target()
+    env.prefs["plugin_install_sources"] = {target.root_dir_name: core_source(target)}
+    env.plugin.service.web.save_plugin_cache(str(market_cache), registry(target))
+    fetch = AsyncMock(
+        side_effect=AssertionError("Matched cache must not fetch remotely")
+    )
+    md5 = AsyncMock(side_effect=AssertionError("Matched cache must not check MD5"))
+    monkeypatch.setattr(env.plugin.service.web, "get_online_plugins", fetch)
+    monkeypatch.setattr(env.plugin.service.web, "fetch_remote_md5", md5)
+    preview = await env.plugin.sources.preview_binding(
+        "admin", target.root_dir_name, "market", f"{target.author}/{target.name}"
+    )
+    assert "AstrBot 本地市场缓存" in preview["notice"]
+    assert preview["binding"]["verification"] == "identity_matched"
+    saved = await env.plugin.sources.bind("admin", preview["id"], True, True)
+    assert saved["active_binding_id"] == preview["binding"]["id"]
+    fetch.assert_not_awaited()
+    md5.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "cached_case",
+    [
+        "missing",
+        "invalid_json",
+        "empty",
+        "missing_id",
+        "name",
+        "author",
+        "repo",
+        "invalid_repo",
+    ],
+)
+async def test_market_cache_miss_or_mismatch_refreshes_once_and_uses_latest_data(
+    env, monkeypatch, market_cache, cached_case
+):
+    target = env.add_target()
+    identifier = f"{target.author}/{target.name}"
+    env.prefs["plugin_install_sources"] = {target.root_dir_name: core_source(target)}
+    cached_data = {
+        "empty": {},
+        "missing_id": {"$meta": {"schema_version": 2}},
+        "name": registry(target, market_plugin_id=identifier, name="other"),
+        "author": registry(target, market_plugin_id=identifier, author="other"),
+        "repo": registry(target, repo="https://github.com/test/old"),
+        "invalid_repo": registry(target, repo="invalid"),
+    }
+    if cached_case == "invalid_json":
+        market_cache.write_text("{broken", encoding="utf-8")
+    elif cached_case != "missing":
+        env.plugin.service.web.save_plugin_cache(
+            str(market_cache), cached_data[cached_case]
+        )
+
+    async def fresh_registry(*, custom_registry, force_refresh):
+        data = registry(target)
+        env.plugin.service.web.save_plugin_cache(str(market_cache), data)
+        return data, None
+
+    fetch = AsyncMock(side_effect=fresh_registry)
+    monkeypatch.setattr(env.plugin.service.web, "get_online_plugins", fetch)
+    preview = await env.plugin.sources.preview_binding(
+        "admin", target.root_dir_name, "market", identifier
+    )
+    assert preview["notice"] is None
+    assert preview["binding"]["repo_url"] == "https://github.com/test/demo"
+    cached_preview = await env.plugin.sources.preview_binding(
+        "admin", target.root_dir_name, "market", identifier
+    )
+    assert "AstrBot 本地市场缓存" in cached_preview["notice"]
+    fetch.assert_awaited_once_with(custom_registry=None, force_refresh=True)
+    env.preferences.global_put.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "changes,expected",
+    [
+        (None, "未找到"),
+        ({"name": "other"}, "作者或插件名"),
+        ({"author": "other"}, "作者或插件名"),
+        ({"repo": "https://github.com/test/other"}, "仓库地址与当前来源不同"),
+    ],
+)
+async def test_market_remote_mismatch_is_rejected_without_saving_a_preview(
+    env, monkeypatch, market_cache, changes, expected
+):
+    target = env.add_target()
+    identifier = f"{target.author}/{target.name}"
+    env.prefs["plugin_install_sources"] = {target.root_dir_name: core_source(target)}
+    env.plugin.service.web.save_plugin_cache(str(market_cache), {})
+    data = (
+        {}
+        if changes is None
+        else registry(target, market_plugin_id=identifier, **changes)
+    )
+    fetch = AsyncMock(return_value=(data, None))
+    monkeypatch.setattr(env.plugin.service.web, "get_online_plugins", fetch)
+    with pytest.raises(ValueError, match=expected):
+        await env.plugin.sources.preview_binding(
+            "admin", target.root_dir_name, "market", identifier
+        )
+    fetch.assert_awaited_once_with(custom_registry=None, force_refresh=True)
+    assert not env.plugin.sources.previews
+    env.preferences.global_put.assert_not_awaited()
+
+
+async def test_market_remote_cache_fallback_is_not_accepted_as_online_verification(
+    env, monkeypatch, market_cache
+):
+    target = env.add_target()
+    env.plugin.service.web.save_plugin_cache(str(market_cache), {})
+    fetch = AsyncMock(return_value=(registry(target), "使用缓存数据，可能不是最新版本"))
+    monkeypatch.setattr(env.plugin.service.web, "get_online_plugins", fetch)
+    with pytest.raises(ValueError, match="联网校验失败.*旧缓存"):
+        await env.plugin.sources.preview_binding(
+            "admin", target.root_dir_name, "market", f"{target.author}/{target.name}"
+        )
+    fetch.assert_awaited_once_with(custom_registry=None, force_refresh=True)
+    assert not env.plugin.sources.previews
+    env.preferences.global_put.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "failure,expected",
+    [
+        (asyncio.TimeoutError(), "官方市场响应超时"),
+        (
+            PluginServiceError("获取插件列表失败，且没有可用的缓存数据"),
+            "获取插件列表失败",
+        ),
+    ],
+)
+async def test_market_online_verification_failure_keeps_sources_unchanged(
+    env, monkeypatch, market_cache, failure, expected
+):
+    target = env.add_target()
+    env.plugin.service.web.save_plugin_cache(str(market_cache), {})
+    fetch = AsyncMock(side_effect=failure)
+    monkeypatch.setattr(env.plugin.service.web, "get_online_plugins", fetch)
+    with pytest.raises((ValueError, PluginServiceError), match=expected):
+        await env.plugin.sources.preview_binding(
+            "admin", target.root_dir_name, "market", f"{target.author}/{target.name}"
+        )
+    fetch.assert_awaited_once_with(custom_registry=None, force_refresh=True)
+    assert not env.plugin.sources.previews
     env.preferences.global_put.assert_not_awaited()
 
 

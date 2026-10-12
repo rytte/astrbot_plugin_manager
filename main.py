@@ -30,6 +30,7 @@ USAGE = (
     "/pm cmds [页码]\n"
     "/pm tools [页码]\n"
     "/pm search <关键词> [--page <页码>]\n"
+    "/pm refresh-market\n"
     "/pm help\n"
     "/pm info <插件名或目录名>\n"
     "/pm source <插件名或目录名>\n"
@@ -129,7 +130,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
         "pm",
-        desc="管理员插件管理：list/cmds/tools/search/help/info/source/add/enable/disable/reload/remove。",
+        desc="管理员插件管理：list/cmds/tools/search/refresh-market/help/info/source/add/enable/disable/reload/remove。",
     )
     async def plugin(
         self, event: AstrMessageEvent, arguments: GreedyStr
@@ -214,6 +215,14 @@ class Main(Star):
                 )
                 yield
                 return
+            if action == "refresh-market":
+                if args:
+                    raise ValueError("用法：/pm refresh-market（不接受其他参数）。")
+                await self.reply(event, "正在刷新官方插件市场，请稍候。")
+                yield
+                await self.reply(event, await self.service.refresh_market())
+                yield
+                return
             if action not in {"add", "enable", "disable", "reload", "remove"}:
                 raise ValueError("未知子命令，请使用 /pm help 查看用法。")
             async with self._operations:
@@ -276,8 +285,8 @@ class Main(Star):
             self.logger.exception("Plugin management service rejected an operation.")
             await self.reply(
                 event,
-                f"市场查询未完成：{exc.public_message}。"
-                if action == "search"
+                f"市场{'刷新' if action == 'refresh-market' else '查询'}未完成：{exc.public_message}。"
+                if action in {"search", "refresh-market"}
                 else f"操作未完成：{exc.public_message}。请检查 WebUI 中的插件状态。",
             )
             yield
@@ -286,7 +295,16 @@ class Main(Star):
             await self.reply(
                 event,
                 "查询失败，请检查 AstrBot 日志。"
-                if action in {"list", "cmds", "tools", "info", "search", "source"}
+                if action
+                in {
+                    "list",
+                    "cmds",
+                    "tools",
+                    "info",
+                    "search",
+                    "refresh-market",
+                    "source",
+                }
                 else "操作失败，可能已发生部分变更；请检查 AstrBot 日志，并通过 WebUI 检查或恢复插件。",
             )
             yield

@@ -431,16 +431,22 @@ class PluginOperations:
         keyword = " ".join(keyword.split())
         if not keyword or page < 1:
             raise ValueError("关键词不能为空，页码必须为正整数。")
-        try:
-            data, notice = await asyncio.wait_for(
-                self.web.get_online_plugins(custom_registry=None, force_refresh=False),
-                timeout=MARKET_QUERY_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError as exc:
-            raise PluginServiceError(
-                "官方插件市场查询超时",
-                public_message="官方插件市场响应超时，请稍后重试。",
-            ) from exc
+        source = self.web.build_registry_source(None)
+        data = self.web.load_plugin_cache(source.cache_file)
+        notice = "使用 AstrBot 本地市场缓存；如需最新数据，请执行 /pm refresh-market。"
+        if not data:
+            try:
+                data, notice = await asyncio.wait_for(
+                    self.web.get_online_plugins(
+                        custom_registry=None, force_refresh=False
+                    ),
+                    timeout=MARKET_QUERY_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError as exc:
+                raise PluginServiceError(
+                    "官方插件市场查询超时",
+                    public_message="官方插件市场响应超时，请稍后重试。",
+                ) from exc
         entries = []
         for identifier, entry in self.web.iter_market_plugin_entries(data):
             if not is_market_id(identifier):
@@ -493,6 +499,38 @@ class PluginOperations:
         if page < pages:
             parts.append(f"下一页：/pm search {keyword} --page {page + 1}")
         return "\n\n".join(parts)
+
+    async def refresh_market(self) -> str:
+        """Fetch the official registry through AstrBot's cache writer.
+
+        Returns:
+            A refresh completion message.
+
+        Raises:
+            PluginServiceError: If fetching or persisting the latest registry fails.
+        """
+        try:
+            data, notice = await asyncio.wait_for(
+                self.web.get_online_plugins(custom_registry=None, force_refresh=True),
+                timeout=MARKET_QUERY_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            raise PluginServiceError(
+                "官方插件市场刷新超时",
+                public_message="官方插件市场响应超时，请稍后重试。",
+            ) from exc
+        if notice:
+            raise PluginServiceError(
+                "官方插件市场刷新未获取远端数据",
+                public_message="官方插件市场刷新失败，当前只能使用缓存数据，请稍后重试。",
+            )
+        source = self.web.build_registry_source(None)
+        if self.web.load_plugin_cache(source.cache_file) != data:
+            raise PluginServiceError(
+                "官方插件市场数据未保存到 AstrBot 缓存",
+                public_message="已获取市场数据，但 AstrBot 缓存未更新，请检查日志后重试。",
+            )
+        return "官方插件市场已刷新。"
 
     async def install(self, identifier: str) -> str:
         """Format the shared installer result for the /pm add command."""

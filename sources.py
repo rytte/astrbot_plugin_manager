@@ -408,22 +408,21 @@ class SourceService:
         local = record["local"]
         if record["identity"]["author"] != local["author"]:
             raise ValueError("作者信息已变更，请先点击「更新信息」，再校验来源。")
+        current = next(
+            (
+                item
+                for item in record["bindings"]
+                if item["id"] == record["active_binding_id"]
+            ),
+            None,
+        )
         notice = None
         if kind == "market":
             if not is_market_id(value):
                 raise ValueError("请填写完整的作者/插件技术名。")
-            data, notice = await self.official_market()
-            metadata = self.operations.web.resolve_market_plugin_entry_by_id(
-                data, value
-            )
-            if not metadata:
-                raise ValueError("官方市场中未找到该 ID。")
-            binding = {
-                "kind": "market",
-                "market_plugin_id": value,
-                "registry_url": None,
-                "repo_url": repository_url(metadata.get("repo")),
-            }
+            source = self.operations.web.build_registry_source(None)
+            data = self.operations.web.load_plugin_cache(source.cache_file)
+            notice = "使用 AstrBot 本地市场缓存校验身份；如需最新数据，请执行 /pm refresh-market。"
         elif kind == "repository":
             url = repository_url(value)
             metadata = await asyncio.wait_for(
@@ -438,22 +437,45 @@ class SourceService:
             }
         else:
             raise ValueError("只支持官方市场 ID 或 HTTPS 仓库绑定。")
-        if any(metadata.get(field) != local[field] for field in ("name", "author")):
-            raise ValueError("来源中的作者或插件名与本机不一致，拒绝绑定。")
-        current = next(
-            (
-                item
-                for item in record["bindings"]
-                if item["id"] == record["active_binding_id"]
-            ),
-            None,
-        )
-        if (
-            current
-            and current.get("repo_url")
-            and not same_repository(current["repo_url"], binding["repo_url"])
-        ):
-            raise ValueError("仓库地址与当前来源不同，不能作为同一插件的关联来源。")
+        # Retry cached marketplace mismatches once against the remote registry.
+        for attempt in range(2):
+            if kind == "market":
+                if attempt:
+                    data, notice = await self.official_market(fresh=True)
+                    if notice:
+                        raise ValueError(
+                            "官方市场联网校验失败，当前只能取得旧缓存，请稍后重试。"
+                        )
+                metadata = self.operations.web.resolve_market_plugin_entry_by_id(
+                    data, value
+                )
+            try:
+                if kind == "market":
+                    if not metadata:
+                        raise ValueError("官方市场中未找到该 ID。")
+                    binding = {
+                        "kind": "market",
+                        "market_plugin_id": value,
+                        "registry_url": None,
+                        "repo_url": repository_url(metadata.get("repo")),
+                    }
+                if any(
+                    metadata.get(field) != local[field] for field in ("name", "author")
+                ):
+                    raise ValueError("来源中的作者或插件名与本机不一致，拒绝绑定。")
+                if (
+                    current
+                    and current.get("repo_url")
+                    and not same_repository(current["repo_url"], binding["repo_url"])
+                ):
+                    raise ValueError(
+                        "仓库地址与当前来源不同，不能作为同一插件的关联来源。"
+                    )
+            except ValueError:
+                if kind != "market" or attempt:
+                    raise
+            else:
+                break
         binding["id"] = fingerprint(binding)[:24]
         binding.update(verification="identity_matched", checked_at=now())
         identifier = uuid.uuid4().hex
