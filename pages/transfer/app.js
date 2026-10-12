@@ -18,6 +18,8 @@ let openJobMenuId = null;
 const notifications = new Map();
 let confirmationResolve = null;
 let deletionResolve = null;
+let recoveryPreview = null;
+const recoveryChoices = new Map();
 let managementState = {plugins: []};
 let updateState = {id: null, status: "idle", results: [], done: 0, total: 0};
 let managementStatus = "loading", managementRequest = 0;
@@ -407,6 +409,7 @@ function renderSummary() {
     bulk.indeterminate = included > 0 && included < available.length;
     bulk.disabled = busy || requesting || manifestMode() || !available.length;
   }
+  if (recoveryPreview) renderRecovery();
 }
 
 function showTab(identifier) {
@@ -505,7 +508,68 @@ async function runRequest(operation) {
   if (selectedRecord) {dismissMessage(elements["source-message"]); renderSource();}
   try { await operation(); }
   catch (error) { message(error.message || "操作失败，请检查服务端日志。", true); }
-  finally { requesting = false; renderPlugins(); renderSummary(); renderJobs(displayedJobs); if (preview) renderImportPreview(); if (manifestPreview) renderManifest(); if (selectedRecord) renderSource(); }
+  finally { requesting = false; renderPlugins(); renderSummary(); renderJobs(displayedJobs); if (preview) renderImportPreview(); if (manifestPreview) renderManifest(); if (selectedRecord) renderSource(); if (recoveryPreview) renderRecovery(); }
+}
+
+async function openRecovery(job, resume = false) {
+  if (busy || requesting || !state.csrf) return;
+  return runRequest(async () => {
+    const result = resume ? await bridge.apiGet("transfer/rollback-plan", {id: job.id}) : await post("rollback-preview", {id: job.id});
+    recoveryPreview = result;
+    recoveryChoices.clear();
+    for (const plugin of result.plugins) recoveryChoices.set(plugin.directory, Object.fromEntries(["code", "config", "data"].map(key => [key, !plugin.problem && Boolean(plugin.components[key])])));
+    elements["recovery-acknowledged"].checked = false;
+    elements["recovery-message"].hidden = true;
+    await pollJobs();
+    renderRecovery();
+    elements["recovery-dialog"].showModal();
+  });
+}
+
+function renderRecovery() {
+  if (!recoveryPreview) return;
+  const expired = Date.now() / 1000 > recoveryPreview.expires_at;
+  elements["recovery-expiry"].textContent = "原导入任务 " + recoveryPreview.job.source_id.slice(0, 8) + " · 预检有效至 " + new Date(recoveryPreview.expires_at * 1000).toLocaleString("zh-CN");
+  const list = elements["recovery-list"]; list.replaceChildren();
+  for (const plugin of recoveryPreview.plugins) {
+    const row = node("tr"), title = titleCell(plugin);
+    if (plugin.problem) title.append(node("div", "plugin-error", plugin.problem));
+    row.append(title);
+    for (const key of ["code", "config", "data"]) {
+      const cell = node("td");
+      const action = plugin.components[key];
+      if (!action) cell.append(node("span", "muted", "未备份"));
+      else {
+        const label = action === "remove" ? key === "data" ? "还原键值并移除目录" : "移除新增" : "恢复旧内容";
+        const control = checkbox(plugin.name + " 的" + {code: "代码", config: "配置", data: "标准数据"}[key], recoveryChoices.get(plugin.directory)[key], busy || requesting || expired || Boolean(plugin.problem), checked => {recoveryChoices.get(plugin.directory)[key] = checked; renderRecovery();});
+        control.append(document.createTextNode(label)); cell.append(control);
+      }
+      row.append(cell);
+    }
+    list.append(row);
+  }
+  if (expired) {elements["recovery-message"].textContent = "预检已过期，请从原导入任务重新预检。"; elements["recovery-message"].hidden = false;}
+  elements["recovery-acknowledged"].disabled = requesting || busy || expired;
+  elements["cancel-recovery"].disabled = requesting;
+  elements["execute-recovery"].disabled = requesting || busy || expired || !elements["recovery-acknowledged"].checked || !Array.from(recoveryChoices.values()).some(choice => choice.code || choice.config || choice.data);
+}
+
+async function executeRecovery() {
+  if (!recoveryPreview || !elements["recovery-acknowledged"].checked || busy || requesting) return;
+  return runRequest(async () => {
+    try {
+      const selections = Array.from(recoveryChoices, ([directory, choice]) => ({directory, ...choice})).filter(choice => choice.code || choice.config || choice.data);
+      const job = await post("rollback", {id: recoveryPreview.job.id, selections, acknowledged: true});
+      elements["recovery-dialog"].close(); recoveryPreview = null; recoveryChoices.clear();
+      busy = previousBusy = true;
+      renderJobs([job, ...displayedJobs.filter(previous => previous.id !== job.id)]);
+      message("还原任务已启动，可在任务记录查看结果。", false, {task: true});
+      await pollJobs();
+    } catch (error) {
+      elements["recovery-message"].textContent = error.message || "还原未能启动，请重新预检。";
+      elements["recovery-message"].hidden = false;
+    }
+  });
 }
 
 function renderImportPreview() {
@@ -553,7 +617,7 @@ async function downloadJob(job, kind) {
 }
 
 function confirmJobDeletion(job) {
-  const labels = {export: "导出插件包", import: "导入插件包", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件"};
+  const labels = {export: "导出插件包", import: "导入插件包", rollback: "还原到导入前", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件"};
   elements["delete-job-title"].textContent = (labels[job.kind] || job.kind) + " · " + job.id.slice(0, 8);
   elements["delete-job-time"].textContent = new Date(job.created_at * 1000).toLocaleString("zh-CN");
   elements["delete-recovery-warning"].hidden = !job.backup_ready && !["interrupted", "rollback_failed"].includes(job.status);
@@ -621,7 +685,7 @@ function renderJobs(jobs) {
     const card = node("article", "job-card");
     const heading = node("div", "job-heading");
     const title = node("div", "job-heading-main");
-    title.append(node("span", "job-title", (job.preview_task && ["queued", "running"].includes(job.status) ? "清单预检" : ({export: "导出插件包", import: "导入插件包", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件"}[job.kind] || job.kind))), node("span", "pill job-status " + (job.preview_expired ? "expired" : job.status), job.preview_expired ? "预检已过期" : labels[job.status] || job.status));
+    title.append(node("span", "job-title", (job.preview_task && ["queued", "running"].includes(job.status) ? "清单预检" : ({export: "导出插件包", import: "导入插件包", rollback: "还原到导入前", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件"}[job.kind] || job.kind))), node("span", "pill job-status " + (job.preview_expired ? "expired" : job.status), job.preview_expired ? "预检已过期" : labels[job.status] || job.status));
     const menu = node("div", "job-menu");
     const toggle = node("button", "job-menu-toggle", "⋯");
     toggle.type = "button";
@@ -682,6 +746,15 @@ function renderJobs(jobs) {
       download.addEventListener("click", () => downloadJob(job, kind));
       actions.append(download);
     }
+    if ((job.kind === "import" && job.backup_ready && ["completed", "completed_with_warning", "failed", "interrupted", "rollback_failed"].includes(job.status) && !job.expired) || (job.kind === "rollback" && job.status === "preview")) {
+      const resume = job.kind === "rollback";
+      const restore = node("button", "button secondary", resume ? job.preview_expired ? "重新预检还原" : "继续选择还原" : "还原到导入前");
+      restore.disabled = busy || requesting || !state.csrf;
+      restore.dataset.jobId = job.id; restore.dataset.jobControl = "restore";
+      restore.addEventListener("click", () => resume && job.preview_expired ? openRecovery({id: job.source_id}) : openRecovery(job, resume));
+      jobMenus.get(job.id).restore = restore;
+      actions.append(restore);
+    }
     if (actions.childNodes.length) card.append(actions);
     list.append(card);
   }
@@ -691,6 +764,11 @@ function renderJobs(jobs) {
 }
 
 function bindEvents() {
+  elements["recovery-acknowledged"].addEventListener("change", renderRecovery);
+  elements["execute-recovery"].addEventListener("click", executeRecovery);
+  const closeRecovery = () => {elements["recovery-dialog"].close(); recoveryPreview = null; recoveryChoices.clear();};
+  elements["cancel-recovery"].addEventListener("click", closeRecovery);
+  elements["recovery-dialog"].addEventListener("cancel", event => {event.preventDefault(); if (!requesting) closeRecovery();});
   elements["check-updates"].addEventListener("click", () => runRequest(checkUpdates));
   bindManagementEvents();
   document.addEventListener("click", event => {

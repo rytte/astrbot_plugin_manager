@@ -185,6 +185,121 @@ def endpoint(action):
     return "/api/v1/plugins/extensions/astrbot_plugin_manager/transfer/" + action
 
 
+async def test_recovery_routes_require_owned_jobs_csrf_and_confirmation(web_client):
+    env, client = web_client
+    target = env.make_transfer_plugin()
+    transfers = env.plugin.transfers
+    code = transfers.code_root / target.root_dir_name / "main.py"
+    code.write_text("# imported\n", encoding="utf-8")
+    rule = await transfers.save_rule(
+        [{"directory": target.root_dir_name, "config": False, "data": False}]
+    )
+    exported = await transfers.start_export("admin", rule["updated_at"], True)
+    await transfers.task
+    package = transfers.download(exported["id"], "admin", "package").read_bytes()
+    code.write_text("# private pre-import file\n", encoding="utf-8")
+    state = (await client.get(endpoint("state"))).json()["data"]
+    uploaded = await client.post(
+        endpoint("upload/" + state["csrf"]),
+        files={"file": ("plugins.zip", package, "application/zip")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    source_id = uploaded.json()["data"]["job"]["id"]
+    selection = {
+        "directory": target.root_dir_name,
+        "code": True,
+        "config": False,
+        "data": False,
+    }
+    imported = await client.post(
+        endpoint("import"),
+        json={
+            "csrf": state["csrf"],
+            "id": source_id,
+            "selections": [selection],
+            "acknowledged": True,
+        },
+    )
+    assert imported.status_code == 200, imported.text
+    await transfers.task
+    for identifier in (source_id, "../outside"):
+        denied = await client.post(
+            endpoint("rollback-preview"), json={"csrf": "wrong", "id": identifier}
+        )
+        assert denied.status_code == 403
+    preview = await client.post(
+        endpoint("rollback-preview"), json={"csrf": state["csrf"], "id": source_id}
+    )
+    assert preview.status_code == 200, preview.text
+    assert "private pre-import file" not in preview.text
+    preview_id = preview.json()["data"]["job"]["id"]
+    assert (
+        await client.get(endpoint("rollback-plan"), params={"id": preview_id})
+    ).status_code == 200
+    other_token = jwt.encode(
+        {"username": "other", "exp": time.time() + 3600},
+        env.context.get_config()["dashboard"]["jwt_secret"],
+        algorithm="HS256",
+    )
+    other_headers = {"Authorization": "Bearer " + other_token}
+    other_state = (await client.get(endpoint("state"), headers=other_headers)).json()[
+        "data"
+    ]
+    assert (
+        await client.get(
+            endpoint("rollback-plan"), params={"id": preview_id}, headers=other_headers
+        )
+    ).status_code == 400
+    denied = await client.post(
+        endpoint("rollback-preview"),
+        headers=other_headers,
+        json={"csrf": other_state["csrf"], "id": source_id},
+    )
+    assert denied.status_code == 400
+    body = {
+        "csrf": state["csrf"],
+        "id": preview_id,
+        "selections": [selection],
+        "acknowledged": True,
+    }
+    assert (
+        await client.post(endpoint("rollback"), json={**body, "csrf": "wrong"})
+    ).status_code == 403
+    assert (
+        await client.post(endpoint("rollback"), json={**body, "acknowledged": False})
+    ).status_code == 400
+    assert (
+        await client.post(
+            endpoint("rollback"),
+            json={**body, "selections": [{**selection, "config": True}]},
+        )
+    ).status_code == 400
+    assert (
+        await client.post(
+            endpoint("rollback"), json={**body, "archive_path": "outside.zip"}
+        )
+    ).status_code == 400
+    started = await client.post(endpoint("rollback"), json=body)
+    assert started.status_code == 200, started.text
+    await transfers.task
+    assert transfers.jobs[preview_id]["status"] == "completed"
+    assert code.read_text() == "# private pre-import file\n"
+    assert (
+        await client.get(endpoint("rollback-plan"), params={"id": preview_id})
+    ).status_code == 400
+    downloaded = await client.get(
+        endpoint("download"), params={"id": preview_id, "kind": "rollback"}
+    )
+    assert downloaded.status_code == 200
+    assert (
+        await client.get(
+            endpoint("download"),
+            params={"id": preview_id, "kind": "rollback"},
+            headers=other_headers,
+        )
+    ).status_code == 400
+
+
 async def test_page_state_and_storage_statistics_are_separate(web_client):
     env, client = web_client
     target = env.make_transfer_plugin()

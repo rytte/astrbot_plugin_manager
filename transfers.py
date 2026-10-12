@@ -19,6 +19,7 @@ from astrbot import __version__ as ASTRBOT_VERSION
 
 from . import service as operation_module
 from .bytecode import clear_plugin_bytecode
+from .recovery import RecoveryService
 from .redaction import redact
 from .transfer_bundle import (
     FORMAT,
@@ -72,6 +73,7 @@ class TransferService:
         self.active_job = None
         self.in_critical = False
         self.closing = False
+        self.recovery = RecoveryService(self, PREVIEW_TTL)
 
     async def initialize(self) -> None:
         """Load retained jobs and mark unfinished work as interrupted."""
@@ -225,11 +227,17 @@ class TransferService:
             "expired",
             "backup_ready",
             "reload_required",
+            "source_id",
         }
         result = {
             key: copy.deepcopy(value) for key, value in job.items() if key in fields
         }
         result["expired"] = TransferService._expired(job)
+        if job["kind"] == "rollback" and job["status"] == "preview":
+            result.update(
+                preview_expires_at=job["created_at"] + PREVIEW_TTL,
+                preview_expired=time.time() > job["created_at"] + PREVIEW_TTL,
+            )
         if (
             job["kind"] == "manifest_install"
             and not job.get("selected")
@@ -617,7 +625,7 @@ class TransferService:
                 type(exc).__name__,
                 job["error"],
             )
-            if job["kind"] == "import":
+            if job["kind"] in {"import", "rollback"}:
                 processed = {result["directory"] for result in job["results"]}
                 for selection in job["restore"]:
                     if selection["directory"] not in processed:
@@ -1330,6 +1338,7 @@ class TransferService:
                         "code": safe_path(*paths["code"]),
                         "config_path": safe_path(*paths["config"]),
                         "data_path": safe_path(*paths["data"]),
+                        "kv_plugin_id": incoming[directory]["plugin_id"],
                     }
                     space += 3 * await self._source_size(
                         previous, selection, export=False

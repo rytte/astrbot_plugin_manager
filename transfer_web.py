@@ -37,6 +37,9 @@ class TransferWeb:
             "upload/<csrf_token>": "POST",
             "import": "POST",
             "delete-job": "POST",
+            "rollback-preview": "POST",
+            "rollback-plan": "GET",
+            "rollback": "POST",
         }
         for action, method in routes.items():
             handler = functools.partial(self.dispatch, action.split("/")[0])
@@ -139,6 +142,8 @@ class TransferWeb:
                 data = self.transfers.public_job(
                     self.transfers.get_job(request.query.get("id"), owner)
                 )
+            elif action == "rollback-plan":
+                data = self.transfers.recovery.plan(owner, request.query.get("id"))
             elif action == "download":
                 kind = request.query.get("kind")
                 path = self.transfers.download(request.query.get("id"), owner, kind)
@@ -169,6 +174,14 @@ class TransferWeb:
                     exact_keys(body, {"csrf", "id", "acknowledged"})
                     data = await self.transfers.delete_job(
                         body["id"], owner, body["acknowledged"]
+                    )
+                elif action == "rollback-preview":
+                    exact_keys(body, {"csrf", "id"})
+                    data = await self.transfers.recovery.preview(owner, body["id"])
+                elif action == "rollback":
+                    exact_keys(body, {"csrf", "id", "selections", "acknowledged"})
+                    data = await self.transfers.recovery.start(
+                        owner, body["id"], body["selections"], body["acknowledged"]
                     )
                 elif action == "export-preview":
                     if "selections" in body:

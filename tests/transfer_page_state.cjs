@@ -65,6 +65,8 @@ async function main() {
   let delayedPreview, failPreview = false;
   let manifestResponse = null, failDraft = false;
   let updateRequests = 0, failUpdate = false;
+  let failRecovery = false;
+  const recoveryResponse = {job: {id: "recovery-id", source_id: "zip-in", kind: "rollback", status: "preview", created_at: 100, phase: "还原预检完成", results: [], warnings: [], expired: false}, expires_at: 2000000000, plugins: [{directory: "demo_dir", name: "demo", display_name: "示例插件", components: {code: "replace", config: "remove", data: "replace"}, problem: ""}]};
   const bridge = {
     async ready() {}, onContext(handler) {handler({isDark: true});},
     async apiGet(endpoint, params) {
@@ -92,6 +94,7 @@ async function main() {
         return response;
       }
       if (endpoint === "transfer/jobs") return {busy: state.busy, jobs: structuredClone(state.jobs)};
+      if (endpoint === "transfer/rollback-plan") return structuredClone(recoveryResponse);
       throw new Error("Unexpected endpoint " + endpoint);
     },
     async apiPost(endpoint, body) {
@@ -118,6 +121,18 @@ async function main() {
         if (failDelete) throw new Error("任务文件删除失败，请重试。");
         state.jobs = state.jobs.filter(job => job.id !== body.id);
         return {id: body.id, deleted: true};
+      }
+      if (endpoint === "transfer/rollback-preview") {
+        assert.equal(body.csrf, "zip-token");
+        state.jobs.unshift(structuredClone(recoveryResponse.job));
+        return structuredClone(recoveryResponse);
+      }
+      if (endpoint === "transfer/rollback") {
+        assert.equal(body.csrf, "zip-token"); assert.equal(body.acknowledged, true);
+        if (failRecovery) throw new Error("目标数据在预检后变化，请重新预检。");
+        const job = state.jobs.find(job => job.id === body.id);
+        job.status = "running"; state.busy = true;
+        return structuredClone(job);
       }
       if (endpoint === "manage/source-preview") {
         if (failPreview) throw new Error("仓库身份不一致");
@@ -815,5 +830,35 @@ async function main() {
   assert.equal(vm.runInContext("manifestPreview.job.id", context), "rechecked-id");
   assert.equal(vm.runInContext("installChoices.size", context), 0);
   assert.equal(vm.runInContext("selectedManifestSource(manifestPreview.plugins[0]).kind", context), "repository");
+  // Recovery lives beside the retained import backup and requires scope confirmation.
+  vm.runInContext("clearManifestPreview(); busy = false; requesting = false", context);
+  state.busy = false;
+  state.jobs = [{...recoveryResponse.job, id: "zip-in", kind: "import", status: "completed", backup_ready: true}];
+  delete state.jobs[0].source_id;
+  await vm.runInContext("pollJobs()", context);
+  const restoreAction = () => descendants(elements["job-list"]).find(element => element.tagName === "button" && element.textContent === "还原到导入前");
+  assert.ok(restoreAction());
+  state.busy = true; await vm.runInContext("pollJobs()", context);
+  assert.equal(restoreAction().disabled, true);
+  state.busy = false; await vm.runInContext("pollJobs()", context);
+  await restoreAction().trigger("click");
+  assert.equal(elements["recovery-dialog"].open, true);
+  assert.match(elements["recovery-list"].textContent, /恢复旧内容/);
+  assert.match(elements["recovery-list"].textContent, /移除新增/);
+  assert.equal(elements["execute-recovery"].disabled, true);
+  const recoveryInputs = descendants(elements["recovery-list"]).filter(element => element.tagName === "input");
+  recoveryInputs[1].checked = false; await recoveryInputs[1].trigger("change");
+  elements["recovery-acknowledged"].checked = true; await elements["recovery-acknowledged"].trigger("change");
+  assert.equal(elements["execute-recovery"].disabled, false);
+  failRecovery = true; await elements["execute-recovery"].trigger("click");
+  assert.equal(elements["recovery-dialog"].open, true);
+  assert.equal(elements["recovery-message"].hidden, false);
+  assert.match(elements["recovery-message"].textContent, /重新预检/);
+  failRecovery = false; await elements["execute-recovery"].trigger("click");
+  assert.equal(elements["recovery-dialog"].open, false);
+  const restorePost = posts.filter(item => item.endpoint === "transfer/rollback").at(-1);
+  assert.deepEqual(JSON.parse(JSON.stringify(restorePost.body.selections)), [{directory: "demo_dir", code: true, config: false, data: true}]);
+  assert.match(elements["job-list"].textContent, /还原到导入前/);
+  assert.equal(restoreAction().disabled, true);
 }
 main().catch(error => {console.error(error); process.exitCode = 1;});
