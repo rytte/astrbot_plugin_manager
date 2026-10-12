@@ -109,9 +109,6 @@ tr.selected{background:var(--accent-bg)}
 .plugin-detail{color:var(--muted);font-size:12px;margin-top:5px}
 .plugin-error{color:var(--danger);font-size:12px;margin-top:6px;max-width:300px;overflow-wrap:anywhere}
 .check-label{display:flex;align-items:center;gap:6px;white-space:nowrap}
-.manager-rule-choice{display:flex;align-items:center;gap:8px;margin-top:18px;font-size:14px}
-.manager-data-tools h3{font-size:15px;margin:0}
-.manager-data-tools p{line-height:1.6}
 .range-label{color:var(--muted);font-size:12px;margin-top:5px;max-width:165px;overflow-wrap:anywhere}
 .numeric{text-align:right;white-space:nowrap}
 .plugin-notice{display:flex;align-items:baseline;flex-wrap:wrap;gap:3px 10px;color:var(--warning);font-size:13px;margin-top:6px}

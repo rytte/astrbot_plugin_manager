@@ -82,7 +82,7 @@ class Main(Star):
         self.sources = SourceService(self.service, self.transfers)
         self.service.sources = self.sources
         self.manifests = ManifestService(self.sources, self.transfers)
-        self.manager_data = ManagerDataService(self.sources, self.transfers)
+        self.transfers.manager_data = ManagerDataService(self.sources, self.transfers)
         self.updates = UpdateService(self.sources, self.transfers)
         self.chat_updates = UpdateService(self.sources, self.transfers)
         self.management_web = ManagementWeb(
@@ -91,7 +91,6 @@ class Main(Star):
             self.sources,
             self.manifests,
             self.updates,
-            self.manager_data,
         )
 
     async def initialize(self) -> None:

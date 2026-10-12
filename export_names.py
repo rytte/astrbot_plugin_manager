@@ -31,8 +31,6 @@ def export_filename(job: dict, kind: str) -> str:
     """Keep the download label separate from fixed, private storage paths."""
     if kind == "manifest":
         return (export_name(job.get("name", "")) or "plugins") + ".json"
-    if kind == "manager_data":
-        return (export_name(job.get("name", "")) or "astrbot-manager-data") + ".json"
     if kind == "package":
         return (
             export_name(job.get("name", "")) or f"astrbot-package-{job['id'][:8]}"

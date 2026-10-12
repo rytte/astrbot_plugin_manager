@@ -216,114 +216,16 @@ async def test_manifest_repository_icon_registration_failure_keeps_preview_ready
     register.assert_awaited_once()
 
 
-async def test_manager_data_web_export_preview_import_and_owner_isolation(web_client):
-    from astrbot_plugin_manager.source_bundle import portable_binding
-
+async def test_standalone_manager_data_routes_are_removed(web_client):
     env, client = web_client
-    target = env.make_transfer_plugin()
-    env.prefs["plugin_install_sources"] = {
-        target.root_dir_name: {
-            "install_method": "repository",
-            "repo": "https://github.com/test/current",
-        }
-    }
-    await env.plugin.transfers.save_rule(
-        [{"directory": target.root_dir_name, "data": False, "config": False}]
-    )
-    state = (await client.get(management_endpoint("state"))).json()["data"]
-    response = await client.post(
-        management_endpoint("data-export"),
-        json={"csrf": state["csrf"], "name": "管家数据备份"},
-    )
-    assert response.status_code == 200, response.text
-    job = response.json()["data"]
-    downloaded = await client.get(
-        management_endpoint("data-download"), params={"id": job["id"]}
-    )
-    assert downloaded.status_code == 200
-    value = downloaded.json()
-    assert value["name"] == "管家数据备份"
-    assert "job.json" not in downloaded.text and "verification" not in downloaded.text
-    other = jwt.encode(
-        {"username": "other", "exp": time.time() + 3600},
-        env.context.get_config()["dashboard"]["jwt_secret"],
-        algorithm="HS256",
-    )
-    headers = {"Authorization": "Bearer " + other}
-    assert (
-        await client.get(
-            management_endpoint("data-download"),
-            params={"id": job["id"]},
-            headers=headers,
-        )
-    ).status_code == 400
-    assert (
-        await client.get(
-            management_endpoint("data-download"),
-            params={"id": job["id"]},
-            headers={"Authorization": ""},
-        )
-    ).status_code == 401
-    assert (
-        await client.post(
-            management_endpoint("data-export"), json={"csrf": "wrong", "name": ""}
-        )
-    ).status_code == 403
-    value["sources"][0]["bindings"].append(
-        portable_binding(
-            {"kind": "repository", "repo_url": "https://github.com/test/extra"}
-        )
-    )
-
-    async def upload(token):
-        return await client.post(
-            management_endpoint("data-upload/" + token),
-            files={
-                "file": ("data.json", json.dumps(value).encode(), "application/json")
-            },
-        )
-
-    assert (await upload("wrong")).status_code == 403
-    preview = await upload(state["csrf"])
-    assert preview.status_code == 200, preview.text
-    identifier = preview.json()["data"]["id"]
-    assert preview.json()["data"]["plugins"][0]["count"] == 1
-    other_state = (
-        await client.get(management_endpoint("state"), headers=headers)
-    ).json()["data"]
-    body = {
-        "csrf": state["csrf"],
-        "id": identifier,
-        "sources": ["0"],
-        "rule": True,
-        "acknowledged": True,
-    }
-    assert (
-        await client.post(
-            management_endpoint("data-import"), json={**body, "acknowledged": False}
-        )
-    ).status_code == 400
-    assert (
-        await client.post(
-            management_endpoint("data-import"),
-            json={**body, "csrf": other_state["csrf"]},
-            headers=headers,
-        )
-    ).status_code == 400
-    restored = await client.post(management_endpoint("data-import"), json=body)
-    assert restored.status_code == 200, restored.text
-    await env.plugin.transfers.task
-    result = env.plugin.transfers.get_job(restored.json()["data"]["id"], "admin")
-    assert result["status"] == "completed", result
-    assert (
-        await client.post(management_endpoint("data-import"), json=body)
-    ).status_code == 400
-    record = await env.plugin.sources.detail(target.root_dir_name)
-    assert record["bindings"][-1]["verification"] == "imported"
-    assert (
-        env.prefs["plugin_install_sources"][target.root_dir_name]["repo"]
-        == "https://github.com/test/current"
-    )
+    assert not any("/data-" in entry[0] for entry in env.context.registered_web_apis)
+    for action in ("data-export", "data-import", "data-upload/token"):
+        assert (await client.post(management_endpoint(action))).json()[
+            "status"
+        ] == "error"
+    assert (await client.get(management_endpoint("data-download"))).json()[
+        "status"
+    ] == "error"
 
 
 @pytest.fixture

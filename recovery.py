@@ -25,6 +25,7 @@ from .transfer_bundle import (
     decode_value,
     digest,
     exact_keys,
+    is_manager_plugin,
     load_json,
     read_metadata,
     safe_path,
@@ -127,8 +128,10 @@ class RecoveryService:
             ):
                 raise ValueError("恢复资料的插件身份与导入任务不一致。")
             module = record["module_path"]
-            if not isinstance(module, str) or not module.startswith(
-                f"data.plugins.{directory}."
+            if not isinstance(module, str) or (
+                module != self.transfers.operations.owner_module
+                if is_manager_plugin(plugin)
+                else not module.startswith(f"data.plugins.{directory}.")
             ):
                 raise ValueError("恢复资料中的插件运行标识无效。")
             for part in module.split("."):
@@ -150,7 +153,17 @@ class RecoveryService:
             if not before.is_dir():
                 raise ValueError("恢复资料缺少插件备份目录。")
             allowed.add("before/" + directory)
+            manager_data = is_manager_plugin(plugin)
+            if manager_data:
+                if record["components"] != {"data": True} or "source_state" in record:
+                    raise ValueError("管家恢复资料仅允许来源关联和导出规则。")
+                self.transfers.manager_data.validate_backup(
+                    load_json(before / "manager-data.json")
+                )
+                allowed.add("before/" + directory + "/manager-data.json")
             for key, existed in record["components"].items():
+                if manager_data:
+                    continue
                 path = safe_path(before, key)
                 if existed:
                     if (key == "config" and not path.is_file()) or (
@@ -186,7 +199,7 @@ class RecoveryService:
                     )
                 ):
                     raise ValueError("恢复资料中的来源快照无效。")
-            if "data" in record["components"]:
+            if "data" in record["components"] and not manager_data:
                 values = load_json(safe_path(before, "kv.json"))
                 if not isinstance(values, dict):
                     raise ValueError("恢复资料中的键值数据格式无效。")
@@ -249,8 +262,12 @@ class RecoveryService:
         ).hexdigest()
         return plugins, signature
 
-    async def _state(self, plugin: dict) -> str:
+    async def _state(self, plugin: dict, *, include_sources: bool = True) -> str:
         source = await asyncio.to_thread(self.transfers._existing, plugin)
+        if is_manager_plugin(plugin):
+            self.transfers._protect_import(plugin)
+            await self.transfers.operations.sources.inventory()
+            return self.transfers.manager_data.state()
         paths = self.transfers._paths(plugin)
 
         def files():
@@ -289,9 +306,10 @@ class RecoveryService:
             in await self.transfers.preferences.global_get("inactivated_plugins", [])
         )
         value["kv"] = await self.transfers._read_kv(plugin["plugin_id"])
-        value["sources"] = await self.transfers.operations.sources.source_snapshot(
-            plugin["directory"], plugin["name"]
-        )
+        if include_sources:
+            value["sources"] = await self.transfers.operations.sources.source_snapshot(
+                plugin["directory"], plugin["name"]
+            )
         return hashlib.sha256(
             json.dumps(value, sort_keys=True, ensure_ascii=False).encode()
         ).hexdigest()
@@ -303,6 +321,10 @@ class RecoveryService:
         source = self.transfers._existing(plugin)
         if source and source["module_path"] != record["module_path"]:
             raise ValueError("目标插件运行标识已变化，拒绝还原。")
+        if is_manager_plugin(plugin):
+            if selection["code"] or selection["config"] or not selection["data"]:
+                raise ValueError("管家仅允许还原来源关联和导出规则。")
+            return
         before = safe_path(
             self.transfers.job_directory(source_job["id"]),
             "before/" + plugin["directory"],
@@ -343,7 +365,8 @@ class RecoveryService:
             transfers._ensure_idle()
             source = self._source(owner, identifier)
             entries, signature = await asyncio.to_thread(self._load, source)
-            plans, checks = [], {}
+            plans, checks, content_checks = [], {}, {}
+            has_manager = any(is_manager_plugin(entry["plugin"]) for entry in entries)
             for entry in entries:
                 plugin, record = entry["plugin"], entry["record"]
                 selection = {key: key in record["components"] for key in COMPONENTS}
@@ -353,6 +376,10 @@ class RecoveryService:
                         self._check, source, plugin, record, selection
                     )
                     checks[plugin["directory"]] = await self._state(plugin)
+                    if has_manager and not is_manager_plugin(plugin):
+                        content_checks[plugin["directory"]] = await self._state(
+                            plugin, include_sources=False
+                        )
                 except ValueError as exc:
                     problem = redact(str(exc))
                 plans.append(
@@ -366,6 +393,7 @@ class RecoveryService:
                             for key, existed in record["components"].items()
                         },
                         "problem": problem,
+                        "manager_data": is_manager_plugin(plugin),
                     }
                 )
             job = transfers._new_job(owner, "rollback")
@@ -375,6 +403,7 @@ class RecoveryService:
                 recovery_entries=entries,
                 recovery_signature=signature,
                 checks=checks,
+                content_checks=content_checks,
                 plan=plans,
             )
             transfers._phase(job, "还原预检完成，等待选择与确认")
@@ -442,7 +471,12 @@ class RecoveryService:
                     raise ValueError(
                         "目标文件、数据、来源或启停状态在预检后变化，请重新预检。"
                     )
-            job["restore"] = copy.deepcopy(selections)
+            job["restore"] = sorted(
+                copy.deepcopy(selections),
+                key=lambda item: (
+                    not is_manager_plugin(entries[item["directory"]]["plugin"])
+                ),
+            )
             return transfers._start(job, self._restore)
 
     async def _restore(self, job: dict) -> None:
@@ -469,8 +503,25 @@ class RecoveryService:
                     )
                     if job["checks"][plugin["directory"]] != await self._state(plugin):
                         raise ValueError("目标状态在排队期间变化，请重新预检。")
+                    if is_manager_plugin(plugin):
+                        space += 3 * len(
+                            json.dumps(
+                                transfers.manager_data.capture(), ensure_ascii=False
+                            ).encode("utf-8")
+                        )
+                        space += (
+                            safe_path(
+                                transfers.job_directory(source_job["id"]),
+                                "before/" + plugin["directory"] + "/manager-data.json",
+                            )
+                            .stat()
+                            .st_size
+                        )
+                        continue
                     paths = transfers._paths(plugin)
                     current = {
+                        "directory": plugin["directory"],
+                        "metadata": plugin,
                         "code": safe_path(*paths["code"]),
                         "config_path": safe_path(*paths["config"]),
                         "data_path": safe_path(*paths["data"]),
@@ -491,6 +542,7 @@ class RecoveryService:
                     if selection["data"]:
                         space += (before / "kv.json").stat().st_size
                 await transfers._require_space(space)
+                manager_restored = False
                 for selection in job["restore"]:
                     entry = entries[selection["directory"]]
                     plugin, original = entry["plugin"], entry["record"]
@@ -499,8 +551,13 @@ class RecoveryService:
                     previous_results = len(job["results"])
                     transfers._phase(job, "备份当前内容并还原：" + plugin["directory"])
                     try:
-                        if job["checks"][plugin["directory"]] != await self._state(
-                            plugin
+                        # Manager rollback changes shared source records intentionally.
+                        # Keep checking files, KV and runtime for the following items.
+                        expected = (
+                            job["content_checks"] if manager_restored else job["checks"]
+                        )
+                        if expected[plugin["directory"]] != await self._state(
+                            plugin, include_sources=not manager_restored
                         ):
                             raise ValueError("目标内容在执行前变化，请重新预检。")
                         if source:
@@ -514,7 +571,8 @@ class RecoveryService:
                             ] in await transfers.preferences.global_get(
                                 "inactivated_plugins", []
                             )
-                            paused = await transfers._pause(source)
+                            if not is_manager_plugin(plugin):
+                                paused = await transfers._pause(source)
                         backup = await transfers._backup(job, plugin, selection, source)
                         selected_record = {
                             **original,
@@ -530,6 +588,17 @@ class RecoveryService:
                         await transfers._restore_backup(
                             source_job, plugin, selected_record
                         )
+                        if is_manager_plugin(plugin):
+                            manager_restored = True
+                            job["results"].append(
+                                {
+                                    "directory": plugin["directory"],
+                                    "status": "restored",
+                                    "message": "已还原来源关联和导出规则；管家保持运行。",
+                                }
+                            )
+                            transfers._save(job)
+                            continue
                         if safe_path(transfers.code_root, plugin["directory"]).is_dir():
                             await asyncio.to_thread(
                                 clear_plugin_bytecode,
@@ -582,9 +651,10 @@ class RecoveryService:
                         raise
             finally:
                 transfers.in_critical = False
-        try:
-            await transfers.operations.web.sync_skills_after_plugin_change()
-        except Exception:
-            job["warnings"].append(
-                "插件已还原，但技能同步失败，请重启 AstrBot 后检查。"
-            )
+        if job.get("reload_required"):
+            try:
+                await transfers.operations.web.sync_skills_after_plugin_change()
+            except Exception:
+                job["warnings"].append(
+                    "插件已还原，但技能同步失败，请重启 AstrBot 后检查。"
+                )
