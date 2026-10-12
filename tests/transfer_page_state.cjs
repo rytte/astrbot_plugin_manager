@@ -65,7 +65,7 @@ async function main() {
   let delayedPreview, failPreview = false;
   let manifestResponse = null, failDraft = false;
   let updateRequests = 0, failUpdate = false;
-  let failLoad = false;
+  let failLoad = false, pendingLoad = null;
   let failRecovery = false;
   const recoveryResponse = {job: {id: "recovery-id", source_id: "zip-in", kind: "rollback", status: "preview", created_at: 100, phase: "还原预检完成", results: [], warnings: [], expired: false}, expires_at: 2000000000, plugins: [{directory: "demo_dir", name: "demo", display_name: "示例插件", components: {code: "replace", config: "remove", data: "replace"}, problem: ""}]};
   const bridge = {
@@ -122,9 +122,8 @@ async function main() {
         assert.equal(body.directory, "pending_dir");
         assert.equal(body.revision, "pending-r1");
         assert.equal(body.acknowledged, true);
-        const job = {id: "load-job", kind: "plugin_load", status: "running", created_at: 100, phase: "正在加载", results: [], warnings: [], expired: false};
-        state.jobs.unshift(job); state.busy = true;
-        return structuredClone(job);
+        state.busy = true;
+        return new Promise(resolve => {pendingLoad = {resolve};});
       }
       if (endpoint === "transfer/delete-job") {
         assert.equal(body.csrf, "zip-token"); assert.equal(body.acknowledged, true);
@@ -963,28 +962,56 @@ async function main() {
   assert.match(elements["confirmation-title"].textContent, /加载插件/);
   assert.match(elements["confirmation-notices"].textContent, /启用.*执行插件代码/);
   assert.equal(pendingChip().disabled, true);
-  await elements["confirmation-form"].trigger("submit");
-  assert.ok(!posts.some(item => item.endpoint === "manage/load-plugin"));
+  assert.equal(elements["confirmation-acknowledgement"].hidden, true);
+  assert.equal(elements.acknowledged.checked, false);
+  assert.equal(elements.acknowledged.required, false);
+  assert.equal(elements.acknowledged.disabled, true);
   await elements["confirmation-cancel"].trigger("click"); await cancelledLoad;
   assert.ok(!posts.some(item => item.endpoint === "manage/load-plugin"));
   failLoad = true;
   const rejectedLoad = pendingChip().trigger("click"); await settle();
-  elements.acknowledged.checked = true;
   await elements["confirmation-form"].trigger("submit"); await rejectedLoad;
   assert.match(elements.message.textContent, /状态已变化/);
   assert.equal(pendingChip().disabled, false);
+  assert.equal(state.jobs.length, 0);
   failLoad = false;
   const loading = pendingChip().trigger("click"); await settle();
-  elements.acknowledged.checked = true;
-  await elements["confirmation-form"].trigger("submit"); await loading;
-  assert.equal(pendingChip().disabled, true);
-  assert.match(elements["job-list"].textContent, /加载插件/);
-  state.busy = false; state.jobs[0].status = "completed";
-  state.jobs[0].results.push({directory: "pending_dir", status: "enabled", message: "已加载并启用"});
+  await elements["confirmation-form"].trigger("submit"); await settle();
+  assert.equal(elements.confirmation.open, false);
+  const loadingChip = descendants(elements["plugin-list"]).find(element => element.tagName === "button" && element.textContent === "加载中…");
+  assert.ok(loadingChip);
+  assert.equal(loadingChip.disabled, true);
+  assert.equal(state.jobs.length, 0);
+  assert.doesNotMatch(elements["job-list"].textContent, /加载插件/);
+  assert.doesNotMatch(elements.message.textContent + elements["source-message"].textContent, /插件加载任务已启动/);
+  state.busy = false;
   pendingRecord.local.status = "enabled"; pendingPlugin.status = "enabled";
-  await vm.runInContext("pollJobs()", context); await settle();
+  pendingLoad.resolve({directory: "pending_dir", status: "enabled", message: "已加载并启用", warnings: []});
+  await loading; await settle();
   assert.ok(!pendingChip());
   assert.match(elements["plugin-list"].textContent, /已打开/);
   assert.match(elements.message.textContent, /已加载并启用/);
+  assert.equal(state.jobs.length, 0);
+  assert.doesNotMatch(elements["job-list"].textContent, /加载插件/);
+
+  // Other confirmations still require the acknowledgement checkbox.
+  const otherConfirmation = vm.runInContext("confirmOperation('确认其他操作', [], '操作说明')", context);
+  assert.equal(elements["confirmation-acknowledgement"].hidden, false);
+  assert.equal(elements.acknowledged.required, true);
+  assert.equal(elements.acknowledged.disabled, false);
+  assert.equal(elements.acknowledged.checked, false);
+  await elements["confirmation-form"].trigger("submit");
+  assert.equal(elements.confirmation.open, true);
+  await elements["confirmation-cancel"].trigger("click");
+  assert.equal(await otherConfirmation, false);
+
+  // A load in another page can make the manager busy without producing a job notice.
+  vm.runInContext("dismissMessage(elements.message)", context);
+  state.busy = true;
+  await vm.runInContext("pollJobs()", context);
+  state.busy = false;
+  await vm.runInContext("pollJobs()", context);
+  assert.equal(elements.message.hidden, true);
+  assert.equal(state.jobs.length, 0);
 }
 main().catch(error => {console.error(error); process.exitCode = 1;});

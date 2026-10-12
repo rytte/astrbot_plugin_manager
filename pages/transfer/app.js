@@ -18,6 +18,8 @@ const jobMenus = new Map();
 let openJobMenuId = null;
 const notifications = new Map();
 let confirmationResolve = null;
+let confirmationAcknowledgement = true;
+let loadingDirectory = null;
 let deletionResolve = null;
 let recoveryPreview = null;
 const recoveryChoices = new Map();
@@ -236,12 +238,25 @@ async function loadPlugin(plugin) {
   const record = sourceRecord(plugin.directory);
   if (!record || managementStatus !== "ready" || record.local.status !== "pending") throw new Error("插件信息或状态已变化，请刷新列表后重试。");
   const revision = record.revision;
-  if (!await confirmOperation("确认加载插件", [{...plugin, description: "加载并启用"}], "将通过 AstrBot 加载并启用该插件，会执行插件代码；必要时由 AstrBot 处理依赖。请确认信任此插件。")) return;
-  const job = await managementPost("load-plugin", {directory: plugin.directory, revision, acknowledged: true});
-  busy = previousBusy = true;
-  renderJobs([job, ...displayedJobs.filter(previous => previous.id !== job.id)]);
-  message("插件加载任务已启动，可在任务记录中查看结果。", false, {task: true});
-  await pollJobs();
+  if (!await confirmOperation("确认加载插件", [{...plugin, description: "加载并启用"}], "将通过 AstrBot 加载并启用该插件，会执行插件代码；必要时由 AstrBot 处理依赖。请确认信任此插件。", false)) return;
+  loadingDirectory = plugin.directory;
+  renderPlugins();
+  let result, failure;
+  try {
+    result = await managementPost("load-plugin", {directory: plugin.directory, revision, acknowledged: true});
+  } catch (error) {
+    failure = error;
+  } finally {
+    loadingDirectory = null;
+  }
+  try {
+    await loadState(true);
+    await loadManagement();
+  } catch (error) {
+    if (!failure) failure = new Error(result ? "插件已加载并启用，但列表刷新失败：" + error.message : error.message);
+  }
+  if (failure) throw failure;
+  message(result.warnings.length ? result.warnings.join(" ") : "插件已加载并启用。", Boolean(result.warnings.length));
 }
 function metadataNotice(plugin, record) {
   const changed = record && managementStatus === "ready" ? record.metadata_changed : plugin.metadata_changed;
@@ -302,7 +317,7 @@ function titleCell(plugin, showIcon = false, iconKey = plugin.directory) {
     }
     const icon = node("span", "plugin-status-icon");
     icon.setAttribute("aria-hidden", "true");
-    status.append(icon, document.createTextNode(statuses[plugin.status]));
+    status.append(icon, document.createTextNode(loadingDirectory === plugin.directory ? "加载中…" : statuses[plugin.status]));
     heading.append(status);
   }
   const metadata = node("div", "plugin-meta");
@@ -445,7 +460,7 @@ function showTab(identifier) {
   }
 }
 
-function confirmOperation(title, plugins, notices) {
+function confirmOperation(title, plugins, notices, requireAcknowledgement = true) {
   elements["confirmation-title"].textContent = title;
   elements["confirmation-list"].replaceChildren();
   for (const plugin of plugins) {
@@ -455,6 +470,10 @@ function confirmOperation(title, plugins, notices) {
   }
   elements["confirmation-notices"].textContent = notices;
   elements.acknowledged.checked = false;
+  confirmationAcknowledgement = requireAcknowledgement;
+  elements["confirmation-acknowledgement"].hidden = !requireAcknowledgement;
+  elements.acknowledged.required = requireAcknowledgement;
+  elements.acknowledged.disabled = !requireAcknowledgement;
   elements.confirmation.showModal();
   return new Promise(resolve => { confirmationResolve = resolve; });
 }
@@ -931,7 +950,7 @@ function bindEvents() {
     message("恢复任务已启动。请勿在任务运行期间手工修改插件文件。", false, {task: true});
     await pollJobs();
   }));
-  elements["confirmation-form"].addEventListener("submit", event => {event.preventDefault(); if (elements.acknowledged.checked) finishConfirmation(true);});
+  elements["confirmation-form"].addEventListener("submit", event => {event.preventDefault(); if (!confirmationAcknowledgement || elements.acknowledged.checked) finishConfirmation(true);});
   elements["confirmation-cancel"].addEventListener("click", () => finishConfirmation(false));
   elements.confirmation.addEventListener("cancel", event => {event.preventDefault(); finishConfirmation(false);});
   elements["delete-job-form"].addEventListener("submit", event => {event.preventDefault(); finishJobDeletion(true);});
@@ -952,10 +971,11 @@ async function pollJobs() {
   renderSummary();
   if (previousBusy && !busy) {
     await loadState(true);
-    const failed = finishedJobs.find(job => ["failed", "rollback_failed", "interrupted"].includes(job.status));
-    const checked = finishedJobs.find(job => job.preview_task && job.status === "preview");
-    const loaded = finishedJobs.find(job => job.kind === "plugin_load" && job.status === "completed");
-    message(failed ? "任务执行未完成：" + (failed.error || "请查看任务记录中的原因和处理结果。") : checked ? "清单预检完成，可继续选择插件及安装来源。" : loaded ? "插件已加载并启用。" : "任务已结束，请查看任务记录、下载文件或按提示处理警告。", Boolean(failed), {task: true});
+    if (finishedJobs.length) {
+      const failed = finishedJobs.find(job => ["failed", "rollback_failed", "interrupted"].includes(job.status));
+      const checked = finishedJobs.find(job => job.preview_task && job.status === "preview");
+      message(failed ? "任务执行未完成：" + (failed.error || "请查看任务记录中的原因和处理结果。") : checked ? "清单预检完成，可继续选择插件及安装来源。" : "任务已结束，请查看任务记录、下载文件或按提示处理警告。", Boolean(failed), {task: true});
+    }
   }
   if (busy !== previousBusy) renderPlugins();
   if (selectedRecord) await loadManagement();

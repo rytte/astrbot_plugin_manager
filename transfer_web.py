@@ -126,18 +126,14 @@ class TransferWeb:
                     "rule": self.transfers.rule(),
                     "jobs": self.transfers.history(owner),
                     "limits": self.transfers.limits(),
-                    "busy": bool(
-                        self.transfers.task and not self.transfers.task.done()
-                    ),
+                    "busy": self.transfers.busy,
                 }
             elif action == "statistics":
                 data = {"plugins": await self.transfers.inventory(statistics=True)}
             elif action == "jobs":
                 data = {
                     "jobs": self.transfers.history(owner),
-                    "busy": bool(
-                        self.transfers.task and not self.transfers.task.done()
-                    ),
+                    "busy": self.transfers.busy,
                 }
             elif action == "job":
                 data = self.transfers.public_job(

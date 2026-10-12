@@ -1,5 +1,6 @@
 """Exercise real FastAPI extension dispatch and dashboard authentication."""
 
+import asyncio
 import json
 import time
 import zipfile
@@ -850,26 +851,75 @@ async def test_pending_load_route_requires_auth_nonce_and_confirmation(web_clien
     assert not env.plugin.transfers.jobs
     env.manager.load.assert_not_awaited()
 
+    entered, proceed = asyncio.Event(), asyncio.Event()
+
     async def load(*, specified_dir_name):
         assert specified_dir_name == target.root_dir_name
+        entered.set()
+        await proceed.wait()
         target.activated = True
         target.star_cls = object()
         env.owners[target.module_path] = target
         return True, None
 
     env.manager.load.side_effect = load
-    result = await client.post(route, json=body)
+    loading = asyncio.create_task(client.post(route, json=body))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        for state_route in (
+            management_endpoint("state"),
+            endpoint("state"),
+            endpoint("jobs"),
+        ):
+            current = (await client.get(state_route)).json()["data"]
+            assert current["busy"] is True
+            assert current["jobs"] == []
+        assert not list(env.plugin.transfers.jobs_root.glob("*"))
+    finally:
+        proceed.set()
+    result = await loading
     assert result.status_code == 200, result.text
-    started = result.json()["data"]
-    assert started["kind"] == "plugin_load"
-    assert "load_plan" not in started
-    await env.plugin.transfers.task
+    loaded = result.json()["data"]
+    assert loaded == {
+        "directory": target.root_dir_name,
+        "status": "enabled",
+        "message": "已加载并启用",
+        "warnings": [],
+    }
     final = (await client.get(management_endpoint("state"))).json()["data"]
-    assert final["jobs"][0]["status"] == "completed"
-    assert final["jobs"][0]["results"][0]["message"] == "已加载并启用"
+    assert final["jobs"] == []
+    assert not final["busy"]
+    assert not list(env.plugin.transfers.jobs_root.glob("*"))
     assert next(
         item for item in final["plugins"] if item["local"]["directory"] == target.root_dir_name
     )["local"]["status"] == "enabled"
+
+
+async def test_pending_load_failure_returns_error_without_task_record(web_client):
+    env, client = web_client
+    target = env.make_transfer_plugin(active=False)
+    env.owners.pop(target.module_path)
+    state = (await client.get(management_endpoint("state"))).json()["data"]
+    record = await env.plugin.sources.detail(target.root_dir_name)
+    env.prefs["inactivated_plugins"] = [target.module_path]
+    env.manager.load.side_effect = None
+    env.manager.load.return_value = (False, "依赖不可用")
+    response = await client.post(
+        management_endpoint("load-plugin"),
+        json={
+            "csrf": state["csrf"],
+            "directory": target.root_dir_name,
+            "revision": record["revision"],
+            "acknowledged": True,
+        },
+    )
+    assert response.status_code == 400
+    assert "依赖不可用" in response.json()["message"]
+    assert env.prefs["inactivated_plugins"] == [target.module_path]
+    assert not env.plugin.transfers.busy
+    assert not env.plugin.transfers.jobs
+    assert not list(env.plugin.transfers.jobs_root.glob("*"))
+    assert (await client.get(endpoint("jobs"))).json()["data"]["jobs"] == []
 
 
 async def test_manual_update_routes_auth_csrf_owner_and_job(web_client, monkeypatch):

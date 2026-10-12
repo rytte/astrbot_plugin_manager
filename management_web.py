@@ -70,9 +70,7 @@ class ManagementWeb(TransferWeb):
                     "csrf": self._nonce(owner),
                     "plugins": redact(await self.sources.inventory()),
                     "jobs": self.transfers.history(owner),
-                    "busy": bool(
-                        self.transfers.task and not self.transfers.task.done()
-                    ),
+                    "busy": self.transfers.busy,
                     "updates": self.updates.state(owner),
                 }
             elif action == "updates":
@@ -135,8 +133,8 @@ class ManagementWeb(TransferWeb):
                     data = await self.updates.start_check(owner)
                 elif action == "load-plugin":
                     exact_keys(body, {"csrf", "directory", "revision", "acknowledged"})
-                    data = await self.loading.start(
-                        owner, body["directory"], body["revision"], body["acknowledged"]
+                    data = await self.loading.load(
+                        body["directory"], body["revision"], body["acknowledged"]
                     )
                 elif action == "update-plugin":
                     exact_keys(
@@ -252,6 +250,7 @@ class ManagementWeb(TransferWeb):
 
     async def close(self) -> None:
         self.closed = True
+        await self.loading.close()
         await self.updates.close()
         self.context.registered_web_apis[:] = [
             entry

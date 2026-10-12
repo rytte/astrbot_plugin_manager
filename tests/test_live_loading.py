@@ -273,12 +273,13 @@ class Main(Star):
         [module_path] if was_inactive else []
     )
     record = await env.plugin.sources.detail("reload_probe")
-    started = await env.plugin.loading.start(
-        "admin", "reload_probe", record["revision"], True
+    result = await env.plugin.loading.load(
+        "reload_probe", record["revision"], True
     )
-    await env.plugin.transfers.task
-    job = env.plugin.transfers.get_job(started["id"], "admin")
-    assert job["status"] == "completed", job
+    assert result["status"] == "enabled", result
+    assert not result["warnings"]
+    assert not env.plugin.transfers.jobs
+    assert not list(env.plugin.transfers.jobs_root.glob("*"))
     current = env.context.get_registered_star("reload_probe")
     assert current.activated and current.star_cls.initialized
     assert env.prefs["inactivated_plugins"] == ["data.plugins.other.main"]
@@ -311,13 +312,10 @@ class Main(Star):
     env.prefs["inactivated_plugins"] = [module_path]
     env.live_modules.append({"pname": "reload_probe", "module": "main"})
     record = await env.plugin.sources.detail("reload_probe")
-    started = await env.plugin.loading.start(
-        "admin", "reload_probe", record["revision"], True
-    )
-    await env.plugin.transfers.task
-    job = env.plugin.transfers.get_job(started["id"], "admin")
-    assert job["status"] == "failed"
-    assert "probe initialization failed" in job["error"]
+    with pytest.raises(ValueError, match="probe initialization failed"):
+        await env.plugin.loading.load("reload_probe", record["revision"], True)
+    assert not env.plugin.transfers.jobs
+    assert not list(env.plugin.transfers.jobs_root.glob("*"))
     assert module_path in env.prefs["inactivated_plugins"]
     assert not env.context.get_registered_star("reload_probe")
     assert (await env.plugin.sources.detail("reload_probe"))["local"]["status"] == "failed"

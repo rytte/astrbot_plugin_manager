@@ -18,6 +18,9 @@ class PluginLoadService:
         self.sources = sources
         self.transfers = transfers
         self.operations = transfers.operations
+        self.task = None
+        self.closing = False
+        self.in_critical = False
 
     def _source(self, directory: str) -> dict:
         reserved_root = Path(self.operations.manager.reserved_plugin_path).absolute()
@@ -54,34 +57,50 @@ class PluginLoadService:
             raise ValueError("插件名或目录与已有插件冲突，无法加载。")
         return source
 
-    async def start(
-        self, owner: str, directory: str, revision: str, acknowledged: bool
-    ) -> dict:
+    async def load(self, directory: str, revision: str, acknowledged: bool) -> dict:
         self.operations.ensure_writable()
         if acknowledged is not True:
             raise ValueError("请确认加载并启用插件。")
         if not isinstance(revision, str) or not revision:
             raise ValueError("缺少有效的插件状态，请刷新列表。")
+        if self.closing:
+            raise ValueError("插件管家正在关闭。")
         self.transfers._ensure_idle()
         async with self.transfers.operation_lock:
             self.transfers._ensure_idle()
             await self._pending(directory, revision)
-            job = self.transfers._new_job(owner, "plugin_load")
-            job["load_plan"] = {"directory": directory, "revision": revision}
-            return self.transfers._start(job, self._load)
+            if self.closing:
+                raise ValueError("插件管家正在关闭。")
+            self.transfers._ensure_idle()
+            self.transfers.loading_plugin = True
+            task = self.task = asyncio.create_task(self._run(directory, revision))
+            task.add_done_callback(self._finished)
+        # Finish plugin initialization even if the HTTP caller disconnects.
+        return await asyncio.shield(task)
 
-    async def _load(self, job: dict) -> None:
-        directory = job["load_plan"]["directory"]
+    def _finished(self, task: asyncio.Task) -> None:
+        self.transfers.loading_plugin = False
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.warning("Pending plugin load failed: %s", redact(str(error)))
+
+    async def _run(self, directory: str, revision: str) -> dict:
+        async with self.transfers.operation_lock:
+            if self.closing or self.transfers.closing:
+                raise ValueError("插件管家正在关闭。")
+            self.operations.ensure_writable()
+            return await self._load(directory, revision)
+
+    async def _load(self, directory: str, revision: str) -> dict:
         manager = self.operations.manager
+        warnings = []
         async with manager._pm_lock:
-            source = await self._pending(directory, job["load_plan"]["revision"])
+            source = await self._pending(directory, revision)
             module_path = source["module_path"]
             preferences = self.transfers.preferences
             inactive = await preferences.global_get("inactivated_plugins", [])
             was_inactive = module_path in inactive
-            self.transfers.in_critical = True
+            self.in_critical = True
             try:
-                self.transfers._phase(job, "正在加载并启用：" + directory)
                 await asyncio.to_thread(
                     clear_plugin_bytecode, str(source["code"].parent), directory
                 )
@@ -115,7 +134,7 @@ class PluginLoadService:
                             await manager._unbind_plugin(item.name, item.module_path)
                         except Exception:
                             logger.exception("Failed to clean up loaded plugin %s", directory)
-                            job["warnings"].append("未能清理加载后的运行记录，请在官方 WebUI 检查。")
+                            warnings.append("未能清理加载后的运行记录，请在官方 WebUI 检查。")
                 if was_inactive:
                     current_inactive = await preferences.global_get(
                         "inactivated_plugins", []
@@ -125,15 +144,11 @@ class PluginLoadService:
                             "inactivated_plugins", [*current_inactive, module_path]
                         )
                 message = "加载未完成：" + redact(str(exc)) + "；请在官方 WebUI 核对插件状态。"
-                job["results"].append(
-                    {"directory": directory, "status": "failed", "message": message}
-                )
+                if warnings:
+                    message += " " + " ".join(warnings)
                 raise ValueError(message) from exc
             finally:
-                self.transfers.in_critical = False
-        job["results"].append(
-            {"directory": directory, "status": "enabled", "message": "已加载并启用"}
-        )
+                self.in_critical = False
         for action, warning in (
             (self.operations.web.sync_skills_after_plugin_change, "技能同步失败"),
             (self.sources.inventory, "来源记录刷新失败"),
@@ -142,4 +157,18 @@ class PluginLoadService:
                 await action()
             except Exception:
                 logger.exception("Post-load refresh failed for %s: %s", directory, warning)
-                job["warnings"].append("插件已加载并启用，但" + warning + "，请刷新页面或检查日志。")
+                warnings.append("插件已加载并启用，但" + warning + "，请刷新页面或检查日志。")
+        return {
+            "directory": directory,
+            "status": "enabled",
+            "message": "已加载并启用",
+            "warnings": warnings,
+        }
+
+    async def close(self) -> None:
+        """Cancel waiting loads, but allow plugin initialization to finish."""
+        self.closing = True
+        if self.task and not self.task.done():
+            if not self.in_critical:
+                self.task.cancel()
+            await asyncio.gather(self.task, return_exceptions=True)

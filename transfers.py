@@ -77,6 +77,7 @@ class TransferService:
         self.task = None
         self.active_job = None
         self.in_critical = False
+        self.loading_plugin = False
         self.closing = False
         self.recovery = RecoveryService(self, PREVIEW_TTL)
 
@@ -575,8 +576,12 @@ class TransferService:
             sources.append(source)
         return sources
 
+    @property
+    def busy(self) -> bool:
+        return self.loading_plugin or bool(self.task and not self.task.done())
+
     def _ensure_idle(self) -> None:
-        if self.closing or self.deleting_jobs or (self.task and not self.task.done()):
+        if self.closing or self.deleting_jobs or self.busy:
             raise ValueError("已有插件管理任务运行或管家正在关闭，请稍后重试。")
 
     def _start(self, job: dict, operation, *, preview: bool = False) -> dict:
