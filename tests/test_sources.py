@@ -208,7 +208,7 @@ async def test_cached_market_identity_can_be_verified_and_activated_without_netw
     preview = await env.plugin.sources.preview_binding(
         "admin", target.root_dir_name, "market", f"{target.author}/{target.name}"
     )
-    assert "AstrBot 本地市场缓存" in preview["notice"]
+    assert preview["notice"] is None
     assert preview["binding"]["verification"] == "identity_matched"
     saved = await env.plugin.sources.bind("admin", preview["id"], True, True)
     assert saved["active_binding_id"] == preview["binding"]["id"]
@@ -265,7 +265,7 @@ async def test_market_cache_miss_or_mismatch_refreshes_once_and_uses_latest_data
     cached_preview = await env.plugin.sources.preview_binding(
         "admin", target.root_dir_name, "market", identifier
     )
-    assert "AstrBot 本地市场缓存" in cached_preview["notice"]
+    assert cached_preview["notice"] is None
     fetch.assert_awaited_once_with(custom_registry=None, force_refresh=True)
     env.preferences.global_put.assert_not_awaited()
 

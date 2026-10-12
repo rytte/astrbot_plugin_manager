@@ -26,6 +26,7 @@ async def test_manifest_repository_upload_poll_and_selective_install(
     env, client = web_client
     name = "astrbot_plugin_repository_share"
     url = "https://github.com/alice/repository_share"
+    icon = b"\x89PNG\r\n\x1a\nrepository icon fixture"
     core_installs[url] = {"name": name, "author": "Alice", "version": "1.0"}
 
     async def download(source, path):
@@ -43,6 +44,7 @@ async def test_manifest_repository_upload_poll_and_selective_install(
                 ),
             )
             archive.writestr("main.py", "raise RuntimeError('must not execute')")
+            archive.writestr("logo.png", icon)
 
     monkeypatch.setattr(
         "astrbot_plugin_manager.manifests.download_repository_archive", download
@@ -68,6 +70,16 @@ async def test_manifest_repository_upload_poll_and_selective_install(
     )
     assert preview.status_code == 200, preview.text
     assert preview.json()["data"]["plugins"][0]["sources"][0]["status"] == "install"
+    source = preview.json()["data"]["plugins"][0]["sources"][0]
+    assert "logo_path" not in source
+    assert "remote" not in source
+    assert str(env.plugin.transfers.job_directory(identifier)) not in preview.text
+    assert source["logo"].startswith("/api/file/")
+    downloaded_icon = await client.get(source["logo"], headers={"Authorization": ""})
+    assert downloaded_icon.status_code == 200
+    assert downloaded_icon.content == icon
+    assert downloaded_icon.headers["content-type"].startswith("image/png")
+    assert (await client.get(source["logo"])).status_code == 404
     other = jwt.encode(
         {"username": "other", "exp": time.time() + 3600},
         env.context.get_config()["dashboard"]["jwt_secret"],
@@ -89,6 +101,9 @@ async def test_manifest_repository_upload_poll_and_selective_install(
         management_endpoint("manifest-preview"), params={"id": identifier}
     )
     assert restored.json()["data"]["draft"] == draft
+    refreshed_icon = restored.json()["data"]["plugins"][0]["sources"][0]["logo"]
+    assert refreshed_icon != source["logo"]
+    assert (await client.get(refreshed_icon)).content == icon
     assert not (Path(env.manager.plugin_store_path) / name).exists()
     other_state = (
         await client.get(
@@ -151,6 +166,54 @@ async def test_manifest_repository_upload_poll_and_selective_install(
     )
     assert unsupported.status_code == 400
     assert "v1" in unsupported.json()["message"]
+
+
+async def test_manifest_repository_icon_registration_failure_keeps_preview_ready(
+    web_client, monkeypatch
+):
+    env, client = web_client
+
+    async def download(source, path):
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr(
+                "metadata.yaml",
+                yaml.safe_dump(
+                    {
+                        "name": "icon_demo",
+                        "author": "Alice",
+                        "version": "1.0",
+                        "desc": "Icon test plugin",
+                    }
+                ),
+            )
+            archive.writestr("main.py", "")
+            archive.writestr("logo.png", b"icon fixture")
+
+    monkeypatch.setattr(
+        "astrbot_plugin_manager.manifests.download_repository_archive", download
+    )
+    register = AsyncMock(return_value=None)
+    monkeypatch.setattr(env.plugin.service.web, "get_plugin_logo_token", register)
+    preview = await env.plugin.manifests.preview(
+        "admin",
+        {
+            "format": "astrbot-plugin-manager-manifest",
+            "schema_version": 1,
+            "name": "图标缺失清单",
+            "plugins": [
+                {"display_name": "示例", "repo_url": "https://github.com/alice/demo"}
+            ],
+        },
+    )
+    response = await client.get(
+        management_endpoint("manifest-preview"), params={"id": preview["job"]["id"]}
+    )
+    assert response.status_code == 200, response.text
+    result = response.json()["data"]
+    assert result["ready"] is True
+    assert result["plugins"][0]["sources"][0]["logo"] is None
+    assert result["plugins"][0]["sources"][0]["status"] == "install"
+    register.assert_awaited_once()
 
 
 @pytest.fixture

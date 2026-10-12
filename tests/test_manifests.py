@@ -200,6 +200,21 @@ async def test_incomplete_core_registration_is_never_reported_as_installed(
     assert not job.get("installed_artifacts")
 
 
+@pytest.mark.parametrize("logo", ["https://example.com/plugin.png", "", None, {}])
+async def test_preview_market_icon_is_display_only(env, market_mock, logo):
+    data, _, _ = market_mock
+    data[ID]["logo"] = logo
+    service = env.plugin.manifests
+    preview = await service.preview("admin", manifest())
+    assert preview["plugins"][0]["sources"][0]["logo"] == (logo or None)
+    job = env.plugin.transfers.get_job(preview["job"]["id"], "admin")
+    assert "logo" not in job["plan"][0]["sources"][0]["remote"]
+    data[ID]["logo"] = "https://example.com/changed.png"
+    await service.start("admin", job["id"], [{"id": "0", "source": "market"}], True)
+    await env.plugin.transfers.task
+    assert job["status"] == "completed", job
+
+
 @pytest.mark.parametrize("author", [AUTHOR, AUTHOR + ", Coauthor"])
 async def test_existing_same_identity_is_skipped_and_conflicting_identity_blocked(
     env, market_mock, author
@@ -559,6 +574,9 @@ async def test_repository_install_uses_shared_official_workflow_and_loads(
     assert item["default_source"] == "repository"
     assert item["sources"][0]["name"] == NAME
     assert item["sources"][0]["version"] == "2.0.0"
+    icon_preview = await service.preview_with_logos("admin", preview["job"]["id"])
+    assert icon_preview["plugins"][0]["sources"][0]["logo"] is None
+    assert "logo_path" not in icon_preview["plugins"][0]["sources"][0]
     await service.start(
         "admin", preview["job"]["id"], [{"id": "0", "source": "repository"}], True
     )

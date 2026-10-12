@@ -76,7 +76,9 @@ class ManagementWeb(TransferWeb):
             elif action == "updates":
                 data = self.updates.state(owner)
             elif action == "manifest-preview":
-                data = self.manifests.read_preview(owner, request.query.get("id"))
+                data = await self.manifests.preview_with_logos(
+                    owner, request.query.get("id")
+                )
             elif action == "manifest-download":
                 job = self.transfers.get_job(request.query.get("id"), owner)
                 if (

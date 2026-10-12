@@ -177,7 +177,7 @@ async function main() {
       if (endpoint === "transfer/upload/zip-token") return {job: {id: "zip-id", warnings: []}, astrbot_version: "4.27", plugins: [{...plugin, exists: false, config: true, data: true, problem: ""}]};
       assert.equal(endpoint, "manage/manifest-upload/source-token");
       manifestResponse = {ready: true, job: {id: "install-id", name: "生产环境备份", kind: "manifest_install", status: "preview", phase: "等待选择", preview_task: true, preview_expires_at: 2000000000, created_at: 100, results: [], warnings: []}, expires_at: 2000000000, plugins: [
-        {id: "0", display_name: "新插件", market_plugin_id: "Alice/new", repo_url: "https://github.com/alice/new", default_source: "market", sources: [{kind: "market", name: "new", directory: "new_dir", status: "install", version: "2.0"}, {kind: "repository", name: "new", directory: "new_dir", status: "install", version: "2.1"}]},
+        {id: "0", display_name: "新插件", market_plugin_id: "Alice/new", repo_url: "https://github.com/alice/new", default_source: "market", sources: [{kind: "market", name: "new", directory: "demo_dir", status: "install", version: "2.0", logo: "https://example.com/market.png"}, {kind: "repository", name: "new", directory: "demo_dir", status: "install", version: "2.1", logo: "/api/file/repository-icon"}]},
         {id: "1", display_name: "已有插件", market_plugin_id: "Alice/existing", repo_url: "", default_source: "market", sources: [{kind: "market", name: "existing", status: "skip", version: "2.0"}]},
         {id: "2", display_name: "冲突插件", market_plugin_id: "Alice/conflict", repo_url: "", default_source: "market", sources: [{kind: "market", name: "conflict", status: "blocked", problem: "身份冲突"}]},
       ]};
@@ -454,11 +454,35 @@ async function main() {
   assert.equal(elements["manifest-preview"].hidden, false);
   assert.equal(elements["manifest-name"].textContent, "生产环境备份");
   assert.equal(vm.runInContext("installChoices.size", context), 1);
+  const marketIcon = descendants(elements["manifest-list"]).find(element => element.tagName === "img");
+  assert.equal(marketIcon.src, "https://example.com/market.png");
+  assert.equal(marketIcon.referrerPolicy, "no-referrer");
+  assert.equal(marketIcon.loading, "lazy");
+  await vm.runInContext("renderManifest()", context);
+  assert.equal(descendants(elements["manifest-list"]).find(element => element.tagName === "img"), marketIcon);
+  await vm.runInContext("renderPlugins()", context);
+  assert.ok(descendants(elements["plugin-list"]).includes(initialIcon), "Manifest icons must not take image nodes from the export list");
+  const missingIcon = descendants(elements["manifest-list"]).filter(element => element.tagName === "img")[1];
+  assert.equal(missingIcon.src, "/favicon.svg");
   const importChecks = descendants(elements["manifest-list"]).filter(element => element.tagName === "input");
   assert.deepEqual(importChecks.map(element => [element.checked, element.disabled]), [[true, false], [false, true], [false, true]]);
   const sourceSelect = descendants(elements["manifest-list"]).find(element => element.tagName === "select");
   assert.equal(sourceSelect.value, "market");
   sourceSelect.value = "repository"; await sourceSelect.trigger("change");
+  const repositoryIcon = descendants(elements["manifest-list"]).find(element => element.tagName === "img");
+  assert.equal(repositoryIcon.src, "/api/file/repository-icon");
+  await vm.runInContext("renderManifest()", context);
+  assert.equal(descendants(elements["manifest-list"]).find(element => element.tagName === "img"), repositoryIcon);
+  await repositoryIcon.trigger("error");
+  assert.equal(repositoryIcon.src, "/favicon.svg");
+  await repositoryIcon.trigger("error");
+  assert.equal(repositoryIcon.hidden, true);
+  let currentSourceSelect = descendants(elements["manifest-list"]).find(element => element.tagName === "select");
+  currentSourceSelect.value = "market"; await currentSourceSelect.trigger("change");
+  assert.equal(descendants(elements["manifest-list"]).find(element => element.tagName === "img"), marketIcon);
+  currentSourceSelect = descendants(elements["manifest-list"]).find(element => element.tagName === "select");
+  currentSourceSelect.value = "repository"; await currentSourceSelect.trigger("change");
+  assert.equal(descendants(elements["manifest-list"]).find(element => element.tagName === "img"), repositoryIcon);
   assert.match(elements["manifest-list"].textContent, /https:\/\/github.com\/alice\/new/);
   assert.equal(vm.runInContext("selectedManifestSource(manifestPreview.plugins[0]).version", context), "2.1");
   assert.equal(manifestResponse.draft[0].source, "repository");

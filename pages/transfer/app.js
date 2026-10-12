@@ -271,7 +271,7 @@ function checkbox(label, checked, disabled, changed) {
   return wrapper;
 }
 
-function titleCell(plugin, showIcon = false) {
+function titleCell(plugin, showIcon = false, iconKey = plugin.directory) {
   const cell = node("td");
   const details = node("div", "plugin-copy");
   const heading = node("div", "plugin-heading");
@@ -291,7 +291,7 @@ function titleCell(plugin, showIcon = false) {
   details.append(heading, metadata);
   if (showIcon) {
     const url = plugin.logo || "/favicon.svg";
-    let cached = pluginIcons.get(plugin.directory);
+    let cached = pluginIcons.get(iconKey);
     // Keep image nodes across redraws: AstrBot's file tokens are single use.
     if (!cached || cached.url !== url) {
       const icon = node("span", "plugin-icon");
@@ -307,7 +307,7 @@ function titleCell(plugin, showIcon = false) {
       });
       image.src = url;
       icon.append(image);
-      cached = {url, icon}; pluginIcons.set(plugin.directory, cached);
+      cached = {url, icon}; pluginIcons.set(iconKey, cached);
     }
     const summary = node("div", "plugin-summary");
     summary.append(cached.icon, details); cell.append(summary);
@@ -590,7 +590,7 @@ function renderImportPreview() {
       row.append(cell);
     }
     const details = node("td");
-    details.append(node("div", "plugin-detail", plugin.exists ? "本机已有 · 默认跳过" : "新插件 · 必须包含代码"));
+    details.append(node("div", "plugin-detail", plugin.exists ? "已安装 · 默认跳过" : "新插件 · 必须包含代码"));
     if (plugin.problem) details.append(node("div", "plugin-error", plugin.problem));
     row.append(details);
     body.append(row);
@@ -1032,6 +1032,7 @@ function renderManifestDraftStatus() {
   elements["retry-manifest-draft"].disabled = requesting || manifestDraftSaving;
 }
 function clearManifestPreview() {
+  for (const key of pluginIcons.keys()) if (key.startsWith("manifest:")) pluginIcons.delete(key);
   ++manifestPreviewRequest; ++manifestDraftVersion;
   pendingManifestId = null; manifestPreview = null;
   installChoices.clear(); installSources.clear();
@@ -1127,7 +1128,7 @@ function renderManifest() {
     const row = node("tr"), choice = node("td"), status = node("td"), locator = node("td", "manifest-source");
     const display = plugin.display_name || source.name || plugin.market_plugin_id || plugin.repo_url;
     choice.append(checkbox("安装 " + display, installChoices.has(plugin.id), source.status !== "install" || manifestPreviewExpired(), checked => {checked ? installChoices.add(plugin.id) : installChoices.delete(plugin.id); return saveManifestDraft();}));
-    const title = titleCell({...source, display_name: display, name: source.name || "身份未确认", directory: source.directory || source.name || "身份未确认", version: source.version || "", status: ""});
+    const title = titleCell({...source, display_name: display, name: source.name || "身份未确认", directory: source.directory || source.name || "身份未确认", version: source.version || "", status: ""}, true, "manifest:" + manifestPreview.job.id + ":" + plugin.id + ":" + source.kind);
     if (source.author) title.append(node("div", "plugin-detail", "作者：" + source.author));
     const select = node("select", "manifest-source-select");
     select.setAttribute("aria-label", "选择 " + display + " 的安装来源");
@@ -1143,8 +1144,8 @@ function renderManifest() {
       return saveManifestDraft();
     });
     locator.append(select, sourceAddress("plugin-detail manifest-locator", source.kind === "market" ? plugin.market_plugin_id : plugin.repo_url));
-    status.append(node("div", source.status === "blocked" ? "plugin-error" : "plugin-detail", {install: "可安装 · 自动加载", skip: "本机已有 · 跳过", blocked: "无法安装"}[source.status]));
-    if (source.problem) status.append(node("div", "plugin-detail", source.problem));
+    status.append(node("div", source.status === "blocked" ? "plugin-error" : "plugin-detail", {install: "可安装", skip: "已安装", blocked: "无法安装"}[source.status]));
+    if (source.status === "blocked" && source.problem) status.append(node("div", "plugin-detail", source.problem));
     row.append(choice, title, locator, status); body.append(row);
   }
   const warnings = manifestPreview.job.warnings || [];

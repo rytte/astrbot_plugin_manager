@@ -224,14 +224,14 @@ class ManifestService:
                 return {
                     "status": "skip",
                     "directory": matches[0]["directory"],
-                    "problem": "本机已有同身份插件，将跳过，不修改版本、来源或启停状态。",
+                    "problem": "已安装，跳过安装。",
                 }
             raise ValueError("本机存在同名或同目录的不同身份插件。")
         if safe_path(self.sources.root, name).exists():
             raise ValueError("安装目标目录已存在，拒绝覆盖。")
         return {"status": "install", "directory": name, "problem": ""}
 
-    async def _repository(self, job: dict, item: dict) -> dict:
+    async def _repository(self, job: dict, item: dict) -> tuple[dict, str]:
         directory = safe_path(
             self.transfers.job_directory(job["id"]), "repository-" + item["id"]
         )
@@ -250,11 +250,17 @@ class ManifestService:
                 metadata["author"], market_author, market=True
             ):
                 raise ValueError("仓库中的作者或名称与清单市场 ID 不一致。")
-        return {
+        remote = {
             **{field: metadata[field] for field in ("name", "author", "version")},
             "repo": url,
             "download_url": "",
         }
+        logo_path = (
+            (code / "logo.png")
+            .relative_to(self.transfers.job_directory(job["id"]))
+            .as_posix()
+        )
+        return remote, logo_path
 
     async def _plan(self, job: dict, data: dict, market_problem: str) -> list[dict]:
         locals_ = [record["local"] for record in await self.sources.inventory()]
@@ -282,15 +288,23 @@ class ManifestService:
                     "author": "",
                     "version": "",
                     "directory": "",
+                    "logo": None,
                 }
                 try:
                     if kind == "market" and market_problem:
                         raise ValueError(market_problem)
-                    remote = (
-                        self._remote(data, entry)
-                        if kind == "market"
-                        else await self._repository(job, item)
-                    )
+                    if kind == "market":
+                        remote = self._remote(data, entry)
+                        metadata = (
+                            self.operations.web.resolve_market_plugin_entry_by_id(
+                                data, entry["market_plugin_id"]
+                            )
+                        )
+                        logo = metadata.get("logo")
+                        if isinstance(logo, str) and logo.strip():
+                            option["logo"] = logo.strip()
+                    else:
+                        remote, option["logo_path"] = await self._repository(job, item)
                     option.update(
                         remote=remote,
                         **{
@@ -418,7 +432,11 @@ class ManifestService:
                 {
                     **{key: value for key, value in item.items() if key != "sources"},
                     "sources": [
-                        {key: value for key, value in source.items() if key != "remote"}
+                        {
+                            key: value
+                            for key, value in source.items()
+                            if key not in {"remote", "logo_path"}
+                        }
                         for source in item["sources"]
                     ],
                 }
@@ -427,6 +445,30 @@ class ManifestService:
             "expires_at": self._deadline(job),
             "draft": copy.deepcopy(job.get("draft")),
         }
+
+    async def preview_with_logos(self, owner: str, identifier: str) -> dict:
+        result = self.read_preview(owner, identifier)
+        if not result["ready"]:
+            return result
+        job = self.transfers.get_job(identifier, owner)
+        root = self.transfers.job_directory(identifier)
+        for item, public_item in zip(job["plan"], result["plugins"], strict=True):
+            for source, public_source in zip(
+                item["sources"], public_item["sources"], strict=True
+            ):
+                if source["kind"] != "repository" or not source.get("logo_path"):
+                    continue
+                try:
+                    path = safe_path(root, source["logo_path"])
+                    if path.is_file() and path.stat().st_nlink == 1:
+                        token = await self.operations.web.get_plugin_logo_token(
+                            str(path)
+                        )
+                        if token:
+                            public_source["logo"] = f"/api/file/{token}"
+                except (ValueError, OSError):
+                    pass
+        return result
 
     async def start(
         self, owner: str, identifier: str, selections: list[dict], acknowledged: bool

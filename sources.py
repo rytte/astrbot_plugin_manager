@@ -423,7 +423,6 @@ class SourceService:
                 raise ValueError("请填写完整的作者/插件技术名。")
             source = self.operations.web.build_registry_source(None)
             data = self.operations.web.load_plugin_cache(source.cache_file)
-            notice = "使用 AstrBot 本地市场缓存校验身份；如需最新数据，请执行 /pm refresh-market。"
         elif kind == "repository":
             url = repository_url(value)
             metadata = await asyncio.wait_for(
