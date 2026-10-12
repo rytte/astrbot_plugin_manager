@@ -576,8 +576,109 @@ class SourceService:
             {"at": now(), "action": action, "actor": actor, "binding_id": binding_id},
         ][-100:]
 
+    def _complete_repository(self, record: dict, repo_url: str) -> None:
+        """Fill missing disk and runtime repository metadata for AstrBot's source UI."""
+        local = record["local"]
+        plugins = [
+            plugin
+            for plugin in self.operations.context.get_all_stars()
+            if plugin.root_dir_name == local["directory"]
+        ]
+        previous = [(plugin, plugin.repo) for plugin in plugins]
+        metadata_path, original = None, None
+        temporary = None
+        written = False
+        try:
+            if not local["repo"]:
+                code = safe_path(self.root, local["directory"])
+                metadata_path = next(
+                    (
+                        path
+                        for filename in ("metadata.yaml", "metadata.yml")
+                        if (path := safe_path(code, filename)).is_file()
+                    ),
+                    safe_path(code, "metadata.yaml"),
+                )
+                original = (
+                    metadata_path.read_bytes() if metadata_path.exists() else None
+                )
+                metadata = (
+                    yaml.safe_load(original.decode("utf-8"))
+                    if original is not None
+                    else {
+                        **{
+                            field: local[field]
+                            for field in METADATA_FIELDS
+                            if field != "repo"
+                        },
+                        **{
+                            field: copy.deepcopy(getattr(plugins[0], field))
+                            for field in (
+                                "desc",
+                                "short_desc",
+                                "support_platforms",
+                                "astrbot_version",
+                                "pages",
+                            )
+                            if plugins and getattr(plugins[0], field) is not None
+                        },
+                    }
+                )
+                if (
+                    not isinstance(metadata, dict)
+                    or metadata.get("repo")
+                    or any(
+                        metadata.get(field, local[field]) != local[field]
+                        for field in ("name", "author", "version")
+                    )
+                ):
+                    raise ValueError("插件仓库信息已变化，请刷新后重新校验。")
+                if original is None and any(
+                    not isinstance(metadata.get(field), str)
+                    or not metadata[field].strip()
+                    for field in ("name", "author", "desc", "version")
+                ):
+                    raise ValueError(
+                        "插件缺少完整元数据，请先补齐 metadata.yaml 后再绑定来源。"
+                    )
+                metadata["repo"] = repo_url
+                temporary = safe_path(code, ".pm-metadata-" + uuid.uuid4().hex)
+                temporary.write_text(
+                    yaml.safe_dump(metadata, allow_unicode=True, sort_keys=False),
+                    encoding="utf-8",
+                )
+                if original is not None:
+                    temporary.chmod(metadata_path.stat().st_mode)
+                    if metadata_path.read_bytes() != original:
+                        raise ValueError("插件仓库信息已变化，请刷新后重新校验。")
+                elif metadata_path.exists():
+                    raise ValueError("插件仓库信息已变化，请刷新后重新校验。")
+                temporary.replace(metadata_path)
+                written = True
+            for plugin in plugins:
+                if not plugin.repo:
+                    plugin.repo = local["repo"] or repo_url
+        except Exception:
+            if written:
+                if original is None:
+                    metadata_path.unlink(missing_ok=True)
+                else:
+                    metadata_path.write_bytes(original)
+            for plugin, previous_repo in previous:
+                plugin.repo = previous_repo
+            raise
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        if not local["repo"]:
+            local["repo"] = repo_url
+            local["runtime_metadata"]["repo"] = repo_url
+        if written or any(not previous_repo for _, previous_repo in previous):
+            record["metadata_snapshot"]["repo"] = local["repo"]
+
     async def _activate(self, record: dict, binding: dict, owner: str) -> None:
         records = await self.operations.web.get_plugin_install_sources()
+        before_records = copy.deepcopy(records)
         local = record["local"]
         current = self._core(local, records)
         if fingerprint(current) != record["core_revision"]:
@@ -610,6 +711,11 @@ class SourceService:
             records.pop(local["name"], None)
         records[local["directory"]] = core
         await self.operations.web.save_plugin_install_sources(records)
+        try:
+            self._complete_repository(record, binding["repo_url"])
+        except Exception:
+            await self.operations.web.save_plugin_install_sources(before_records)
+            raise
         record["last_core_revision"] = fingerprint(core)
         record["source_validation"] = {
             "id": binding["id"],
@@ -617,6 +723,59 @@ class SourceService:
             "checked_at": binding["checked_at"],
         }
         self._event(record, "source_repaired", owner, binding["id"])
+
+    async def bind_restored(self, directory: str, actor: str) -> list[str]:
+        """Verify and bind a restored source while the transfer and core locks are held."""
+        preview = None
+        try:
+            record = await self.detail(directory)
+            if record["current_source"]:
+                return []
+            if record["pending_source"]:
+                preview = await self.preview_existing(
+                    actor, directory, record["revision"]
+                )
+            else:
+                local = record["local"]
+                if not local["repo"]:
+                    return []
+                repo_url = repository_url(local["repo"])
+                data, notice = await self.official_market(fresh=True)
+                if notice:
+                    raise ValueError("市场联网校验失败，请稍后在来源详情中重试。")
+                matches = [
+                    identifier
+                    for identifier, metadata in self.operations.web.iter_market_plugin_entries(
+                        data
+                    )
+                    if metadata.get("name") == local["name"]
+                    and authors_match(
+                        local["author"], metadata.get("author"), market=True
+                    )
+                    and same_repository(repo_url, metadata.get("repo"))
+                ]
+                if len(matches) > 1:
+                    raise ValueError("市场中有多个匹配条目，请在官方插件页面选择来源。")
+                preview = await self.preview_binding(
+                    actor,
+                    directory,
+                    "market" if matches else "repository",
+                    matches[0] if matches else repo_url,
+                )
+            record = await self.detail(directory)
+            if record["revision"] != self.previews[preview["id"]]["revision"]:
+                raise ValueError("插件身份或来源已变化，请在来源详情中重新校验。")
+            await self._activate(record, preview["binding"], actor)
+            record["pending_source"] = None
+            await self._save_record(record)
+            return []
+        except Exception as exc:
+            return [
+                f"{directory}：来源未自动绑定，{redact(str(exc)) or '请在来源详情中检查。'}"
+            ]
+        finally:
+            if preview:
+                self.previews.pop(preview["id"], None)
 
     @staticmethod
     def _stored_record(record: dict) -> dict:

@@ -45,6 +45,26 @@ def exact_keys(value, expected: set[str]) -> None:
         raise ValueError("包或规则字段缺失、未知或格式不正确，请检查格式版本。")
 
 
+def validate_selections(selections, *, identities: bool = False) -> None:
+    if not isinstance(selections, list) or len(selections) > 256:
+        raise ValueError("最多选择 256 个插件。")
+    seen = set()
+    for selection in selections:
+        expected = {"directory", "config", "data"} | (
+            {"name", "plugin_id"} if identities else set()
+        )
+        exact_keys(selection, expected)
+        component(selection["directory"], module=True)
+        folded = selection["directory"].casefold()
+        if (
+            folded in seen
+            or type(selection["config"]) is not bool
+            or type(selection["data"]) is not bool
+        ):
+            raise ValueError("插件选择重复或组件标记不是布尔值。")
+        seen.add(folded)
+
+
 def check_bundle_format(manifest: dict) -> None:
     """Accept only the current bundle schema, with mandatory source snapshots."""
     if (
@@ -688,7 +708,8 @@ def _unpack(archive_path: Path, destination: Path) -> dict:
             if type(plugin[key]) is not bool:
                 raise ValueError("组件标记必须是布尔值。")
         prefix = f"payload/{plugin['directory']}"
-        manager_data = is_manager_plugin(plugin)
+        if is_manager_plugin(plugin) and (plugin["data"] or plugin["file_data"]):
+            raise ValueError("插件管家的标准数据不可用。")
         allowed.add(check_source_snapshot(destination, plugin, actual))
         metadata = read_metadata(safe_path(destination, prefix + "/code"))
         for field in ("name", "author", "version", "plugin_id"):
@@ -701,21 +722,12 @@ def _unpack(archive_path: Path, destination: Path) -> dict:
                 allowed.add(relative)
             elif relative == prefix + "/config.json" and plugin["config"]:
                 allowed.add(relative)
-            elif (
-                relative == prefix + "/manager-data.json"
-                and plugin["data"]
-                and manager_data
-            ):
-                allowed.add(relative)
-            elif (
-                relative == prefix + "/kv.json" and plugin["data"] and not manager_data
-            ):
+            elif relative == prefix + "/kv.json" and plugin["data"]:
                 allowed.add(relative)
             elif (
                 relative.startswith(prefix + "/data/")
                 and plugin["data"]
                 and plugin["file_data"]
-                and not manager_data
             ):
                 allowed.add(relative)
         if plugin["config"] and prefix + "/config.json" not in actual:
@@ -723,15 +735,6 @@ def _unpack(archive_path: Path, destination: Path) -> dict:
         if plugin["file_data"] and not plugin["data"]:
             raise ValueError("文件数据标记与组件声明冲突。")
         if plugin["data"]:
-            if manager_data:
-                from .manager_data_bundle import validate_manager_data
-
-                if plugin["file_data"]:
-                    raise ValueError("管家标准数据仅允许来源关联和导出规则。")
-                validate_manager_data(
-                    load_json(safe_path(destination, prefix + "/manager-data.json"))
-                )
-                continue
             entries = load_json(safe_path(destination, prefix + "/kv.json"))
             if not isinstance(entries, dict):
                 raise ValueError("KV 快照必须是映射。")
@@ -761,7 +764,7 @@ def _unpack(archive_path: Path, destination: Path) -> dict:
                 or relative in {prefix, prefix + "/code"}
                 or relative.startswith(prefix + "/code/")
             )
-            if plugin["data"] and plugin["file_data"] and not is_manager_plugin(plugin):
+            if plugin["data"] and plugin["file_data"]:
                 valid = (
                     valid
                     or relative == prefix + "/data"

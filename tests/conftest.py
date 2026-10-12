@@ -419,12 +419,25 @@ async def transfer_env(env, monkeypatch):
         terminated[target.module_path] = copy.copy(target)
         env.actions.append("terminate")
 
-    async def load(*, specified_module_path):
+    async def load(*, specified_module_path=None, specified_dir_name=None):
         assert env.manager._pm_lock.locked()
-        restored = copy.copy(terminated[specified_module_path])
-        restored.activated = True
-        restored.star_cls = object()
-        env.owners[specified_module_path] = restored
+        if specified_dir_name is None:
+            restored = copy.copy(terminated[specified_module_path])
+            restored.activated = True
+            restored.star_cls = object()
+            env.owners[specified_module_path] = restored
+        else:
+            code = Path(env.manager.plugin_store_path) / specified_dir_name
+            metadata = yaml.safe_load(
+                (code / "metadata.yaml").read_text(encoding="utf-8")
+            )
+            module = f"data.plugins.{specified_dir_name}.main"
+            active = module not in env.prefs.get("inactivated_plugins", [])
+            restored = env.add_target(
+                metadata["name"], specified_dir_name, active=active
+            )
+            for field in ("name", "author", "version", "display_name", "repo", "desc"):
+                setattr(restored, field, metadata.get(field, ""))
         env.actions.append("load")
         return True, None
 
@@ -434,6 +447,9 @@ async def transfer_env(env, monkeypatch):
     env.preferences.put_async = AsyncMock(side_effect=put)
     env.manager._terminate_plugin.side_effect = terminate
     env.manager.load.side_effect = load
+    monkeypatch.setattr(
+        env.plugin.service.web, "get_online_plugins", AsyncMock(return_value=({}, None))
+    )
     monkeypatch.setattr(
         env.manager, "_iter_plugin_llm_tools", lambda module: [], raising=False
     )

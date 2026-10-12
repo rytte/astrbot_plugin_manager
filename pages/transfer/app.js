@@ -374,9 +374,10 @@ function renderPlugins() {
     const dataCell = node("td"); dataCell.dataset.zipOnly = "";
     const dataCheck = checkbox("附带 " + plugin.name + " 的标准数据", choice.data, !choice.selected || !plugin.data_available || Boolean(plugin.blocked), checked => {choice.data = checked; renderSummary();});
     if (!plugin.data_available) dataCheck.append(document.createTextNode("不可用"));
-    dataCell.append(dataCheck, node("div", "range-label", plugin.manager_data ? "仅导出来源快照和导出规则" : plugin.data_available ? "文件 " + statisticSize(plugin, "data_size") : "归属未知"));
+    dataCell.append(dataCheck);
+    if (plugin.data_available) dataCell.append(node("div", "range-label", "文件 " + statisticSize(plugin, "data_size")));
     dataCell.title = (plugin.ranges || []).join("\n");
-    if (plugin.data_available && !plugin.manager_data) dataCell.title += (dataCell.title ? "\n" : "") + "键值存储：" + (Number.isFinite(plugin.kv_count) ? plugin.kv_count + " 条记录（随标准数据备份）" : plugin.statistics_status === "pending" ? "统计中…" : "未完成统计，请刷新状态重试。");
+    if (plugin.data_available) dataCell.title += (dataCell.title ? "\n" : "") + "键值存储：" + (Number.isFinite(plugin.kv_count) ? plugin.kv_count + " 条记录（随标准数据备份）" : plugin.statistics_status === "pending" ? "统计中…" : "未完成统计，请刷新状态重试。");
     const configCell = node("td"); configCell.dataset.zipOnly = "";
     const configCheck = checkbox("附带 " + plugin.name + " 的当前配置", choice.config, !choice.selected || !plugin.config_available || Boolean(plugin.blocked), checked => {choice.config = checked; renderSummary();});
     if (!plugin.config_available) configCheck.append(document.createTextNode("无已保存配置"));
@@ -526,7 +527,7 @@ async function loadStatistics(snapshot) {
         plugin.blocked = "插件信息已变化，请刷新状态。";
         continue;
       }
-      for (const field of ["code_size", "config_size", "data_size", "kv_count", "statistics_status", "blocked", "ranges", "data_available", "manager_data", "config_available"]) plugin[field] = entry[field];
+      for (const field of ["code_size", "config_size", "data_size", "kv_count", "statistics_status", "blocked", "ranges", "data_available", "config_available"]) plugin[field] = entry[field];
     }
   } catch (error) {
     if (state !== snapshot) return;
@@ -580,7 +581,7 @@ function renderRecovery() {
       const action = plugin.components[key];
       if (!action) cell.append(node("span", "muted", "未备份"));
       else {
-        const label = plugin.manager_data ? "还原来源快照和导出规则" : action === "remove" ? key === "data" ? "还原键值并移除目录" : "移除新增" : "恢复旧内容";
+        const label = action === "remove" ? key === "data" ? "还原键值并移除目录" : "移除新增" : "恢复旧内容";
         const control = checkbox(plugin.name + " 的" + {code: "代码", config: "配置", data: "标准数据"}[key], recoveryChoices.get(plugin.directory)[key], busy || requesting || expired || Boolean(plugin.problem), checked => {recoveryChoices.get(plugin.directory)[key] = checked; renderRecovery();});
         control.append(document.createTextNode(label)); cell.append(control);
       }
@@ -627,7 +628,7 @@ function setImportStatus(status, title, detail, file) {
 }
 
 function importAvailable(plugin, kind) {
-  if (plugin.manager_data) return kind === "data" && Boolean(plugin.data) && !plugin.problem;
+  if (plugin.restore_available === false) return false;
   if (kind === "code") return !plugin.problem;
   return Boolean(plugin[kind]) && (plugin.exists || !plugin.problem);
 }
@@ -636,7 +637,7 @@ function setImportChoice(plugin, kind, checked) {
   if (busy || requesting || !importAvailable(plugin, kind)) return;
   const choice = importChoices.get(plugin.directory);
   choice[kind] = checked;
-  if (!plugin.exists && !plugin.manager_data) {
+  if (!plugin.exists) {
     if (checked) choice.code = true;
     else if (kind === "code") {choice.config = false; choice.data = false;}
   }
@@ -693,7 +694,6 @@ function renderImportPreview() {
     importInputs.set(plugin.directory, controls);
     const details = node("td");
     details.append(node("div", "plugin-detail", plugin.exists ? "已安装 · 默认跳过" : "新插件 · 必须包含代码"));
-    if (plugin.manager_data) details.append(node("div", "plugin-detail", "仅恢复来源快照和导出规则；仅补充缺失来源，规则替换；管家保持运行。"));
     if (plugin.problem) details.append(node("div", "plugin-error", plugin.problem));
     row.append(details);
     body.append(row);
@@ -930,7 +930,7 @@ function bindEvents() {
     if (manifestMode()) {await exportManifest(); return;}
     const name = elements["export-name"].value;
     const checked = await post("export-preview", {selections: selections()});
-    const accepted = await confirmOperation("检查本次导出", checked.plugins.map(plugin => ({...plugin, description: "代码" + (plugin.config ? " + 当前配置" : "") + (plugin.data ? plugin.manager_data ? " + 来源快照和导出规则" : " + 标准数据 / KV" : "") + (plugin.pause_required ? " · 将短暂暂停" : "")})), "配置和数据按原样备份，不会自动脱敏。普通插件附带数据时会暂停并尝试恢复原运行状态；管家仅导出来源快照和导出规则，保持运行；外部写入可能导致快照失败。");
+    const accepted = await confirmOperation("检查本次导出", checked.plugins.map(plugin => ({...plugin, description: "代码" + (plugin.config ? " + 当前配置" : "") + (plugin.data ? " + 标准数据 / KV" : "") + (plugin.pause_required ? " · 将短暂暂停" : "")})), "配置和数据按原样备份，不会自动脱敏。普通插件附带数据时会暂停并尝试恢复原运行状态；外部写入可能导致快照失败。");
     if (!accepted) return;
     await post("export", {selections: checked.selections, acknowledged: true, name});
     busy = true;
@@ -964,7 +964,7 @@ function bindEvents() {
   }));
   elements["execute-import"].addEventListener("click", () => runRequest(async () => {
     const selected = Array.from(importChoices, ([directory, choice]) => ({directory, ...choice})).filter(choice => choice.code || choice.config || choice.data);
-    const accepted = await confirmOperation("确认恢复所选内容", selected.map(choice => {const plugin = preview.plugins.find(entry => entry.directory === choice.directory); return {...plugin, description: [choice.code && "替换代码", choice.config && "整体替换配置", choice.data && (plugin.manager_data ? "补充待校验来源 + 替换导出规则" : "整体替换标准数据 / KV")].filter(Boolean).join(" + ")};}), "恢复前会自动备份，普通插件的配置和数据整体替换，空数据也会清空目标；失败后停止后续恢复。普通插件恢复后保持停用，可点击「待加载」启用。管家仅为缺少来源的同身份插件补充待校验记录、替换导出规则，当前更新源不变。");
+    const accepted = await confirmOperation("确认恢复所选内容", selected.map(choice => {const plugin = preview.plugins.find(entry => entry.directory === choice.directory); return {...plugin, description: [choice.code && "替换代码", choice.config && "整体替换配置", choice.data && "整体替换标准数据 / KV"].filter(Boolean).join(" + ")};}), "恢复前会自动备份，普通插件的配置和数据整体替换，空数据也会清空目标；失败后停止后续恢复。普通插件恢复后由 AstrBot 自动加载并处理缺失依赖，会执行插件代码；新插件默认启用，已有插件保留原启停状态。恢复代码时自动校验并绑定来源，来源校验失败可稍后处理。");
     if (!accepted) return;
     await post("import", {id: preview.job.id, selections: selected, acknowledged: true});
     preview = null;
@@ -1144,7 +1144,7 @@ function renderSource() {
   }
   const history = elements["source-history"]; history.replaceChildren();
   elements["source-history-count"].textContent = record.history.length;
-  const labels = {installed: "管家安装", updated: "更新插件", uninstalled: "管家卸载", source_repaired: "校验并保存更新源", core_observed: "观察到 AstrBot 来源变更", metadata_synced: "同步插件信息", bundle_imported: "从迁移包恢复代码", bundle_sources_imported: "恢复来源信息，等待重新校验", manager_data_imported: "导入待校验来源"};
+  const labels = {installed: "管家安装", updated: "更新插件", uninstalled: "管家卸载", source_repaired: "校验并保存更新源", core_observed: "观察到 AstrBot 来源变更", metadata_synced: "同步插件信息", bundle_imported: "从迁移包恢复代码", bundle_sources_imported: "恢复来源信息"};
   for (const event of record.history.slice().reverse()) {const row = node("div", "history-row"); row.append(node("span", "history-event", labels[event.action] || event.action), node("span", "history-meta", sourceTime(event.at) + " · " + event.actor)); history.append(row);}
   if (!record.history.length) history.append(node("p", "source-empty", "暂无管家操作记录。"));
 }

@@ -45,7 +45,208 @@ async def prepare(env, path):
     return job, result
 
 
-async def test_code_only_backup_carries_current_source_and_requires_revalidation(
+@pytest.mark.parametrize(
+    "case,kind",
+    [
+        ("market", "market"),
+        ("repository", "repository"),
+        ("backup", "repository"),
+        ("ambiguous", None),
+        ("offline", None),
+        ("invalid_backup", None),
+    ],
+)
+async def test_import_binds_only_verified_sources_and_still_loads_on_source_failure(
+    transfer_env, monkeypatch, case, kind
+):
+    env = transfer_env
+    target = env.make_transfer_plugin()
+    sources, transfers = env.plugin.sources, env.plugin.transfers
+    repo = "https://github.com/test/demo"
+    identifier = f"{target.author}/{target.name}"
+    metadata_path = transfers.code_root / target.root_dir_name / "metadata.yaml"
+    metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
+    metadata["repo"] = repo
+    metadata_path.write_text(yaml.safe_dump(metadata), encoding="utf-8")
+    target.repo = repo
+    if case in {"backup", "invalid_backup"}:
+        env.prefs["plugin_install_sources"] = {
+            target.root_dir_name: {
+                "install_method": "repository" if case == "backup" else "market",
+                "repo": repo,
+                "registry_url": None,
+                "market_plugin_id": identifier,
+            }
+        }
+    entry = {"name": target.name, "author": target.author, "repo": repo}
+    market = (
+        {identifier: entry} if case in {"market", "ambiguous", "invalid_backup"} else {}
+    )
+    if case == "ambiguous":
+        market[f"Other/{target.name}"] = entry
+    if case == "invalid_backup":
+        market[identifier] = {**entry, "author": "Impostor"}
+    fetch = AsyncMock(
+        return_value=(market, "stale cache" if case == "offline" else None)
+    )
+    monkeypatch.setattr(sources.operations.web, "get_online_plugins", fetch)
+    inspect = AsyncMock(return_value=entry)
+    monkeypatch.setattr(
+        env.manager, "inspect_plugin_repository", inspect, raising=False
+    )
+    package = await export_package(env, target)
+    env.owners.pop(target.module_path)
+    shutil.rmtree(transfers.code_root / target.root_dir_name)
+    env.prefs["plugin_install_sources"] = {}
+    sources.path.unlink()
+    job, _ = await prepare(env, package)
+    await transfers.start_import(job["id"], "admin", [restore_selection(target)], True)
+    await transfers.task
+    assert env.context.get_registered_star(target.name).activated
+    record = await sources.detail(target.root_dir_name)
+    if kind:
+        assert job["status"] == "completed", job
+        assert record["current_source"]["kind"] == kind
+        assert record["pending_source"] is None
+        assert env.prefs["plugin_install_sources"][target.root_dir_name]["repo"] == repo
+    else:
+        assert job["status"] == "completed_with_warning", job
+        assert "来源未自动绑定" in job["warnings"][0]
+        assert record["current_source"] is None
+        assert not env.prefs["plugin_install_sources"]
+    if case == "invalid_backup":
+        assert record["pending_source"]["market_plugin_id"] == identifier
+    if case == "backup":
+        fetch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("active", [False, True])
+async def test_import_preserves_existing_plugin_activation(transfer_env, active):
+    env = transfer_env
+    target = env.make_transfer_plugin(active=active)
+    package = await export_package(env, target)
+    job, _ = await prepare(env, package)
+    await env.plugin.transfers.start_import(
+        job["id"], "admin", [restore_selection(target)], True
+    )
+    await env.plugin.transfers.task
+    assert job["status"] == "completed", job
+    current = env.context.get_registered_star(target.name)
+    assert current.activated is active
+    assert (target.module_path in env.prefs["inactivated_plugins"]) is not active
+
+
+async def test_load_failure_rolls_back_code_source_and_enabled_state(
+    transfer_env, monkeypatch
+):
+    env = transfer_env
+    target = env.make_transfer_plugin(active=True)
+    transfers, sources = env.plugin.transfers, env.plugin.sources
+    repo = "https://github.com/test/demo"
+    env.prefs["plugin_install_sources"] = {
+        target.root_dir_name: {
+            "install_method": "repository",
+            "repo": repo,
+        }
+    }
+    package = await export_package(env, target)
+    original_source = await sources.source_snapshot(target.root_dir_name, target.name)
+    code = transfers.code_root / target.root_dir_name / "main.py"
+    code.write_text("# original local code\n", encoding="utf-8")
+    metadata_path = code.parent / "metadata.yaml"
+    original_metadata = metadata_path.read_bytes()
+    monkeypatch.setattr(
+        env.manager,
+        "inspect_plugin_repository",
+        AsyncMock(
+            return_value={
+                "name": target.name,
+                "author": target.author,
+            }
+        ),
+        raising=False,
+    )
+    original_load = env.manager.load.side_effect
+
+    async def fail_new_load(**kwargs):
+        if "specified_dir_name" in kwargs:
+            return False, "broken imported code"
+        return await original_load(**kwargs)
+
+    env.manager.load.side_effect = fail_new_load
+    job, _ = await prepare(env, package)
+    await transfers.start_import(job["id"], "admin", [restore_selection(target)], True)
+    await transfers.task
+    assert job["status"] == "failed", job
+    assert code.read_text(encoding="utf-8") == "# original local code\n"
+    assert metadata_path.read_bytes() == original_metadata
+    assert env.context.get_registered_star(target.name).activated
+    assert target.module_path not in env.prefs["inactivated_plugins"]
+    assert (
+        await sources.source_snapshot(target.root_dir_name, target.name)
+        == original_source
+    )
+    assert target.root_dir_name not in env.manager.failed_plugin_dict
+
+
+async def test_partial_import_keeps_loaded_plugins_and_syncs_skills(transfer_env):
+    env = transfer_env
+    first, second, third = [
+        env.make_transfer_plugin(name=name, directory=name)
+        for name in ("first", "second", "third")
+    ]
+    transfers = env.plugin.transfers
+    rule = await transfers.save_rule(
+        [
+            {"directory": target.root_dir_name, "config": False, "data": False}
+            for target in (first, second, third)
+        ]
+    )
+    exported = await transfers.start_export("admin", rule["updated_at"], True)
+    await transfers.task
+    package = transfers.download(exported["id"], "admin", "package")
+    for target in (first, second, third):
+        (transfers.code_root / target.root_dir_name / "main.py").write_text(
+            "# local code\n", encoding="utf-8"
+        )
+    original_load = env.manager.load.side_effect
+    failed = False
+
+    async def load(**kwargs):
+        nonlocal failed
+        if kwargs.get("specified_dir_name") == second.root_dir_name and not failed:
+            failed = True
+            return False, "second plugin failed initialization"
+        return await original_load(**kwargs)
+
+    env.manager.load.side_effect = load
+    env.sync.reset_mock()
+    job, _ = await prepare(env, package)
+    await transfers.start_import(
+        job["id"],
+        "admin",
+        [restore_selection(target) for target in (first, second, third)],
+        True,
+    )
+    await transfers.task
+    assert job["status"] == "failed", job
+    assert [result["status"] for result in job["results"]] == [
+        "restored",
+        "failed",
+        "not_executed",
+    ]
+    assert (
+        transfers.code_root / first.root_dir_name / "main.py"
+    ).read_text() != "# local code\n"
+    for target in (second, third):
+        assert (
+            transfers.code_root / target.root_dir_name / "main.py"
+        ).read_text() == "# local code\n"
+    assert env.context.get_registered_star(first.name) is not None
+    env.sync.assert_awaited_once()
+
+
+async def test_code_only_backup_restores_binds_and_loads_current_source(
     transfer_env, monkeypatch
 ):
     env = transfer_env
@@ -77,38 +278,36 @@ async def test_code_only_backup_carries_current_source_and_requires_revalidation
     shutil.rmtree(transfers.code_root / target.root_dir_name)
     sources.path.unlink()
     env.prefs["plugin_install_sources"] = {}
+    monkeypatch.setattr(
+        sources.operations.web,
+        "get_online_plugins",
+        AsyncMock(
+            return_value=(
+                {
+                    market_id: {
+                        "name": target.name,
+                        "author": target.author,
+                        "repo": repo,
+                    }
+                },
+                None,
+            )
+        ),
+    )
     job, _ = await prepare(env, package)
     await transfers.start_import(job["id"], "admin", [restore_selection(target)], True)
     await transfers.task
     assert job["status"] == "completed", job
     restored = await sources.detail(target.root_dir_name)
-    assert restored["current_source"] is None
-    assert restored["pending_source"] == data["source"]
-    assert not env.prefs["plugin_install_sources"]
+    assert restored["current_source"]["id"] == data["source"]["id"]
+    assert restored["current_source"]["verification"] == "identity_matched"
+    assert restored["pending_source"] is None
     assert restored["provenance"]["evidence"] == "bundle_record"
+    assert env.context.get_registered_star(target.name).activated
     restarted = SourceService(env.plugin.service, transfers)
-    assert (await restarted.detail(target.root_dir_name))["pending_source"] == data[
-        "source"
+    assert (await restarted.detail(target.root_dir_name))["current_source"] == restored[
+        "current_source"
     ]
-    repeated, warnings = await sources.export_sources(
-        target.root_dir_name, restored["local"]
-    )
-    assert not warnings and repeated["source"] == data["source"]
-    with pytest.raises(ValueError, match="缺少可分享的来源"):
-        await env.plugin.manifests.export([target.root_dir_name])
-    fetch = AsyncMock(
-        return_value=(
-            {market_id: {"name": target.name, "author": target.author, "repo": repo}},
-            None,
-        )
-    )
-    monkeypatch.setattr(sources.operations.web, "get_online_plugins", fetch)
-    preview = await sources.preview_existing(
-        "admin", target.root_dir_name, restored["revision"]
-    )
-    selected = await sources.bind("admin", preview["id"], True)
-    assert selected["current_source"]["id"] == data["source"]["id"]
-    assert selected["pending_source"] is None
     assert (
         env.prefs["plugin_install_sources"][target.root_dir_name]["install_method"]
         == "market"
@@ -116,11 +315,11 @@ async def test_code_only_backup_carries_current_source_and_requires_revalidation
     assert (await env.plugin.manifests.export([target.root_dir_name]))["manifest"][
         "plugins"
     ][0] == {
-        "display_name": selected["local"]["display_name"] or target.name,
+        "display_name": target.display_name,
         "market_plugin_id": market_id,
         "repo_url": repo,
     }
-    env.manager.load.assert_not_awaited()
+    env.manager.load.assert_awaited_once_with(specified_dir_name=target.root_dir_name)
 
 
 async def test_source_backup_strips_credentials_and_omits_unsafe_locators(transfer_env):
@@ -435,7 +634,7 @@ async def test_metadata_name_conflicts_do_not_invent_loading_failure(transfer_en
 
 @pytest.mark.parametrize("fail_after_source_change", [False, True])
 @pytest.mark.parametrize("legacy_source_key", [False, True])
-async def test_code_migration_restores_pending_sources_and_rollback_restores_original(
+async def test_code_migration_binds_verified_sources_and_rollback_restores_original(
     transfer_env, monkeypatch, fail_after_source_change, legacy_source_key
 ):
     env = transfer_env
@@ -451,6 +650,22 @@ async def test_code_migration_restores_pending_sources_and_rollback_restores_ori
     }
     original_core = copy.deepcopy(env.prefs["plugin_install_sources"])
     original_record = await sources.detail(target.root_dir_name)
+    monkeypatch.setattr(
+        sources.operations.web,
+        "get_online_plugins",
+        AsyncMock(
+            return_value=(
+                {
+                    f"{target.author}/{target.name}": {
+                        "name": target.name,
+                        "author": target.author,
+                        "repo": "https://github.com/test/demo",
+                    }
+                },
+                None,
+            )
+        ),
+    )
     package = await export_package(env, target)
     job, _ = await prepare(env, package)
     if fail_after_source_change:
@@ -472,16 +687,15 @@ async def test_code_migration_restores_pending_sources_and_rollback_restores_ori
         assert env.prefs["plugin_install_sources"] == original_core
     else:
         assert job["status"] == "completed", job
-        assert current["current_source"] is None
         assert (
-            current["pending_source"]["id"] == original_record["current_source"]["id"]
+            current["current_source"]["id"] == original_record["current_source"]["id"]
         )
+        assert current["pending_source"] is None
         assert (
             current["provenance"]["method"] == original_record["provenance"]["method"]
         )
         assert current["provenance"]["evidence"] == "bundle_record"
-        assert "verification" not in current["pending_source"]
-        assert target.root_dir_name not in env.prefs["plugin_install_sources"]
+        assert target.root_dir_name in env.prefs["plugin_install_sources"]
         assert target.name not in env.prefs["plugin_install_sources"]
 
 
@@ -758,7 +972,7 @@ async def test_bom_config_is_exported_and_restored_without_rewriting(transfer_en
     assert job["status"] == "completed", job
     assert config.read_bytes() == content
     env.manager._terminate_plugin.assert_not_awaited()
-    env.manager.load.assert_not_awaited()
+    env.manager.load.assert_awaited_once_with(specified_dir_name=target.root_dir_name)
 
 
 @pytest.mark.parametrize("change_after_start", [False, True])
@@ -822,7 +1036,7 @@ async def test_stale_rule_and_missing_configuration_fail_without_pause(transfer_
     env.manager._terminate_plugin.assert_not_awaited()
 
 
-async def test_new_import_restores_files_without_loading_or_installing_dependencies(
+async def test_new_import_restores_files_and_loads_through_core(
     transfer_env,
 ):
     env = transfer_env
@@ -848,13 +1062,13 @@ async def test_new_import_restores_files_without_loading_or_installing_dependenc
     )
     await transfers.task
     assert job["status"] == "completed", job
-    assert job["reload_required"] is True
+    assert not job.get("reload_required")
     assert (transfers.code_root / target.root_dir_name / "main.py").exists()
-    assert target.module_path in env.prefs["inactivated_plugins"]
-    env.manager.load.assert_not_awaited()
+    assert target.module_path not in env.prefs["inactivated_plugins"]
+    env.manager.load.assert_awaited_once_with(specified_dir_name=target.root_dir_name)
     env.manager.install_plugin.assert_not_awaited()
     assert any(
-        entry["status"] == "pending"
+        entry["status"] == "enabled"
         for entry in await transfers.inventory()
         if entry["directory"] == target.root_dir_name
     )

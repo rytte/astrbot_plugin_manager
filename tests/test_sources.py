@@ -45,6 +45,161 @@ def registry(target, **changes):
     }
 
 
+@pytest.mark.parametrize("metadata_repo", [None, "", "https://github.com/test/demo"])
+async def test_repository_repair_fills_metadata_for_official_source_switching(
+    env, monkeypatch, metadata_repo
+):
+    target = env.add_target()
+    target.support_platforms = ["aiocqhttp"]
+    target.pages = [{"name": "settings", "path": "pages/settings"}]
+    metadata_path = (
+        Path(env.manager.plugin_store_path) / target.root_dir_name / "metadata.yaml"
+    )
+    if metadata_repo is not None:
+        metadata_path.write_text(
+            yaml.safe_dump(
+                {
+                    "name": target.name,
+                    "author": target.author,
+                    "version": target.version,
+                    "desc": "Keep this description",
+                    "repo": metadata_repo,
+                    "support_platforms": ["aiocqhttp"],
+                }
+            ),
+            encoding="utf-8",
+        )
+    repo = "https://github.com/test/demo"
+    monkeypatch.setattr(
+        env.manager,
+        "inspect_plugin_repository",
+        AsyncMock(
+            return_value={
+                "name": target.name,
+                "author": target.author,
+            }
+        ),
+        raising=False,
+    )
+    sources = env.plugin.sources
+    preview = await sources.preview_binding(
+        "admin", target.root_dir_name, "repository", repo
+    )
+    saved = await sources.bind("admin", preview["id"], True)
+    assert target.repo == repo
+    metadata = yaml.safe_load(metadata_path.read_text(encoding="utf-8"))
+    assert metadata["repo"] == repo
+    assert metadata["support_platforms"] == ["aiocqhttp"]
+    if metadata_repo is None:
+        assert metadata["pages"] == target.pages
+    if metadata_repo is not None:
+        assert metadata["desc"] == "Keep this description"
+        assert metadata["support_platforms"] == ["aiocqhttp"]
+    assert not saved["metadata_changed"]
+    # Exercise the actual official backend that previously rejected the empty runtime repo.
+    record, _ = await env.plugin.service.web.bind_plugin_market_source(
+        {
+            "name": target.name,
+            "install_method": "repository",
+        }
+    )
+    assert record["repo"] == repo
+    assert record["install_method"] == "repository"
+    monkeypatch.setattr(
+        env.plugin.service.web,
+        "get_online_plugins",
+        AsyncMock(return_value=(registry(target), None)),
+    )
+    record, _ = await env.plugin.service.web.bind_plugin_market_source(
+        {
+            "name": target.name,
+            "install_method": "market",
+            "registry_url": None,
+            "market_plugin_id": f"{target.author}/{target.name}",
+        }
+    )
+    assert record["install_method"] == "market"
+
+
+async def test_failed_repository_metadata_repair_restores_official_record(
+    env, monkeypatch
+):
+    target = env.add_target()
+    metadata_path = (
+        Path(env.manager.plugin_store_path) / target.root_dir_name / "metadata.yaml"
+    )
+    original = (
+        b"name: demo_plugin\nauthor: Tester\nversion: 1.0.0\n# preserve on failure\n"
+    )
+    metadata_path.write_bytes(original)
+    monkeypatch.setattr(
+        env.manager,
+        "inspect_plugin_repository",
+        AsyncMock(
+            return_value={
+                "name": target.name,
+                "author": target.author,
+            }
+        ),
+        raising=False,
+    )
+    sources = env.plugin.sources
+    preview = await sources.preview_binding(
+        "admin", target.root_dir_name, "repository", "https://github.com/test/demo"
+    )
+    replace = Path.replace
+
+    def fail(path, destination):
+        if destination == metadata_path:
+            raise OSError("read-only metadata")
+        return replace(path, destination)
+
+    monkeypatch.setattr(Path, "replace", fail)
+    with pytest.raises(OSError, match="read-only"):
+        await sources.bind("admin", preview["id"], True)
+    assert metadata_path.read_bytes() == original
+    assert not target.repo
+    assert not env.prefs.get("plugin_install_sources")
+    assert not list(metadata_path.parent.glob(".pm-metadata-*"))
+
+
+async def test_binding_preserves_existing_repository_metadata(env, monkeypatch):
+    target = env.add_target()
+    target.repo = "https://github.com/test/original"
+    metadata_path = (
+        Path(env.manager.plugin_store_path) / target.root_dir_name / "metadata.yaml"
+    )
+    original = yaml.safe_dump(
+        {
+            "name": target.name,
+            "author": target.author,
+            "version": target.version,
+            "repo": target.repo,
+        }
+    ).encode()
+    metadata_path.write_bytes(original)
+    monkeypatch.setattr(
+        env.manager,
+        "inspect_plugin_repository",
+        AsyncMock(
+            return_value={
+                "name": target.name,
+                "author": target.author,
+            }
+        ),
+        raising=False,
+    )
+    preview = await env.plugin.sources.preview_binding(
+        "admin",
+        target.root_dir_name,
+        "repository",
+        "https://github.com/test/alternative",
+    )
+    await env.plugin.sources.bind("admin", preview["id"], True)
+    assert target.repo == "https://github.com/test/original"
+    assert metadata_path.read_bytes() == original
+
+
 async def test_unknown_and_implicit_sources_are_never_reported_as_market(env):
     target = env.add_target()
     env.prefs["plugin_install_sources"] = {

@@ -66,6 +66,92 @@ def live_env(env, monkeypatch):
             del sys.modules[module_name]
 
 
+@pytest.mark.parametrize("broken", [False, True])
+async def test_zip_import_loads_real_plugin_and_repository_repair_survives_reload(
+    live_env, monkeypatch, broken
+):
+    env = live_env
+    transfers = env.plugin.transfers
+    transfers.manager = env.live_manager
+    directory = env.live_root / "reload_probe"
+    directory.mkdir()
+    metadata_path = directory / "metadata.yaml"
+    metadata_path.write_text(
+        "name: reload_probe\nauthor: Probe\ndesc: Imported probe\nversion: 1.0.0\n",
+        encoding="utf-8",
+    )
+    (directory / "main.py").write_text(
+        "from astrbot.api.star import Star\n"
+        "class Main(Star):\n"
+        "    def __init__(self, context):\n"
+        "        self.context = context\n"
+        "    async def initialize(self):\n"
+        + (
+            "        raise RuntimeError('broken import')\n"
+            if broken
+            else "        self.initialized = True\n"
+        ),
+        encoding="utf-8",
+    )
+    env.live_modules.append({"pname": directory.name, "module": "main"})
+    selection = {
+        "directory": directory.name,
+        "code": True,
+        "config": False,
+        "data": False,
+    }
+    rule = await transfers.save_rule(
+        [{"directory": directory.name, "config": False, "data": False}]
+    )
+    exported = await transfers.start_export("admin", rule["updated_at"], True)
+    await transfers.task
+    package = transfers.download(exported["id"], "admin", "package")
+    shutil.rmtree(directory)
+    job = transfers.new_upload("admin")
+    shutil.copyfile(package, transfers.job_directory(job["id"]) / "upload.zip")
+    await transfers.prepare_import(job)
+    await transfers.start_import(job["id"], "admin", [selection], True)
+    await transfers.task
+    if broken:
+        assert job["status"] == "failed", job
+        assert not directory.exists()
+        assert not env.context.get_registered_star("reload_probe")
+        assert "reload_probe" not in env.live_manager.failed_plugin_dict
+        return
+    assert job["status"] == "completed", job
+    current = env.context.get_registered_star("reload_probe")
+    assert current.activated and current.star_cls.initialized
+    assert not current.repo
+    repo = "https://github.com/probe/reload_probe"
+    monkeypatch.setattr(
+        env.live_manager,
+        "inspect_plugin_repository",
+        AsyncMock(
+            return_value={
+                "name": "reload_probe",
+                "author": "Probe",
+            }
+        ),
+    )
+    preview = await env.plugin.sources.preview_binding(
+        "admin", directory.name, "repository", repo
+    )
+    await env.plugin.sources.bind("admin", preview["id"], True)
+    record, _ = await env.plugin.service.web.bind_plugin_market_source(
+        {
+            "name": "reload_probe",
+            "install_method": "repository",
+        }
+    )
+    assert record["repo"] == repo
+    async with env.live_manager._pm_lock:
+        await env.live_manager._terminate_plugin(current)
+        await env.live_manager._unbind_plugin(current.name, current.module_path)
+        success, error = await env.live_manager.load(specified_dir_name=directory.name)
+    assert success, error
+    assert env.context.get_registered_star("reload_probe").repo == repo
+
+
 @pytest.mark.parametrize("entrypoint", ["command", "manifest"])
 @pytest.mark.parametrize("source", ["market", "repository"])
 async def test_chat_and_manifest_install_initialize_plugin_through_actual_core(
@@ -273,9 +359,7 @@ class Main(Star):
         [module_path] if was_inactive else []
     )
     record = await env.plugin.sources.detail("reload_probe")
-    result = await env.plugin.loading.load(
-        "reload_probe", record["revision"], True
-    )
+    result = await env.plugin.loading.load("reload_probe", record["revision"], True)
     assert result["status"] == "enabled", result
     assert not result["warnings"]
     assert not env.plugin.transfers.jobs
@@ -285,7 +369,9 @@ class Main(Star):
     assert env.prefs["inactivated_plugins"] == ["data.plugins.other.main"]
     assert not env.context.get_registered_star("other_pending")
     assert "other_pending" not in env.live_manager.failed_plugin_dict
-    assert (await env.plugin.sources.detail("reload_probe"))["local"]["status"] == "enabled"
+    assert (await env.plugin.sources.detail("reload_probe"))["local"][
+        "status"
+    ] == "enabled"
     env.sync.assert_awaited_once()
 
 
@@ -318,7 +404,9 @@ class Main(Star):
     assert not list(env.plugin.transfers.jobs_root.glob("*"))
     assert module_path in env.prefs["inactivated_plugins"]
     assert not env.context.get_registered_star("reload_probe")
-    assert (await env.plugin.sources.detail("reload_probe"))["local"]["status"] == "failed"
+    assert (await env.plugin.sources.detail("reload_probe"))["local"][
+        "status"
+    ] == "failed"
     env.sync.assert_not_awaited()
 
 

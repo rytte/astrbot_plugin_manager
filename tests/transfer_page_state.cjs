@@ -894,33 +894,33 @@ async function main() {
   assert.equal(elements["source-message"].hidden, true);
   assert.equal(messageTimers.size, 0);
 
-  // Manager data is selected within the ZIP; its code and config are protected.
+  // The manager has no standard data component and cannot be restored online.
   vm.runInContext("busy = false; requesting = false; clearManifestPreview()", context);
   elements["export-format"].value = "zip";
-  const managerPlugin = {...plugin, directory: "astrbot_plugin_manager", name: "astrbot_plugin_manager", display_name: "插件管家", manager_data: true, ranges: ["仅导出来源快照和导出规则"], kv_count: 0};
+  const managerPlugin = {...plugin, directory: "astrbot_plugin_manager", name: "astrbot_plugin_manager", display_name: "插件管家", data_available: false, ranges: [], kv_count: 0};
   elements.search.value = ""; elements["status-filter"].value = "all";
   vm.runInContext("state.plugins.push(" + JSON.stringify(managerPlugin) + "); choices.set('astrbot_plugin_manager', {selected: true, data: false, config: false}); renderPlugins()", context);
   const managerRow = descendants(elements["plugin-list"]).find(element => element.tagName === "tr" && element.textContent.includes("插件管家"));
-  assert.match(managerRow.textContent, /仅导出来源快照和导出规则/);
+  assert.match(managerRow.textContent, /不可用/);
   const managerCheckbox = descendants(managerRow).find(element => element.attributes["aria-label"] === "附带 astrbot_plugin_manager 的标准数据");
-  assert.equal(managerCheckbox.disabled, false);
-  managerCheckbox.checked = true; await managerCheckbox.trigger("change");
-  assert.equal(vm.runInContext("choices.get('astrbot_plugin_manager').data", context), true);
-  vm.runInContext(`preview = {job: {id: 'manager-zip', warnings: []}, astrbot_version: '4.27', plugins: [{name: 'astrbot_plugin_manager', directory: 'astrbot_plugin_manager', manager_data: true, exists: true, data: true, config: true, problem: ''}]};
+  assert.equal(managerCheckbox.disabled, true);
+  elements["bulk-data"].checked = true; await elements["bulk-data"].trigger("change");
+  assert.equal(vm.runInContext("choices.get('astrbot_plugin_manager').data", context), false);
+  vm.runInContext(`preview = {job: {id: 'manager-zip', warnings: []}, astrbot_version: '4.27', plugins: [{name: 'astrbot_plugin_manager', directory: 'astrbot_plugin_manager', restore_available: false, exists: true, data: false, config: true, problem: '不能在线恢复插件管家。'}]};
     importChoices = new Map([['astrbot_plugin_manager', {code: false, config: false, data: false}]]); renderImportPreview();`, context);
-  assert.deepEqual(descendants(elements["import-list"]).filter(element => element.tagName === "input").map(element => element.disabled), [true, true, false]);
-  assert.match(elements["import-list"].textContent, /仅恢复来源快照和导出规则/);
+  assert.deepEqual(descendants(elements["import-list"]).filter(element => element.tagName === "input").map(element => element.disabled), [true, true, true]);
+  assert.match(elements["import-list"].textContent, /不能在线恢复插件管家/);
   assert.equal(elements["import-all-code"].disabled, true);
   assert.equal(elements["import-all-config"].disabled, true);
   assert.equal(descendants(elements["import-list"]).find(element => element.tagName === "img").src, "/favicon.svg");
   await elements["select-import-all"].trigger("click");
-  assert.equal(vm.runInContext("JSON.stringify(importChoices.get('astrbot_plugin_manager'))", context), JSON.stringify({code: false, config: false, data: true}));
+  assert.equal(vm.runInContext("JSON.stringify(importChoices.get('astrbot_plugin_manager'))", context), JSON.stringify({code: false, config: false, data: false}));
   vm.runInContext(`preview.plugins.push({name: 'blocked_new', directory: 'blocked_new', exists: false, config: true, data: true, problem: '依赖冲突'});
     importChoices.set('blocked_new', {code: false, config: false, data: false}); renderImportPreview();`, context);
   await elements["clear-import-selection"].trigger("click");
   await elements["select-import-all"].trigger("click");
   assert.equal(vm.runInContext("JSON.stringify(importChoices.get('blocked_new'))", context), JSON.stringify({code: false, config: false, data: false}));
-  assert.equal(elements["import-all-data"].checked, true, "Unavailable components must not affect bulk selection state");
+  assert.equal(elements["import-all-data"].disabled, true, "Unavailable components cannot be selected in bulk");
   vm.runInContext("preview = null; renderImportPreview()", context);
   vm.runInContext("state.plugins.pop(); choices.delete('astrbot_plugin_manager')", context);
 

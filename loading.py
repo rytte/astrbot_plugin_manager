@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import nullcontext
 from pathlib import Path
 
 from .bytecode import clear_plugin_bytecode
@@ -90,10 +91,19 @@ class PluginLoadService:
             self.operations.ensure_writable()
             return await self._load(directory, revision)
 
-    async def _load(self, directory: str, revision: str) -> dict:
+    async def load_restored(self, directory: str, *, enabled: bool) -> dict:
+        """Load a restored plugin while the transfer and core locks are held."""
+        record = await self.sources.detail(directory)
+        return await self._load(
+            directory, record["revision"], locked=True, enabled=enabled
+        )
+
+    async def _load(
+        self, directory: str, revision: str, *, locked=False, enabled=True
+    ) -> dict:
         manager = self.operations.manager
         warnings = []
-        async with manager._pm_lock:
+        async with nullcontext() if locked else manager._pm_lock:
             source = await self._pending(directory, revision)
             module_path = source["module_path"]
             preferences = self.transfers.preferences
@@ -104,10 +114,14 @@ class PluginLoadService:
                 await asyncio.to_thread(
                     clear_plugin_bytecode, str(source["code"].parent), directory
                 )
-                if was_inactive:
+                if enabled and was_inactive:
                     await preferences.global_put(
                         "inactivated_plugins",
                         [item for item in inactive if item != module_path],
+                    )
+                elif not enabled and not was_inactive:
+                    await preferences.global_put(
+                        "inactivated_plugins", [*inactive, module_path]
                     )
                 success, error = await manager.load(specified_dir_name=directory)
                 if not success:
@@ -122,10 +136,12 @@ class PluginLoadService:
                     or registered[0].plugin_id != source["metadata"]["plugin_id"]
                     or registered[0].module_path != module_path
                     or registered[0].version != source["metadata"]["version"]
-                    or not registered[0].activated
-                    or registered[0].star_cls is None
+                    or registered[0].activated != enabled
+                    or (enabled and registered[0].star_cls is None)
                 ):
-                    raise ValueError("AstrBot 未注册并初始化预期插件，请在官方 WebUI 检查。")
+                    raise ValueError(
+                        "AstrBot 未注册并初始化预期插件，请在官方 WebUI 检查。"
+                    )
             except Exception as exc:
                 for item in list(self.operations.context.get_all_stars()):
                     if item.root_dir_name == directory:
@@ -133,35 +149,52 @@ class PluginLoadService:
                             await manager._terminate_plugin(item)
                             await manager._unbind_plugin(item.name, item.module_path)
                         except Exception:
-                            logger.exception("Failed to clean up loaded plugin %s", directory)
-                            warnings.append("未能清理加载后的运行记录，请在官方 WebUI 检查。")
+                            logger.exception(
+                                "Failed to clean up loaded plugin %s", directory
+                            )
+                            warnings.append(
+                                "未能清理加载后的运行记录，请在官方 WebUI 检查。"
+                            )
+                current_inactive = await preferences.global_get(
+                    "inactivated_plugins", []
+                )
+                current_inactive = [
+                    item for item in current_inactive if item != module_path
+                ]
                 if was_inactive:
-                    current_inactive = await preferences.global_get(
-                        "inactivated_plugins", []
-                    )
-                    if module_path not in current_inactive:
-                        await preferences.global_put(
-                            "inactivated_plugins", [*current_inactive, module_path]
-                        )
-                message = "加载未完成：" + redact(str(exc)) + "；请在官方 WebUI 核对插件状态。"
+                    current_inactive.append(module_path)
+                await preferences.global_put("inactivated_plugins", current_inactive)
+                message = (
+                    "加载未完成："
+                    + redact(str(exc))
+                    + "；请在官方 WebUI 核对插件状态。"
+                )
                 if warnings:
                     message += " " + " ".join(warnings)
                 raise ValueError(message) from exc
             finally:
                 self.in_critical = False
         for action, warning in (
-            (self.operations.web.sync_skills_after_plugin_change, "技能同步失败"),
-            (self.sources.inventory, "来源记录刷新失败"),
+            ()
+            if locked
+            else (
+                (self.operations.web.sync_skills_after_plugin_change, "技能同步失败"),
+                (self.sources.inventory, "来源记录刷新失败"),
+            )
         ):
             try:
                 await action()
             except Exception:
-                logger.exception("Post-load refresh failed for %s: %s", directory, warning)
-                warnings.append("插件已加载并启用，但" + warning + "，请刷新页面或检查日志。")
+                logger.exception(
+                    "Post-load refresh failed for %s: %s", directory, warning
+                )
+                warnings.append(
+                    "插件已加载并启用，但" + warning + "，请刷新页面或检查日志。"
+                )
         return {
             "directory": directory,
-            "status": "enabled",
-            "message": "已加载并启用",
+            "status": "enabled" if enabled else "disabled",
+            "message": "已加载并启用" if enabled else "已加载，保持停用",
             "warnings": warnings,
         }
 

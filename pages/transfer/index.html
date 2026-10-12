@@ -35,11 +35,11 @@
           <summary>备份说明</summary>
           <ol>
             <li><strong>插件代码</strong><span>始终包含实际安装目录，保留本地修改。代码目录内的运行数据也可能一起导出。</span></li>
-            <li><strong>来源信息</strong><span>默认包含安装记录及备份时的当前更新源；恢复代码时一并恢复，重新校验后可设为更新源。</span></li>
-            <li><strong>数据与配置</strong><span>可分别选择；标准数据包含插件数据目录及专属键值记录；管家仅导出来源快照和导出规则。</span></li>
+            <li><strong>来源信息</strong><span>默认包含安装记录及备份时的当前更新源；恢复代码时自动校验并绑定，未能确认的来源可稍后处理。</span></li>
+            <li><strong>数据与配置</strong><span>可分别选择；标准数据包含插件数据目录及专属键值记录；插件管家的标准数据不可用。</span></li>
             <li><strong>备份范围</strong><span>不包含全局配置、共享目录或外置数据库。</span></li>
             <li><strong>敏感信息</strong><span>配置与数据可能含密钥、Cookie 和用户记录。</span></li>
-            <li><strong>恢复备份</strong><span>导入前预检，覆盖前创建恢复资料，完成后保持停用。</span></li>
+            <li><strong>恢复备份</strong><span>导入前预检，覆盖前备份，恢复后自动加载并校验来源。</span></li>
           </ol>
         </details>
         <details class="card guide export-limits" data-zip-only aria-labelledby="export-limits-title">
@@ -72,8 +72,8 @@
             <span class="import-status-icon" aria-hidden="true"></span>
             <div class="import-status-content"><strong id="bundle-status-title"></strong><p id="file-label" class="muted small"></p><p id="bundle-status-detail" class="small"></p></div>
           </div>
-          <div id="import-preview" hidden><div class="section-heading import-heading"><div class="selection-summary"><h3>选择恢复内容</h3><button id="select-import-all" class="text-button" type="button" title="选择所有插件的可恢复内容，包括现有插件。" disabled>全部选择</button><button id="clear-import-selection" class="text-button" type="button" disabled>清空选择</button></div><span id="preview-source" class="muted small"></span></div><div class="table-scroll"><table><thead><tr><th>插件</th><th><label class="check-label"><input id="import-all-code" type="checkbox" aria-label="选择全部可恢复代码" disabled>代码</label></th><th><label class="check-label"><input id="import-all-config" type="checkbox" aria-label="选择全部可恢复配置" title="新插件恢复配置时会一并选择代码。" disabled>配置</label></th><th><label class="check-label"><input id="import-all-data" type="checkbox" aria-label="选择全部可恢复标准数据" title="新插件恢复数据时会一并选择代码。管家仅恢复来源快照和导出规则。" disabled>标准数据</label></th><th>目标 / 预检</th></tr></thead><tbody id="import-list"></tbody></table></div><div id="import-warnings" class="notice" hidden></div><button id="execute-import" class="button primary" disabled>确认恢复所选内容</button><p class="muted small">现有插件默认跳过；新插件必须包含代码。未选择的组件保持不变。普通插件数据整体替换；管家仅为缺少来源的同身份插件补充待校验记录，导出规则替换已保存规则。</p></div>
-          <div class="notice warning"><strong>恢复后的运行状态</strong><span>普通插件导入仅恢复到磁盘，保持停用，不自动安装依赖或执行插件代码。完成后可在插件列表点击「待加载」确认加载启用，或重启 AstrBot 扫描后手动启用。管家仅恢复来源快照和导出规则，保持运行。来源系统中的绝对路径和外部资源不会自动迁移。</span></div>
+          <div id="import-preview" hidden><div class="section-heading import-heading"><div class="selection-summary"><h3>选择恢复内容</h3><button id="select-import-all" class="text-button" type="button" title="选择所有插件的可恢复内容，包括现有插件。" disabled>全部选择</button><button id="clear-import-selection" class="text-button" type="button" disabled>清空选择</button></div><span id="preview-source" class="muted small"></span></div><div class="table-scroll"><table><thead><tr><th>插件</th><th><label class="check-label"><input id="import-all-code" type="checkbox" aria-label="选择全部可恢复代码" disabled>代码</label></th><th><label class="check-label"><input id="import-all-config" type="checkbox" aria-label="选择全部可恢复配置" title="新插件恢复配置时会一并选择代码。" disabled>配置</label></th><th><label class="check-label"><input id="import-all-data" type="checkbox" aria-label="选择全部可恢复标准数据" title="新插件恢复数据时会一并选择代码。" disabled>标准数据</label></th><th>目标 / 预检</th></tr></thead><tbody id="import-list"></tbody></table></div><div id="import-warnings" class="notice" hidden></div><button id="execute-import" class="button primary" disabled>确认恢复所选内容</button><p class="muted small">现有插件默认跳过；新插件必须包含代码。未选择的组件保持不变。普通插件数据整体替换。插件管家不能在线恢复。</p></div>
+          <div class="notice warning"><strong>恢复后的运行状态</strong><span>普通插件恢复后由 AstrBot 自动加载并处理缺失依赖，会执行插件代码。新插件默认启用，已有插件保留原启停状态。加载失败会回滚该插件并停止后续恢复；来源校验失败仅记录待处理提示。来源系统中的绝对路径和外部资源不会自动迁移。</span></div>
         </div><div id="manifest-import" hidden>
           <label class="upload-box" for="manifest-file"><span class="upload-symbol" aria-hidden="true">≡</span><strong>选择插件分享清单 JSON</strong><span>最大 8 MiB · 最多 256 个插件 · v1 格式</span><input id="manifest-file" type="file" accept=".json,application/json"></label>
           <p id="manifest-progress" class="notice" role="status" hidden></p><div id="manifest-preview" hidden><div class="section-heading"><div><h3>清单安装预览</h3><p id="manifest-name" class="muted small"></p></div><span id="preview-expiry" class="muted small"></span></div><p class="muted small">同时提供两种来源时默认选择官方市场；市场不可用时，可明确改选代码仓库。显示名仅供阅读，安装身份以来源及包内元数据为准。</p><div class="table-scroll"><table><thead><tr><th>选择</th><th>插件 / 版本</th><th>安装来源</th><th>处理结果</th></tr></thead><tbody id="manifest-list"></tbody></table></div><div id="manifest-warnings" class="notice warning" hidden></div><p id="manifest-selection-status" class="muted small" role="status" title="选择会自动保存，刷新页面后可继续。"></p><button id="retry-manifest-draft" class="text-button" hidden>重试保存选择</button><button id="install-manifest" class="button primary" disabled>安装所选新插件</button></div>
@@ -119,7 +119,7 @@
     <h2 id="recovery-title">还原到导入前</h2>
     <p id="recovery-expiry" class="muted small"></p>
     <div class="table-scroll"><table><thead><tr><th>插件</th><th>代码</th><th>配置</th><th>标准数据</th></tr></thead><tbody id="recovery-list"></tbody></table></div>
-    <p id="recovery-notice" class="notice warning">还原将覆盖当前内容及导入后的修改；原来不存在的组件会移除，普通插件数据整体替换；管家仅还原来源快照和导出规则，保持运行。执行前会备份当前内容。普通插件完成后保持停用，可点击「待加载」确认加载启用，或重启 AstrBot 扫描后手动启用。</p>
+    <p id="recovery-notice" class="notice warning">还原将覆盖当前内容及导入后的修改；原来不存在的组件会移除，普通插件数据整体替换。执行前会备份当前内容。普通插件完成后保持停用，可点击「待加载」确认加载启用，或重启 AstrBot 扫描后手动启用。</p>
     <p id="recovery-message" class="notice danger" role="alert" hidden></p>
     <label class="acknowledgement"><input id="recovery-acknowledged" type="checkbox"><span>我已核对还原范围，确认覆盖当前内容及移除新增组件。</span></label>
     <div class="dialog-actions"><button id="cancel-recovery" class="button secondary" type="button">返回检查</button><button id="execute-recovery" class="button primary" type="button" disabled>确认还原所选内容</button></div>

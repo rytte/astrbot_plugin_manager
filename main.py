@@ -20,7 +20,6 @@ from astrbot.dashboard.services.plugin_service import (
 
 from .loading import PluginLoadService
 from .management_web import ManagementWeb
-from .manager_data import ManagerDataService
 from .manifests import ManifestService
 from .service import INSTALL_USAGE, PluginOperations, PluginTarget
 from .sources import SourceService
@@ -83,7 +82,6 @@ class Main(Star):
         self.sources = SourceService(self.service, self.transfers)
         self.service.sources = self.sources
         self.manifests = ManifestService(self.sources, self.transfers)
-        self.transfers.manager_data = ManagerDataService(self.sources, self.transfers)
         self.updates = UpdateService(self.sources, self.transfers)
         self.loading = PluginLoadService(self.sources, self.transfers)
         self.chat_updates = UpdateService(self.sources, self.transfers)

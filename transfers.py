@@ -20,7 +20,6 @@ from astrbot import __version__ as ASTRBOT_VERSION
 from . import service as operation_module
 from .bytecode import clear_plugin_bytecode
 from .export_names import export_filename, export_name
-from .manager_data_bundle import validate_manager_data, validate_selections
 from .recovery import RecoveryService
 from .redaction import redact
 from .transfer_bundle import (
@@ -50,6 +49,7 @@ from .transfer_bundle import (
     tree_directories,
     tree_files,
     unpack,
+    validate_selections,
     write_json,
 )
 
@@ -390,19 +390,14 @@ class TransferService:
                 if target and target.plugin
                 else ("failed" if target else "pending"),
                 config_available=source["config_path"].is_file(),
-                data_available=True,
-                manager_data=self._is_self(source),
+                data_available=not self._is_self(source),
             )
             if target and target.plugin and target.plugin.author != metadata["author"]:
                 entry["metadata_changed"] = True
                 entry["metadata_notice"] = "插件信息已变更：作者。"
-            if entry["manager_data"]:
-                entry["ranges"].append(
-                    "仅导出全部已安装插件的来源关联和已保存的导出规则。"
-                )
-            elif source["data_path"].exists():
+            if entry["data_available"] and source["data_path"].exists():
                 entry["ranges"].append(f"plugin_data/{metadata['name']}")
-            if not entry["manager_data"]:
+            if entry["data_available"]:
                 entry["ranges"].append("专属 KV：" + source["kv_plugin_id"])
                 if source["kv_plugin_id"] != metadata["plugin_id"]:
                     entry["ranges"].append(
@@ -420,7 +415,7 @@ class TransferService:
                 )
                 entry["data_size"] = (
                     sum(path.stat().st_size for path in tree_files(source["data_path"]))
-                    if source["data_path"].exists() and not entry["manager_data"]
+                    if source["data_path"].exists() and entry["data_available"]
                     else 0
                 )
                 entry["kv_count"] = 0
@@ -454,12 +449,6 @@ class TransferService:
             ]
         )
         for entry in result:
-            if statistics and entry.get("manager_data") and not entry["blocked"]:
-                value, _ = await self.manager_data.snapshot()
-                entry["data_size"] = len(
-                    json.dumps(value, ensure_ascii=False).encode("utf-8")
-                )
-                continue
             if statistics and entry["data_available"] and not entry["blocked"]:
                 records = await self.preferences.range_get_async(
                     "plugin", entry["data_plugin_id"]
@@ -500,7 +489,9 @@ class TransferService:
     def _check_components(self, source: dict, selection: dict) -> None:
         if selection["config"] and not source["config_path"].is_file():
             raise ValueError("已选择配置，但插件没有已保存配置。")
-        if selection["data"] and not self._is_self(source):
+        if selection["data"]:
+            if self._is_self(source):
+                raise ValueError("插件管家的标准数据不可用。")
             target = source.get("target")
             if target and target.plugin and target.plugin.activated:
                 try:
@@ -548,10 +539,8 @@ class TransferService:
                     "version": source["metadata"]["version"],
                     "data": selection["data"],
                     "config": selection["config"],
-                    "manager_data": self._is_self(source),
                     "pause_required": bool(
                         selection["data"]
-                        and not self._is_self(source)
                         and source["target"]
                         and source["target"].plugin
                         and source["target"].plugin.activated
@@ -792,19 +781,12 @@ class TransferService:
             ("config", source["config_path"]),
             ("data", source["data_path"]),
         ):
-            if selection[kind] and not (kind == "data" and self._is_self(source)):
+            if selection[kind]:
                 size += await asyncio.to_thread(
                     self._path_size, path, code=export and kind == "code"
                 )
         if selection["data"]:
-            if self._is_self(source):
-                values = (
-                    (await self.manager_data.snapshot())[0]
-                    if export
-                    else self.manager_data.capture()
-                )
-            else:
-                values = await self._read_kv(source["kv_plugin_id"])
+            values = await self._read_kv(source["kv_plugin_id"])
             size += len(
                 json.dumps(values, ensure_ascii=False, indent=2).encode("utf-8")
             )
@@ -856,16 +838,8 @@ class TransferService:
                 prefix / "config.json"
             ):
                 raise ValueError("快照期间配置变化。")
-        file_data = bool(
-            selection["data"]
-            and not self._is_self(source)
-            and source["data_path"].exists()
-        )
-        if selection["data"] and self._is_self(source):
-            value, warnings = await self.manager_data.snapshot()
-            await asyncio.to_thread(write_json, prefix / "manager-data.json", value)
-            self.jobs[self.active_job]["warnings"].extend(warnings)
-        elif selection["data"]:
+        file_data = bool(selection["data"] and source["data_path"].exists())
+        if selection["data"]:
             if file_data:
                 await self._copy_snapshot_tree(
                     source["data_path"],
@@ -916,7 +890,7 @@ class TransferService:
                         and source["target"].plugin
                         and source["target"].plugin.activated
                     )
-                    if selection["data"] and not self._is_self(source):
+                    if selection["data"]:
                         self._phase(job, "暂停并创建数据快照：" + source["directory"])
                         await self._pause(source)
                 for source, selection in zip(sources, job["rule"]["selections"]):
@@ -980,6 +954,18 @@ class TransferService:
             plan = []
             checks = {}
             for plugin in manifest["plugins"]:
+                if is_manager_plugin(plugin):
+                    plan.append(
+                        {
+                            **plugin,
+                            "exists": safe_path(
+                                self.code_root, plugin["directory"]
+                            ).exists(),
+                            "problem": "不能在线恢复插件管家。",
+                            "restore_available": False,
+                        }
+                    )
+                    continue
                 self._protect_import(plugin)
                 existing = await asyncio.to_thread(self._existing, plugin)
                 checks[plugin["directory"]] = await asyncio.to_thread(
@@ -990,10 +976,7 @@ class TransferService:
                 )
                 problem = ""
                 try:
-                    if not is_manager_plugin(plugin):
-                        await asyncio.to_thread(
-                            check_environment, code, ASTRBOT_VERSION
-                        )
+                    await asyncio.to_thread(check_environment, code, ASTRBOT_VERSION)
                 except ValueError as exc:
                     problem = redact(str(exc))
                 plan.append(
@@ -1001,15 +984,8 @@ class TransferService:
                         **plugin,
                         "exists": existing is not None,
                         "problem": problem,
-                        "manager_data": is_manager_plugin(plugin),
                     }
                 )
-            if any(
-                is_manager_plugin(plugin) and plugin["data"]
-                for plugin in manifest["plugins"]
-            ):
-                await self.operations.sources.inventory()
-                job["manager_data_check"] = self.manager_data.state()
             job.update(status="preview", manifest=manifest, checks=checks, plan=plan)
             if manifest["platform"] != platform.system():
                 job["warnings"].append(
@@ -1038,10 +1014,7 @@ class TransferService:
 
     def _protect_import(self, plugin: dict) -> None:
         if is_manager_plugin(plugin):
-            source = self._existing(plugin)
-            if not source or source["module_path"] != self.operations.owner_module:
-                raise ValueError("仅能向当前运行的插件管家恢复来源关联和导出规则。")
-            return
+            raise ValueError("不能在线恢复插件管家。")
         for registered in self.operations.context.get_all_stars():
             if (
                 registered.reserved
@@ -1110,14 +1083,6 @@ class TransferService:
     def _check_restoration(self, job: dict, plugin: dict, selection: dict) -> None:
         self._protect_import(plugin)
         source = self._existing(plugin)
-        if is_manager_plugin(plugin):
-            if selection["code"] or selection["config"]:
-                raise ValueError(
-                    "管家仅允许恢复来源关联和导出规则，不能在线覆盖代码或配置。"
-                )
-            if not selection["data"] or not plugin["data"]:
-                raise ValueError("插件包未携带管家的来源关联和导出规则。")
-            return
         if source is None and not selection["code"]:
             raise ValueError("新插件必须选择恢复代码。")
         if (
@@ -1204,62 +1169,8 @@ class TransferService:
                 self._fingerprint, directory
             ):
                 raise ValueError("目标插件状态或文件已变化，请重新上传预检。")
-        await self._check_manager_restore(job, selections)
-        job["restore"] = sorted(
-            copy.deepcopy(selections),
-            key=lambda item: is_manager_plugin(incoming[item["directory"]]),
-        )
+        job["restore"] = copy.deepcopy(selections)
         return self._start(job, self._import)
-
-    async def _check_manager_restore(self, job: dict, selections: list[dict]) -> None:
-        incoming = {
-            plugin["directory"]: plugin for plugin in job["manifest"]["plugins"]
-        }
-        managers = [
-            incoming[item["directory"]]
-            for item in selections
-            if is_manager_plugin(incoming[item["directory"]])
-        ]
-        if not managers:
-            return
-        await self.operations.sources.inventory()
-        if self.manager_data.state() != job["manager_data_check"]:
-            raise ValueError("来源关联或导出规则在预检后变化，请重新上传预检。")
-        replacements = {}
-        for selection in selections:
-            plugin = incoming[selection["directory"]]
-            if is_manager_plugin(plugin):
-                continue
-            existing = await asyncio.to_thread(self._existing, plugin)
-            prefix = safe_path(
-                self.job_directory(job["id"]) / "checked",
-                "payload/" + plugin["directory"],
-            )
-            replacements[plugin["directory"]] = {
-                "directory": plugin["directory"],
-                "metadata": plugin if selection["code"] else existing["metadata"],
-                "target": None,
-                "kv_plugin_id": plugin["plugin_id"],
-                "config_path": prefix / "config.json"
-                if selection["config"]
-                else safe_path(self.config_root, plugin["directory"] + "_config.json"),
-            }
-        for plugin in managers:
-            plan = await self.manager_data.plan(
-                self._manager_payload(job, plugin), replacements
-            )
-            if not plan["rule"]["ready"]:
-                raise ValueError("管家导出规则无法恢复：" + plan["rule"]["problem"])
-
-    def _manager_payload(self, job: dict, plugin: dict) -> dict:
-        return validate_manager_data(
-            load_json(
-                safe_path(
-                    self.job_directory(job["id"]) / "checked",
-                    f"payload/{plugin['directory']}/manager-data.json",
-                )
-            )
-        )
 
     def _verify_checked(self, job: dict) -> None:
         root = safe_path(self.job_directory(job["id"]), "checked")
@@ -1315,14 +1226,7 @@ class TransferService:
             record["source_state"] = await self.operations.sources.source_snapshot(
                 plugin["directory"], plugin["name"]
             )
-        if is_manager_plugin(plugin):
-            record["components"] = {"data": True}
-            value = self.manager_data.capture()
-            self.manager_data.validate_backup(value)
-            await asyncio.to_thread(write_json, before / "manager-data.json", value)
-        for kind, (root, relative) in (
-            () if is_manager_plugin(plugin) else self._paths(plugin).items()
-        ):
+        for kind, (root, relative) in self._paths(plugin).items():
             if not selection[kind]:
                 continue
             path = safe_path(root, relative)
@@ -1331,7 +1235,7 @@ class TransferService:
                 await asyncio.to_thread(copy_tree, path, before / kind)
             elif path.is_file():
                 await asyncio.to_thread(shutil.copyfile, path, before / kind)
-        if selection["data"] and not is_manager_plugin(plugin):
+        if selection["data"]:
             await asyncio.to_thread(
                 write_json, before / "kv.json", await self._read_kv(plugin["plugin_id"])
             )
@@ -1410,9 +1314,6 @@ class TransferService:
         before = safe_path(
             self.job_directory(job["id"]), "before/" + plugin["directory"]
         )
-        if is_manager_plugin(plugin):
-            await self.manager_data.restore(load_json(before / "manager-data.json"))
-            return
         for kind, existed in record["components"].items():
             root, relative = self._paths(plugin)[kind]
             await asyncio.to_thread(
@@ -1431,6 +1332,10 @@ class TransferService:
             await self.operations.sources.restore_sources(record["source_state"])
 
     async def _import(self, job: dict) -> None:
+        from .loading import PluginLoadService
+
+        loading = PluginLoadService(self.operations.sources, self)
+        plugins_changed = False
         incoming = {
             plugin["directory"]: plugin for plugin in job["manifest"]["plugins"]
         }
@@ -1440,7 +1345,6 @@ class TransferService:
                 if time.time() > job["created_at"] + PREVIEW_TTL:
                     raise ValueError("导入预检在排队期间过期，请重新上传。")
                 await asyncio.to_thread(self._verify_checked, job)
-                await self._check_manager_restore(job, job["restore"])
                 space = 0
                 for selection in job["restore"]:
                     directory = selection["directory"]
@@ -1454,19 +1358,6 @@ class TransferService:
                     source = await asyncio.to_thread(
                         self._existing, incoming[directory]
                     )
-                    if is_manager_plugin(incoming[directory]):
-                        space += 3 * len(
-                            json.dumps(
-                                self.manager_data.capture(), ensure_ascii=False
-                            ).encode("utf-8")
-                        )
-                        space += len(
-                            json.dumps(
-                                self._manager_payload(job, incoming[directory]),
-                                ensure_ascii=False,
-                            ).encode("utf-8")
-                        )
-                        continue
                     paths = self._paths(incoming[directory])
                     previous = source or {
                         "directory": directory,
@@ -1500,6 +1391,10 @@ class TransferService:
                     source = await asyncio.to_thread(self._existing, plugin)
                     paused = False
                     backup = None
+                    load_attempted = False
+                    previous_failure = copy.deepcopy(
+                        self.manager.failed_plugin_dict.get(plugin["directory"])
+                    )
                     self._phase(job, "备份并恢复：" + plugin["directory"])
                     try:
                         if source:
@@ -1513,24 +1408,8 @@ class TransferService:
                             ] in await self.preferences.global_get(
                                 "inactivated_plugins", []
                             )
-                            if not is_manager_plugin(plugin):
-                                paused = await self._pause(source)
+                            paused = await self._pause(source)
                         backup = await self._backup(job, plugin, selection, source)
-                        if is_manager_plugin(plugin):
-                            job["warnings"].extend(
-                                await self.manager_data.apply(
-                                    self._manager_payload(job, plugin), job["owner"]
-                                )
-                            )
-                            job["results"].append(
-                                {
-                                    "directory": plugin["directory"],
-                                    "status": "restored",
-                                    "message": "来源关联已合并，导出规则已恢复；管家保持运行。",
-                                }
-                            )
-                            self._save(job)
-                            continue
                         prefix = safe_path(
                             self.job_directory(job["id"]) / "checked",
                             "payload/" + plugin["directory"],
@@ -1582,21 +1461,66 @@ class TransferService:
                             await self.operations.sources.note_bundle(
                                 plugin["directory"], job["owner"], incoming_sources
                             )
+                            self._phase(job, "校验并绑定来源：" + plugin["directory"])
+                            job["warnings"].extend(
+                                await self.operations.sources.bind_restored(
+                                    plugin["directory"], job["owner"]
+                                )
+                            )
+                        self._phase(job, "加载插件：" + plugin["directory"])
+                        load_attempted = True
+                        loaded = await loading.load_restored(
+                            plugin["directory"],
+                            enabled=bool(source["was_enabled"])
+                            if source and source["target"] and source["target"].plugin
+                            else True,
+                        )
                         job["results"].append(
                             {
                                 "directory": plugin["directory"],
                                 "status": "restored",
-                                "message": "已恢复到磁盘并保持停用；可点击「待加载」确认加载启用，或重启 AstrBot 后在 WebUI 手动启用。",
+                                "message": "已恢复；" + loaded["message"],
                             }
                         )
-                        job["reload_required"] = True
+                        plugins_changed = True
                         self._save(job)
                     except Exception:
                         try:
+                            if load_attempted:
+                                for current in list(
+                                    self.operations.context.get_all_stars()
+                                ):
+                                    if current.root_dir_name == plugin["directory"]:
+                                        if current.activated:
+                                            await self.manager._terminate_plugin(
+                                                current
+                                            )
+                                        await self.manager._unbind_plugin(
+                                            current.name, current.module_path
+                                        )
                             if backup:
                                 await self._restore_backup(job, plugin, backup)
+                            self.manager.failed_plugin_dict.pop(
+                                plugin["directory"], None
+                            )
+                            if previous_failure is not None:
+                                self.manager.failed_plugin_dict[plugin["directory"]] = (
+                                    previous_failure
+                                )
                             if paused or (source and source.get("needs_resume")):
                                 await self._resume(source)
+                            elif (
+                                source
+                                and source["target"]
+                                and source["target"].plugin
+                                and not any(
+                                    current.root_dir_name == plugin["directory"]
+                                    for current in self.operations.context.get_all_stars()
+                                )
+                            ):
+                                await loading.load_restored(
+                                    plugin["directory"], enabled=False
+                                )
                             job["results"].append(
                                 {
                                     "directory": plugin["directory"],
@@ -1616,14 +1540,16 @@ class TransferService:
                         self._save(job)
                         raise
             finally:
-                self.in_critical = False
-        if job.get("reload_required"):
-            try:
-                await self.operations.web.sync_skills_after_plugin_change()
-            except Exception:
-                job["warnings"].append(
-                    "插件文件已恢复，但技能同步失败，请重启 AstrBot 后检查。"
-                )
+                try:
+                    if plugins_changed:
+                        try:
+                            await self.operations.web.sync_skills_after_plugin_change()
+                        except Exception:
+                            job["warnings"].append(
+                                "插件已恢复并加载，但技能同步失败，请在官方 WebUI 检查。"
+                            )
+                finally:
+                    self.in_critical = False
         for name in ("upload.zip", "checked"):
             await asyncio.to_thread(remove_path, self.job_directory(job["id"]), name)
 

@@ -42,6 +42,7 @@ async def imported(transfer_env):
     await transfers.start_import(source["id"], "admin", [selection], True)
     await transfers.task
     assert source["status"] == "completed", source
+    env.manager.load.reset_mock()
     env.import_job = source
     env.selection = selection
     env.target = target

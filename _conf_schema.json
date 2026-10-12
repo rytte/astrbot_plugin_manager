@@ -3,6 +3,6 @@
     "description": "允许省略插件名前缀",
     "type": "bool",
     "default": true,
-    "hint": "开启后，info、enable、disable、reload、remove 的插件名或目录名可省略 astrbot_plugin_ 前缀。匹配到多个插件时拒绝执行；关闭后仅接受完整名称或目录名。"
+    "hint": "info、enable、disable、reload、remove 可省略 astrbot_plugin_ 前缀；匹配多个插件时不执行。"
   }
 }
