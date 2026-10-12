@@ -140,6 +140,7 @@ tr.selected{background:var(--accent-bg)}
 .upload-symbol{font-size:39px!important;color:var(--accent)!important;line-height:1}
 .upload-box input{max-width:100%;font-size:13px;margin:5px 0;color:var(--muted)}
 .section-heading{display:flex;align-items:center;justify-content:space-between;margin:24px 0 12px;gap:8px}
+.import-heading{flex-wrap:wrap}
 #execute-import{margin-top:18px;margin-bottom:8px}
 .job-list{display:grid;gap:14px}
 .manifest-source{max-width:280px;min-width:180px}

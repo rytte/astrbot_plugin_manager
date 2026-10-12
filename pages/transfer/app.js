@@ -8,6 +8,7 @@ let choices = new Map();
 const pluginIcons = new Map();
 let preview = null;
 let importChoices = new Map();
+const importInputs = new Map();
 let busy = false;
 let requesting = false;
 let previousBusy = false;
@@ -402,6 +403,7 @@ function renderSummary() {
   renderManifestDraftStatus();
   elements["bundle-file"].disabled = busy || requesting;
   elements["execute-import"].disabled = busy || requesting || !preview || !Array.from(importChoices.values()).some(choice => choice.code || choice.config || choice.data);
+  renderImportSelection();
   for (const kind of ["data", "config"]) {
     const available = selectedPlugins.filter(plugin => plugin[kind + "_available"] && !plugin.blocked);
     const included = available.filter(plugin => choices.get(plugin.directory)[kind]).length;
@@ -573,22 +575,71 @@ async function executeRecovery() {
   });
 }
 
+function importAvailable(plugin, kind) {
+  if (plugin.manager_data) return kind === "data" && Boolean(plugin.data) && !plugin.problem;
+  if (kind === "code") return !plugin.problem;
+  return Boolean(plugin[kind]) && (plugin.exists || !plugin.problem);
+}
+
+function setImportChoice(plugin, kind, checked) {
+  if (busy || requesting || !importAvailable(plugin, kind)) return;
+  const choice = importChoices.get(plugin.directory);
+  choice[kind] = checked;
+  if (!plugin.exists && !plugin.manager_data) {
+    if (checked) choice.code = true;
+    else if (kind === "code") {choice.config = false; choice.data = false;}
+  }
+}
+
+function renderImportSelection() {
+  const plugins = preview ? preview.plugins : [];
+  let allSelected = true, hasAvailable = false, hasSelection = false;
+  for (const kind of ["code", "config", "data"]) {
+    const available = plugins.filter(plugin => importAvailable(plugin, kind));
+    const selected = available.filter(plugin => importChoices.get(plugin.directory)[kind]).length;
+    const bulk = elements["import-all-" + kind];
+    bulk.checked = available.length > 0 && selected === available.length;
+    bulk.indeterminate = selected > 0 && selected < available.length;
+    bulk.disabled = busy || requesting || !available.length;
+    if (available.length) hasAvailable = true;
+    if (selected < available.length) allSelected = false;
+  }
+  for (const plugin of plugins) {
+    const choice = importChoices.get(plugin.directory);
+    const selected = choice.code || choice.config || choice.data;
+    hasSelection ||= selected;
+    const controls = importInputs.get(plugin.directory);
+    if (!controls) continue;
+    controls.row.classList.toggle("selected", selected);
+    for (const kind of ["code", "config", "data"]) {
+      controls[kind].checked = choice[kind];
+      controls[kind].disabled = busy || requesting || !importAvailable(plugin, kind);
+    }
+  }
+  elements["select-import-all"].disabled = busy || requesting || !hasAvailable || allSelected;
+  elements["clear-import-selection"].disabled = busy || requesting || !hasSelection;
+}
+
 function renderImportPreview() {
   elements["import-preview"].hidden = !preview;
-  if (!preview) return;
+  importInputs.clear();
+  if (!preview) {renderImportSelection(); return;}
   elements["preview-source"].textContent = "来源 AstrBot " + preview.astrbot_version + " · 预检一小时内有效";
   const body = elements["import-list"];
   body.replaceChildren();
   for (const plugin of preview.plugins) {
     const choice = importChoices.get(plugin.directory);
     const row = node("tr");
-    row.append(titleCell({...plugin, status: ""}));
+    const controls = {row};
+    row.append(titleCell({...plugin, status: ""}, true, "bundle:" + preview.job.id + ":" + plugin.directory));
     for (const kind of ["code", "config", "data"]) {
       const cell = node("td");
-      const disabled = plugin.manager_data ? kind !== "data" || !plugin.data : kind === "code" ? Boolean(plugin.problem) : !plugin[kind];
-      cell.append(checkbox("恢复 " + plugin.name + " 的" + {code: "代码", config: "配置", data: "标准数据"}[kind], choice[kind], disabled, checked => {choice[kind] = checked; renderSummary();}));
+      const check = checkbox("恢复 " + plugin.name + " 的" + {code: "代码", config: "配置", data: "标准数据"}[kind], choice[kind], !importAvailable(plugin, kind), checked => {setImportChoice(plugin, kind, checked); renderSummary();});
+      controls[kind] = check.childNodes[0];
+      cell.append(check);
       row.append(cell);
     }
+    importInputs.set(plugin.directory, controls);
     const details = node("td");
     details.append(node("div", "plugin-detail", plugin.exists ? "已安装 · 默认跳过" : "新插件 · 必须包含代码"));
     if (plugin.manager_data) details.append(node("div", "plugin-detail", "仅恢复来源关联和导出规则；来源按身份合并，规则替换；管家保持运行。"));
@@ -598,6 +649,7 @@ function renderImportPreview() {
   }
   elements["import-warnings"].hidden = !preview.job.warnings.length;
   elements["import-warnings"].textContent = preview.job.warnings.join("\n");
+  renderImportSelection();
 }
 
 async function downloadJob(job, kind) {
@@ -802,6 +854,21 @@ function bindEvents() {
   });
   elements["clear-selection"].addEventListener("click", () => {if (busy || requesting) return; if (manifestMode()) manifestSelections.clear(); else for (const choice of choices.values()) choice.selected = false; renderPlugins(); renderSummary();});
   for (const kind of ["data", "config"]) elements["bulk-" + kind].addEventListener("change", event => {if (busy || requesting || manifestMode()) return; for (const plugin of state.plugins) if (choices.get(plugin.directory).selected && plugin[kind + "_available"] && !plugin.blocked) choices.get(plugin.directory)[kind] = event.target.checked; renderPlugins(); renderSummary();});
+  for (const kind of ["code", "config", "data"]) elements["import-all-" + kind].addEventListener("change", event => {
+    if (!preview || busy || requesting) return;
+    for (const plugin of preview.plugins) setImportChoice(plugin, kind, event.target.checked);
+    renderSummary();
+  });
+  elements["select-import-all"].addEventListener("click", () => {
+    if (!preview || busy || requesting) return;
+    for (const plugin of preview.plugins) for (const kind of ["code", "config", "data"]) setImportChoice(plugin, kind, true);
+    renderSummary();
+  });
+  elements["clear-import-selection"].addEventListener("click", () => {
+    if (!preview || busy || requesting) return;
+    for (const choice of importChoices.values()) {choice.code = false; choice.config = false; choice.data = false;}
+    renderSummary();
+  });
   elements.refresh.addEventListener("click", () => runRequest(() => {
     message("");
     return loadState(true);
@@ -828,10 +895,10 @@ function bindEvents() {
     if (file.size > state.limits.archive_bytes) throw new Error("文件超过上传限制，请减小插件包。");
     elements["file-label"].textContent = "正在上传并校验：" + file.name;
     preview = await bridge.upload("transfer/upload/" + encodeURIComponent(state.csrf), file);
-    importChoices = new Map(preview.plugins.map(plugin => [plugin.directory, {code: !plugin.exists && !plugin.problem, config: false, data: false}]));
+    importChoices = new Map(preview.plugins.map(plugin => [plugin.directory, {code: !plugin.exists && importAvailable(plugin, "code"), config: false, data: false}]));
     elements["file-label"].textContent = "预检完成：" + file.name + " · " + formatSize(file.size);
     renderImportPreview();
-    message("插件包已通过结构校验。请逐项选择恢复内容，现有插件默认跳过。");
+    message("插件包已通过结构校验。请选择恢复内容，现有插件默认跳过。");
   }));
   elements["execute-import"].addEventListener("click", () => runRequest(async () => {
     const selected = Array.from(importChoices, ([directory, choice]) => ({directory, ...choice})).filter(choice => choice.code || choice.config || choice.data);

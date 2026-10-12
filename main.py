@@ -359,14 +359,12 @@ class Main(Star):
     async def remove(
         self, event: AstrMessageEvent, args: list[str]
     ) -> AsyncIterator[None]:
-        """Require a bound, expiring private-chat confirmation before uninstalling.
+        """Require a bound, expiring confirmation before uninstalling.
 
         Args:
-            event: The administrator's private conversation.
+            event: The administrator's group or private conversation.
             args: The exact target, deletion scope and optional confirmation word.
         """
-        if not event.is_private_chat():
-            raise ValueError("请在管理员私聊中卸载插件。")
         if not args or args[1:] not in (
             [],
             ["--all"],
@@ -400,7 +398,7 @@ class Main(Star):
             option = " --all" if delete_all else ""
             await self.reply(
                 event,
-                f"确认卸载 {target.name}？{scope}请在 60 秒内发送 /pm remove {target.identifier}{option} confirm。",
+                f"确认卸载 {target.name}？{scope}请在当前会话中于 60 秒内发送 /pm remove {target.identifier}{option} confirm。",
             )
             yield
             return

@@ -12,16 +12,17 @@ def output(event):
 
 
 @pytest.mark.parametrize("delete_all", [False, True])
-async def test_pm_removal_confirmation_works_in_real_pipeline(env, delete_all):
+@pytest.mark.parametrize("group", [None, "group"])
+async def test_pm_removal_confirmation_works_in_real_pipeline(env, delete_all, group):
     target = env.add_target()
     option = " --all" if delete_all else ""
-    request = env.event(f"/pm remove demo_directory{option}")
+    request = env.event(f"/pm remove demo_directory{option}", group=group)
     await env.scheduler.execute(request)
     confirmation_command = f"/pm remove demo_directory{option} confirm"
     assert confirmation_command in output(request)
     assert "/plugin" not in output(request)
     env.manager.uninstall_plugin.assert_not_awaited()
-    confirmed = env.event(confirmation_command)
+    confirmed = env.event(confirmation_command, group=group)
     await env.scheduler.execute(confirmed)
     env.manager.uninstall_plugin.assert_awaited_once_with(
         target.name, delete_config=delete_all, delete_data=delete_all
@@ -30,7 +31,27 @@ async def test_pm_removal_confirmation_works_in_real_pipeline(env, delete_all):
     assert confirmed.is_stopped() and not env.model_calls
 
 
-async def test_remove_requires_private_confirmation_and_preserves_data_by_default(env):
+@pytest.mark.parametrize("suffix", ["", " confirm"])
+async def test_group_members_cannot_request_or_confirm_removal(env, suffix):
+    env.add_target()
+    request = env.event("/pm remove demo_plugin", group="group")
+    await env.scheduler.execute(request)
+    pending = dict(env.plugin._removals)
+    event = env.event(
+        f"/pm remove demo_plugin{suffix}",
+        user="member",
+        admin=False,
+        group="group",
+    )
+    await env.scheduler.execute(event)
+    assert "权限" in output(event)
+    assert env.plugin._removals == pending
+    env.manager.uninstall_plugin.assert_not_awaited()
+    assert not env.model_calls
+
+
+@pytest.mark.parametrize("group", [None, "group"])
+async def test_remove_requires_confirmation_and_preserves_data_by_default(env, group):
     target = env.add_target()
     config = (
         Path(env.manager.plugin_config_path) / f"{target.root_dir_name}_config.json"
@@ -38,15 +59,12 @@ async def test_remove_requires_private_confirmation_and_preserves_data_by_defaul
     config.write_text("{}", encoding="utf-8")
     data = env.root / "plugin_data" / target.root_dir_name
     data.mkdir(parents=True)
-    group = env.event(group="group")
-    await env.invoke(group, "remove demo_plugin")
-    assert "私聊" in output(group)
-    env.manager.uninstall_plugin.assert_not_awaited()
-    request = env.event()
+    request = env.event(group=group)
     await env.invoke(request, "remove demo_directory")
     assert "60 秒" in output(request) and "保留配置和数据" in output(request)
+    assert "当前会话" in output(request)
     env.manager.uninstall_plugin.assert_not_awaited()
-    confirmed = env.event()
+    confirmed = env.event(group=group)
     await env.invoke(confirmed, "remove demo_plugin confirm")
     env.manager.uninstall_plugin.assert_awaited_once_with(
         target.name, delete_config=False, delete_data=False
@@ -93,16 +111,28 @@ async def test_failed_plugin_is_removed_by_directory_through_webui_service(
 
 
 @pytest.mark.parametrize(
-    "change", ["scope", "target", "instance", "state", "session", "sender", "expiry"]
+    "change",
+    [
+        "scope",
+        "target",
+        "instance",
+        "state",
+        "session",
+        "sender",
+        "expiry",
+        "conversation",
+        "chat_type",
+    ],
 )
+@pytest.mark.parametrize("group", [None, "group"])
 async def test_confirmation_is_bound_to_unchanged_target_scope_identity_and_session(
-    env, change
+    env, change, group
 ):
     target = env.add_target()
     env.add_target(name="second", directory="second_directory")
-    initial = env.event()
+    initial = env.event(group=group)
     await env.invoke(initial, "remove demo_plugin")
-    confirmed = env.event()
+    confirmed = env.event(group=group)
     arguments = "remove demo_plugin confirm"
     if change == "scope":
         arguments = "remove demo_plugin --all confirm"
@@ -113,9 +143,13 @@ async def test_confirmation_is_bound_to_unchanged_target_scope_identity_and_sess
     elif change == "state":
         target.activated = False
     elif change == "session":
-        confirmed = env.event(platform="other_platform")
+        confirmed = env.event(platform="other_platform", group=group)
     elif change == "sender":
-        confirmed = env.event(user="another_admin")
+        confirmed = env.event(user="another_admin", group=group)
+    elif change == "conversation":
+        confirmed = env.event(group="other_group")
+    elif change == "chat_type":
+        confirmed = env.event(group="group" if group is None else None)
     else:
         key = (initial.unified_msg_origin, initial.get_sender_id())
         env.plugin._removals[key] = replace(env.plugin._removals[key], expires=0)

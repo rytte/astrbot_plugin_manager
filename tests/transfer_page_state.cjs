@@ -435,6 +435,17 @@ async function main() {
   elements["bundle-file"].files = [{name: "plugins.zip", size: 100}];
   await elements["bundle-file"].trigger("change");
   const zipPreview = vm.runInContext("preview.job.id", context);
+  const zipIcon = descendants(elements["import-list"]).find(element => element.tagName === "img");
+  assert.equal(zipIcon.src, plugin.logo);
+  assert.equal(zipIcon.referrerPolicy, "no-referrer");
+  assert.equal(zipIcon.loading, "lazy");
+  await vm.runInContext("renderImportPreview()", context);
+  assert.equal(descendants(elements["import-list"]).find(element => element.tagName === "img"), zipIcon);
+  assert.notEqual(descendants(elements["plugin-list"]).find(element => element.tagName === "img"), zipIcon);
+  await zipIcon.trigger("error");
+  assert.equal(zipIcon.src, "/favicon.svg");
+  await zipIcon.trigger("error");
+  assert.equal(zipIcon.hidden, true);
   elements["import-format"].value = "manifest"; await elements["import-format"].trigger("change");
   elements["manifest-file"].files = [{name: "plugins.json", size: 100}];
   await elements["manifest-file"].trigger("change");
@@ -836,6 +847,17 @@ async function main() {
     importChoices = new Map([['astrbot_plugin_manager', {code: false, config: false, data: false}]]); renderImportPreview();`, context);
   assert.deepEqual(descendants(elements["import-list"]).filter(element => element.tagName === "input").map(element => element.disabled), [true, true, false]);
   assert.match(elements["import-list"].textContent, /仅恢复来源关联和导出规则/);
+  assert.equal(elements["import-all-code"].disabled, true);
+  assert.equal(elements["import-all-config"].disabled, true);
+  assert.equal(descendants(elements["import-list"]).find(element => element.tagName === "img").src, "/favicon.svg");
+  await elements["select-import-all"].trigger("click");
+  assert.equal(vm.runInContext("JSON.stringify(importChoices.get('astrbot_plugin_manager'))", context), JSON.stringify({code: false, config: false, data: true}));
+  vm.runInContext(`preview.plugins.push({name: 'blocked_new', directory: 'blocked_new', exists: false, config: true, data: true, problem: '依赖冲突'});
+    importChoices.set('blocked_new', {code: false, config: false, data: false}); renderImportPreview();`, context);
+  await elements["clear-import-selection"].trigger("click");
+  await elements["select-import-all"].trigger("click");
+  assert.equal(vm.runInContext("JSON.stringify(importChoices.get('blocked_new'))", context), JSON.stringify({code: false, config: false, data: false}));
+  assert.equal(elements["import-all-data"].checked, true, "Unavailable components must not affect bulk selection state");
   vm.runInContext("preview = null; renderImportPreview()", context);
   vm.runInContext("state.plugins.pop(); choices.delete('astrbot_plugin_manager')", context);
 

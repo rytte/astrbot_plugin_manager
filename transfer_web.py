@@ -268,7 +268,23 @@ class TransferWeb:
                     if size > MAX_ARCHIVE:
                         raise ValueError("上传文件超过 256 MiB 限制。")
                     await asyncio.to_thread(output.write, chunk)
-            return await self.transfers.prepare_import(job)
+            data = await self.transfers.prepare_import(job)
+            data["plugins"] = [dict(plugin, logo=None) for plugin in data["plugins"]]
+            for plugin in data["plugins"]:
+                try:
+                    path = safe_path(
+                        directory / "checked",
+                        f"payload/{plugin['directory']}/code/logo.png",
+                    )
+                    if path.is_file() and path.stat().st_nlink == 1:
+                        token = await self.transfers.operations.web.get_plugin_logo_token(
+                            str(path)
+                        )
+                        if token:
+                            plugin["logo"] = f"/api/file/{token}"
+                except (ValueError, OSError):
+                    pass
+            return data
         except Exception:
             job["status"] = "preparing"
             try:

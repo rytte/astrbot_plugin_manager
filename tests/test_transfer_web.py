@@ -727,11 +727,16 @@ async def test_asset_api_key_and_expired_credentials_cannot_access_files(
 
 
 @pytest.mark.parametrize("token_in_path", [False, True])
+@pytest.mark.parametrize("icon_state", ["present", "missing", "unavailable"])
 async def test_upload_preflight_and_private_downloads_are_owner_bound(
-    web_client, token_in_path
+    web_client, token_in_path, icon_state, monkeypatch
 ):
     env, client = web_client
     target = env.make_transfer_plugin()
+    logo = Path(env.manager.plugin_store_path) / target.root_dir_name / "logo.png"
+    icon = b"\x89PNG\r\n\x1a\npackage icon fixture"
+    if icon_state != "missing":
+        logo.write_bytes(icon)
     transfers = env.plugin.transfers
     rule = await transfers.save_rule(
         [{"directory": target.root_dir_name, "config": False, "data": False}]
@@ -745,13 +750,32 @@ async def test_upload_preflight_and_private_downloads_are_owner_bound(
     assert downloaded.status_code == 200
     assert downloaded.headers["content-type"].startswith("application/zip")
     assert downloaded.headers["cache-control"] == "no-store"
+    if icon_state == "unavailable":
+        monkeypatch.setattr(
+            env.plugin.service.web, "get_plugin_logo_token", AsyncMock(return_value=None)
+        )
+    elif icon_state == "present":
+        logo.write_bytes(b"\x89PNG\r\n\x1a\ncurrent instance icon")
     uploaded = await client.post(
         endpoint("upload/" + state["csrf"] if token_in_path else "upload"),
         params={} if token_in_path else {"csrf": state["csrf"]},
         files={"file": ("plugins.zip", downloaded.content, "application/zip")},
     )
     assert uploaded.status_code == 200, uploaded.text
-    assert uploaded.json()["data"]["plugins"][0]["name"] == target.name
+    preview = uploaded.json()["data"]
+    entry = preview["plugins"][0]
+    assert entry["name"] == target.name
+    assert str(logo) not in uploaded.text
+    assert "checked/payload" not in uploaded.text
+    assert "logo" not in transfers.get_job(preview["job"]["id"], "admin")["plan"][0]
+    if icon_state == "present":
+        assert entry["logo"].startswith("/api/file/")
+        image = await client.get(entry["logo"], headers={"Authorization": ""})
+        assert image.status_code == 200 and image.content == icon
+        assert image.headers["content-type"].startswith("image/png")
+        assert (await client.get(entry["logo"])).status_code == 404
+    else:
+        assert entry["logo"] is None
     env.manager.load.assert_not_awaited()
     other = jwt.encode(
         {"username": "other", "exp": time.time() + 3600},
