@@ -44,13 +44,16 @@ dd{margin:0;font-weight:600}
 :root[data-theme=dark] .primary{color:#132535}
 .secondary{background:var(--surface);border-color:var(--line);color:var(--text)}
 .secondary:not(:disabled):hover{background:var(--bg)}
-.full{width:100%;margin-bottom:10px}
+.full{width:100%}
 .guide{padding:16px 20px}
 .guide ol{list-style:none;margin:14px 0 0;padding:0}
 .guide li{padding:0 0 12px}
 .guide li:last-child{padding-bottom:0}
 .guide strong,.guide span{display:block;font-size:13px}
 .guide span{color:var(--muted);margin-top:3px}
+.export-limits dl{font-size:13px;margin:14px 0}
+.export-limits dd{white-space:nowrap}
+.export-limits p+p{margin-top:6px}
 summary{cursor:pointer;color:var(--text);font-size:14px;font-weight:600}
 summary::marker{color:var(--muted)}
 .help-details{border-top:1px solid var(--line);margin-top:18px;padding-top:14px}
@@ -130,6 +133,7 @@ tr.selected{background:var(--accent-bg)}
 .upload-box{display:flex;flex-direction:column;align-items:center;gap:9px;border:2px dashed var(--line);border-radius:12px;background:var(--bg);padding:35px 25px;text-align:center;cursor:pointer}
 .upload-box strong{font-size:17px}
 .upload-box>span{font-size:13px;color:var(--muted)}
+#file-label:empty{display:none}
 .upload-symbol{font-size:39px!important;color:var(--accent)!important;line-height:1}
 .upload-box input{max-width:100%;font-size:13px;margin:5px 0;color:var(--muted)}
 .section-heading{display:flex;align-items:center;justify-content:space-between;margin:24px 0 12px;gap:8px}
@@ -166,7 +170,6 @@ tr.selected{background:var(--accent-bg)}
 .delete-job-description{font-size:14px;color:var(--muted);margin-top:16px;overflow-wrap:anywhere}
 #delete-confirmation .dialog-actions{margin-top:24px;flex-wrap:wrap}
 .job-error{color:var(--danger);font-size:13px;overflow-wrap:anywhere;margin-top:8px}
-footer{display:flex;justify-content:space-between;color:var(--muted);font-size:11px;gap:15px;margin-top:25px}
 dialog{border:1px solid var(--line);border-radius:12px;max-width:600px;width:calc(100% - 36px);padding:28px;color:var(--text);background:var(--surface);box-shadow:0 20px 90px #0004}
 dialog::backdrop{background:#0b1c36a0;backdrop-filter:blur(3px)}
 body:has(dialog[open]){overflow:hidden}
@@ -210,8 +213,6 @@ dialog h2{margin:0 0 18px;font-size:22px}
 .tab{font-size:14px;padding-left:10px;padding-right:10px}
 .batch{gap:13px}
 .job-heading-main{gap:6px 8px}
-footer{display:block;text-align:center}
-footer span{display:block;margin-top:5px}
 }
 
 
@@ -289,7 +290,7 @@ footer span{display:block;margin-top:5px}
 .history-meta{font-size:12px;color:var(--muted);text-align:right;flex-shrink:0}
 #source-dialog .error{color:var(--danger)}
 
-@media(max-width:760px){.summary>.format-label,.summary>.format-select,.summary>#zip-summary,.summary>#manifest-summary,.summary>#export-hint{grid-column:1/-1}
+@media(max-width:760px){.summary>.format-label,.summary>.format-select,.summary>#zip-summary,.summary>#manifest-summary{grid-column:1/-1}
 .summary>#export{grid-column:1/-1}
 .format-select{font-size:14px}
 }

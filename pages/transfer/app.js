@@ -202,7 +202,7 @@ function renderUpdateSummary() {
   const checking = updateState.status === "running";
   elements["check-updates"].disabled = busy || requesting || checking || managementStatus !== "ready" || !managementState.csrf || !managementState.plugins.some(record => record.bindings.length);
   elements["check-updates"].textContent = checking ? "检查中…" : "检查更新";
-  let text = "手动检查全部已关联来源；在来源管理中查看各来源结果。";
+  let text = "";
   if (checking) text = "正在检查已关联来源：" + updateState.done + " / " + updateState.total;
   else if (updateState.status === "completed") {
     const currentUpdates = updateState.results.filter(result => result.is_current && result.status === "update_available").length;
@@ -210,6 +210,7 @@ function renderUpdateSummary() {
     text = "已检查 " + updateState.total + " 个关联来源 · 当前更新源有新版本：" + currentUpdates + " 个插件" + (errors ? " · 失败：" + errors + " 个来源" : "") + " · " + sourceTime(updateState.checked_at);
   } else if (updateState.status === "interrupted") text = updateState.error;
   elements["update-summary"].textContent = text;
+  elements["update-summary"].hidden = !text;
 }
 async function checkUpdates() {
   updateState = await managementPost("check-updates", {});
@@ -245,7 +246,7 @@ function renderFormats() {
   document.documentElement.dataset.exportFormat = isManifest ? "manifest" : "zip";
   elements["zip-summary"].hidden = isManifest;
   elements["manifest-summary"].hidden = !isManifest;
-  elements["export-hint"].textContent = isManifest ? "接收者可选择插件及安装来源；现有插件跳过。" : "按当前选择打包，读取导出时的实际内容。";
+  elements.export.title = isManifest ? "接收者可选择插件及安装来源；现有插件跳过。" : "按当前选择打包，读取导出时的实际内容。";
   const importingManifest = elements["import-format"].value === "manifest";
   elements["bundle-import"].hidden = importingManifest;
   elements["manifest-import"].hidden = !importingManifest;
@@ -336,13 +337,13 @@ function renderPlugins() {
     if (notice) title.append(notice);
     const dataCell = node("td"); dataCell.dataset.zipOnly = "";
     const dataCheck = checkbox("附带 " + plugin.name + " 的标准数据", choice.data, !choice.selected || !plugin.data_available || Boolean(plugin.blocked), checked => {choice.data = checked; renderSummary();});
-    dataCheck.append(document.createTextNode(plugin.data_available ? "标准数据" : "不可用"));
+    if (!plugin.data_available) dataCheck.append(document.createTextNode("不可用"));
     dataCell.append(dataCheck, node("div", "range-label", plugin.data_available ? "文件 " + statisticSize(plugin, "data_size") : "归属未知或自身数据"));
     dataCell.title = (plugin.ranges || []).join("\n");
     if (plugin.data_available) dataCell.title += (dataCell.title ? "\n" : "") + "键值存储：" + (Number.isFinite(plugin.kv_count) ? plugin.kv_count + " 条记录（随标准数据备份）" : plugin.statistics_status === "pending" ? "统计中…" : "未完成统计，请刷新状态重试。");
     const configCell = node("td"); configCell.dataset.zipOnly = "";
     const configCheck = checkbox("附带 " + plugin.name + " 的当前配置", choice.config, !choice.selected || !plugin.config_available || Boolean(plugin.blocked), checked => {choice.config = checked; renderSummary();});
-    configCheck.append(document.createTextNode(plugin.config_available ? "当前配置" : "无已保存配置"));
+    if (!plugin.config_available) configCheck.append(document.createTextNode("无已保存配置"));
     configCell.append(configCheck);
     const sizeCell = node("td", "numeric", statisticSize(plugin, "code_size")); sizeCell.dataset.zipOnly = "";
     sizeCell.title = plugin.statistics_error || plugin.blocked || "";
@@ -384,7 +385,8 @@ function renderSummary() {
   elements["config-count"].textContent = selected.filter(selection => selection.config).length + " 个";
   const sizes = selectedPlugins.flatMap(plugin => [plugin.code_size, ...(choices.get(plugin.directory).data ? [plugin.data_size] : []), ...(choices.get(plugin.directory).config ? [plugin.config_size] : [])]);
   elements["selected-size"].textContent = selectedPlugins.some(plugin => plugin.statistics_status === "pending") ? "统计中…" : sizes.every(Number.isFinite) && !selectedPlugins.some(plugin => ["failed", "unavailable"].includes(plugin.statistics_status)) ? formatSize(sizes.reduce((total, size) => total + size, 0)) : "暂不可用";
-  elements["rule-status"].textContent = state.rule.selections.length ? "已保存 " + state.rule.selections.length + " 个插件的规则" : "可保存常用选择，下次一键应用";
+  elements["rule-status"].textContent = state.rule.selections.length ? "已保存 " + state.rule.selections.length + " 个插件的规则" : "";
+  elements["rule-status"].hidden = !state.rule.selections.length;
   elements["rule-status"].title = state.rule.updated_at ? "保存于 " + new Date(state.rule.updated_at * 1000).toLocaleString("zh-CN") : "";
   elements["apply-rule"].disabled = busy || requesting || manifestMode() || !state.rule.selections.length;
   elements["save-rule"].disabled = busy || requesting || manifestMode() || !dirty;
@@ -873,7 +875,8 @@ function renderSource() {
   elements["source-current-kind"].textContent = sourceKind(current);
   elements["source-current-kind"].className = "source-type" + (current ? "" : " unbound");
   const summary = elements["source-summary"]; summary.replaceChildren();
-  summary.append(sourceAddress("source-current-value", current ? (current.kind === "market" ? current.market_plugin_id : current.repo_url) : "未绑定更新源"), node("p", "source-current-note", current ? "AstrBot 更新时使用此来源。" : imported ? "来源信息已从备份恢复，请在下方校验后设为更新源。" : "可在下方关联来源，并将其设为更新源。"));
+  summary.append(sourceAddress("source-current-value", current ? (current.kind === "market" ? current.market_plugin_id : current.repo_url) : "未绑定更新源"));
+  if (!current) summary.append(node("p", "source-current-note", imported ? "来源信息已从备份恢复，请在下方校验后设为更新源。" : "可在下方关联来源，并将其设为更新源。"));
   if (local.problem || record.identity_changed) summary.append(node("p", "plugin-error", local.problem || "目录身份已变化，旧来源记录已隔离。"));
   const notice = metadataNotice(local, record);
   if (notice) summary.append(notice);
@@ -943,7 +946,7 @@ async function exportManifest() {
 }
 function manifestPreviewExpired() {return manifestPreview && Date.now() / 1000 > manifestPreview.expires_at;}
 function renderManifestDraftStatus() {
-  elements["manifest-selection-status"].textContent = manifestPreviewExpired() ? "预检已过期，请从任务记录重新预检。" : manifestDraftSaving ? "正在保存选择…" : manifestDraftError ? "选择尚未保存，请重试；保存后才能安装。" : "选择会自动保存，刷新页面后可继续。";
+  elements["manifest-selection-status"].textContent = manifestPreviewExpired() ? "预检已过期，请从任务记录重新预检。" : manifestDraftSaving ? "正在保存选择…" : manifestDraftError ? "选择尚未保存，请重试；保存后才能安装。" : manifestPreview?.draft ? "选择已保存" : "修改选择后自动保存";
   elements["retry-manifest-draft"].hidden = !manifestDraftError || manifestPreviewExpired();
   elements["retry-manifest-draft"].disabled = requesting || manifestDraftSaving;
 }
@@ -981,7 +984,9 @@ function saveManifestDraft() {
   manifestDraftSaving = true; manifestDraftError = false; renderSummary();
   const operation = manifestDraftQueue.then(() => managementPost("manifest-draft", {id: identifier, draft}));
   manifestDraftQueue = operation.catch(() => {});
-  return operation.catch(error => {
+  return operation.then(() => {
+    if (version === manifestDraftVersion && manifestPreview?.job.id === identifier) manifestPreview.draft = draft;
+  }).catch(error => {
     if (version === manifestDraftVersion && manifestPreview?.job.id === identifier) {
       manifestDraftError = true;
       message(error.message || "安装选择保存失败，请重试。", true);
@@ -1056,7 +1061,8 @@ function renderManifest() {
       return saveManifestDraft();
     });
     locator.append(select, sourceAddress("plugin-detail manifest-locator", source.kind === "market" ? plugin.market_plugin_id : plugin.repo_url));
-    status.append(node("div", source.status === "blocked" ? "plugin-error" : "plugin-detail", {install: "可安装 · 自动加载", skip: "本机已有 · 跳过", blocked: "无法安装"}[source.status]), node("div", "plugin-detail", source.problem || "由 AstrBot 处理依赖并加载插件"));
+    status.append(node("div", source.status === "blocked" ? "plugin-error" : "plugin-detail", {install: "可安装 · 自动加载", skip: "本机已有 · 跳过", blocked: "无法安装"}[source.status]));
+    if (source.problem) status.append(node("div", "plugin-detail", source.problem));
     row.append(choice, title, locator, status); body.append(row);
   }
   const warnings = manifestPreview.job.warnings || [];
@@ -1101,7 +1107,7 @@ function bindManagementEvents() {
   elements["install-manifest"].addEventListener("click", () => runRequest(async () => {
     if (!manifestPreview || manifestDraftSaving || manifestDraftError || manifestPreviewExpired() || !installChoices.size) return;
     const selected = manifestPreview.plugins.filter(plugin => installChoices.has(plugin.id));
-    if (!await confirmOperation("安装 " + selected.length + " 个新插件", selected.map(plugin => {const source = selectedManifestSource(plugin); return {...source, display_name: plugin.display_name, description: (source.kind === "market" ? "官方市场 · " + plugin.market_plugin_id : "代码仓库 · " + plugin.repo_url) + " · 预览版本 " + source.version};}), "与 /pm add 使用相同安装流程，由 AstrBot 下载安装包、处理依赖并加载插件，会执行插件代码。清单不锁定版本，实际版本以安装结果为准。已有插件不覆盖；单项失败会记录结果，请在 WebUI 检查可能留下的变更。")) return;
+    if (!await confirmOperation("安装 " + selected.length + " 个新插件", selected.map(plugin => {const source = selectedManifestSource(plugin); return {...source, display_name: plugin.display_name, description: (source.kind === "market" ? "官方市场 · " + plugin.market_plugin_id : "代码仓库 · " + plugin.repo_url) + " · 预览版本 " + source.version};}), "由 AstrBot 下载安装包、处理依赖并加载插件，会执行插件代码。清单不锁定版本，实际版本以安装结果为准。已有插件不覆盖；单项失败会记录结果，请在 WebUI 检查可能留下的变更。")) return;
     await managementPost("manifest-install", {id: manifestPreview.job.id, selections: selected.map(plugin => ({id: plugin.id, source: selectedManifestSource(plugin).kind})), acknowledged: true});
     clearManifestPreview(); busy = true;
     showTab("history-panel"); await pollJobs(); message("清单安装任务已启动，请在任务记录查看逐项结果。", false, {task: true});
