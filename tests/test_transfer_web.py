@@ -821,6 +821,57 @@ def management_endpoint(action):
     return "/api/v1/plugins/extensions/astrbot_plugin_manager/manage/" + action
 
 
+async def test_pending_load_route_requires_auth_nonce_and_confirmation(web_client):
+    env, client = web_client
+    target = env.make_transfer_plugin(active=False)
+    env.owners.pop(target.module_path)
+    state = (await client.get(management_endpoint("state"))).json()["data"]
+    record = next(
+        item for item in state["plugins"] if item["local"]["directory"] == target.root_dir_name
+    )
+    body = {
+        "csrf": "wrong",
+        "directory": target.root_dir_name,
+        "revision": record["revision"],
+        "acknowledged": True,
+    }
+    route = management_endpoint("load-plugin")
+    assert (await client.post(route, json=body)).status_code == 403
+    body["csrf"] = state["csrf"]
+    body["acknowledged"] = False
+    assert (await client.post(route, json=body)).status_code == 400
+    body["acknowledged"] = True
+    assert (
+        await client.post(route, json={**body, "unexpected": True})
+    ).status_code == 400
+    assert (
+        await client.post(route, json=body, headers={"Authorization": ""})
+    ).status_code in {401, 403}
+    assert not env.plugin.transfers.jobs
+    env.manager.load.assert_not_awaited()
+
+    async def load(*, specified_dir_name):
+        assert specified_dir_name == target.root_dir_name
+        target.activated = True
+        target.star_cls = object()
+        env.owners[target.module_path] = target
+        return True, None
+
+    env.manager.load.side_effect = load
+    result = await client.post(route, json=body)
+    assert result.status_code == 200, result.text
+    started = result.json()["data"]
+    assert started["kind"] == "plugin_load"
+    assert "load_plan" not in started
+    await env.plugin.transfers.task
+    final = (await client.get(management_endpoint("state"))).json()["data"]
+    assert final["jobs"][0]["status"] == "completed"
+    assert final["jobs"][0]["results"][0]["message"] == "已加载并启用"
+    assert next(
+        item for item in final["plugins"] if item["local"]["directory"] == target.root_dir_name
+    )["local"]["status"] == "enabled"
+
+
 async def test_manual_update_routes_auth_csrf_owner_and_job(web_client, monkeypatch):
     env, client = web_client
     target = env.make_transfer_plugin(active=False)

@@ -619,7 +619,7 @@ class RecoveryService:
                                 "message": "已移除新增代码并还原所选组件。"
                                 if selection["code"]
                                 and not original["components"]["code"]
-                                else "已还原所选内容并保持停用；重启 AstrBot 后在 WebUI 手动启用。",
+                                else "已还原所选内容并保持停用；可点击「待加载」确认加载启用，或重启 AstrBot 后在 WebUI 手动启用。",
                             }
                         )
                         job["reload_required"] = True

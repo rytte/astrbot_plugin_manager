@@ -65,6 +65,7 @@ async function main() {
   let delayedPreview, failPreview = false;
   let manifestResponse = null, failDraft = false;
   let updateRequests = 0, failUpdate = false;
+  let failLoad = false;
   let failRecovery = false;
   const recoveryResponse = {job: {id: "recovery-id", source_id: "zip-in", kind: "rollback", status: "preview", created_at: 100, phase: "还原预检完成", results: [], warnings: [], expired: false}, expires_at: 2000000000, plugins: [{directory: "demo_dir", name: "demo", display_name: "示例插件", components: {code: "replace", config: "remove", data: "replace"}, problem: ""}]};
   const bridge = {
@@ -114,6 +115,15 @@ async function main() {
         state.jobs.unshift(job); state.busy = true;
         management.updates.results[0].status = "updating";
         management.updates.results[0].can_update = false;
+        return structuredClone(job);
+      }
+      if (endpoint === "manage/load-plugin") {
+        if (failLoad) throw new Error("插件信息或状态已变化，请刷新列表后重新确认加载。");
+        assert.equal(body.directory, "pending_dir");
+        assert.equal(body.revision, "pending-r1");
+        assert.equal(body.acknowledged, true);
+        const job = {id: "load-job", kind: "plugin_load", status: "running", created_at: 100, phase: "正在加载", results: [], warnings: [], expired: false};
+        state.jobs.unshift(job); state.busy = true;
         return structuredClone(job);
       }
       if (endpoint === "transfer/delete-job") {
@@ -930,5 +940,51 @@ async function main() {
   assert.deepEqual(JSON.parse(JSON.stringify(restorePost.body.selections)), [{directory: "demo_dir", code: true, config: false, data: true}]);
   assert.match(elements["job-list"].textContent, /还原到导入前/);
   assert.equal(restoreAction().disabled, true);
+
+  // A pending chip is an accessible action; confirmation never loads on cancel.
+  state.busy = false; state.jobs = [];
+  const pendingRecord = structuredClone(record);
+  pendingRecord.local = {...record.local, name: "pending", directory: "pending_dir", status: "pending", problem: "", reserved: false};
+  pendingRecord.revision = "pending-r1"; pendingRecord.identity_changed = false;
+  const pendingPlugin = {...plugin, ...pendingRecord.local, plugin_id: "Alice/pending", blocked: "", logo: null};
+  state.plugins = [pendingPlugin]; management.plugins = [pendingRecord];
+  await refresh();
+  const pendingChip = () => descendants(elements["plugin-list"]).find(element => element.tagName === "button" && element.textContent === "待加载");
+  assert.ok(pendingChip());
+  assert.equal(pendingChip().disabled, false);
+  assert.match(pendingChip().attributes["aria-label"], /加载并启用/);
+  vm.runInContext("managementStatus = 'loading'; renderPlugins()", context);
+  assert.equal(pendingChip().disabled, true);
+  vm.runInContext("managementStatus = 'ready'; busy = true; renderPlugins()", context);
+  assert.equal(pendingChip().disabled, true);
+  vm.runInContext("busy = false; renderPlugins()", context);
+  const cancelledLoad = pendingChip().trigger("click"); await settle();
+  assert.equal(elements.confirmation.open, true);
+  assert.match(elements["confirmation-title"].textContent, /加载插件/);
+  assert.match(elements["confirmation-notices"].textContent, /启用.*执行插件代码/);
+  assert.equal(pendingChip().disabled, true);
+  await elements["confirmation-form"].trigger("submit");
+  assert.ok(!posts.some(item => item.endpoint === "manage/load-plugin"));
+  await elements["confirmation-cancel"].trigger("click"); await cancelledLoad;
+  assert.ok(!posts.some(item => item.endpoint === "manage/load-plugin"));
+  failLoad = true;
+  const rejectedLoad = pendingChip().trigger("click"); await settle();
+  elements.acknowledged.checked = true;
+  await elements["confirmation-form"].trigger("submit"); await rejectedLoad;
+  assert.match(elements.message.textContent, /状态已变化/);
+  assert.equal(pendingChip().disabled, false);
+  failLoad = false;
+  const loading = pendingChip().trigger("click"); await settle();
+  elements.acknowledged.checked = true;
+  await elements["confirmation-form"].trigger("submit"); await loading;
+  assert.equal(pendingChip().disabled, true);
+  assert.match(elements["job-list"].textContent, /加载插件/);
+  state.busy = false; state.jobs[0].status = "completed";
+  state.jobs[0].results.push({directory: "pending_dir", status: "enabled", message: "已加载并启用"});
+  pendingRecord.local.status = "enabled"; pendingPlugin.status = "enabled";
+  await vm.runInContext("pollJobs()", context); await settle();
+  assert.ok(!pendingChip());
+  assert.match(elements["plugin-list"].textContent, /已打开/);
+  assert.match(elements.message.textContent, /已加载并启用/);
 }
 main().catch(error => {console.error(error); process.exitCode = 1;});

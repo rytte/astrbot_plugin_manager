@@ -18,6 +18,7 @@ from astrbot.dashboard.services.plugin_service import (
     PluginServiceWarning,
 )
 
+from .loading import PluginLoadService
 from .management_web import ManagementWeb
 from .manager_data import ManagerDataService
 from .manifests import ManifestService
@@ -84,6 +85,7 @@ class Main(Star):
         self.manifests = ManifestService(self.sources, self.transfers)
         self.transfers.manager_data = ManagerDataService(self.sources, self.transfers)
         self.updates = UpdateService(self.sources, self.transfers)
+        self.loading = PluginLoadService(self.sources, self.transfers)
         self.chat_updates = UpdateService(self.sources, self.transfers)
         self.management_web = ManagementWeb(
             context,
@@ -91,6 +93,7 @@ class Main(Star):
             self.sources,
             self.manifests,
             self.updates,
+            self.loading,
         )
 
     async def initialize(self) -> None:

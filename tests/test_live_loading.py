@@ -235,6 +235,95 @@ class Main(Star):
     assert not env.model_calls
 
 
+@pytest.mark.parametrize("was_inactive", [False, True])
+async def test_pending_load_initializes_only_the_confirmed_plugin(
+    live_env, was_inactive
+):
+    env = live_env
+    env.plugin.transfers.manager = env.live_manager
+    directory = env.live_root / "reload_probe"
+    directory.mkdir()
+    (directory / "metadata.yaml").write_text(
+        "name: reload_probe\nauthor: Probe\ndesc: Pending probe\nversion: 1.0.0\n",
+        encoding="utf-8",
+    )
+    (directory / "main.py").write_text(
+        """from astrbot.api.star import Star
+class Main(Star):
+    def __init__(self, context):
+        self.context = context
+    async def initialize(self):
+        self.initialized = True
+""",
+        encoding="utf-8",
+    )
+    other = env.live_root / "other_pending"
+    other.mkdir()
+    (other / "main.py").write_text(
+        "raise RuntimeError('unselected plugin must not load')\n", encoding="utf-8"
+    )
+    env.live_modules.extend(
+        [
+            {"pname": "reload_probe", "module": "main"},
+            {"pname": "other_pending", "module": "main"},
+        ]
+    )
+    module_path = "data.plugins.reload_probe.main"
+    env.prefs["inactivated_plugins"] = ["data.plugins.other.main"] + (
+        [module_path] if was_inactive else []
+    )
+    record = await env.plugin.sources.detail("reload_probe")
+    started = await env.plugin.loading.start(
+        "admin", "reload_probe", record["revision"], True
+    )
+    await env.plugin.transfers.task
+    job = env.plugin.transfers.get_job(started["id"], "admin")
+    assert job["status"] == "completed", job
+    current = env.context.get_registered_star("reload_probe")
+    assert current.activated and current.star_cls.initialized
+    assert env.prefs["inactivated_plugins"] == ["data.plugins.other.main"]
+    assert not env.context.get_registered_star("other_pending")
+    assert "other_pending" not in env.live_manager.failed_plugin_dict
+    assert (await env.plugin.sources.detail("reload_probe"))["local"]["status"] == "enabled"
+    env.sync.assert_awaited_once()
+
+
+async def test_pending_load_reports_real_core_initialization_failure(live_env):
+    env = live_env
+    env.plugin.transfers.manager = env.live_manager
+    directory = env.live_root / "reload_probe"
+    directory.mkdir()
+    (directory / "metadata.yaml").write_text(
+        "name: reload_probe\nauthor: Probe\ndesc: Failing probe\nversion: 1.0.0\n",
+        encoding="utf-8",
+    )
+    (directory / "main.py").write_text(
+        """from astrbot.api.star import Star
+class Main(Star):
+    def __init__(self, context):
+        pass
+    async def initialize(self):
+        raise RuntimeError("probe initialization failed")
+""",
+        encoding="utf-8",
+    )
+    module_path = "data.plugins.reload_probe.main"
+    env.prefs["inactivated_plugins"] = [module_path]
+    env.live_modules.append({"pname": "reload_probe", "module": "main"})
+    record = await env.plugin.sources.detail("reload_probe")
+    started = await env.plugin.loading.start(
+        "admin", "reload_probe", record["revision"], True
+    )
+    await env.plugin.transfers.task
+    job = env.plugin.transfers.get_job(started["id"], "admin")
+    assert job["status"] == "failed"
+    assert "probe initialization failed" in job["error"]
+    assert module_path in env.prefs["inactivated_plugins"]
+    assert not env.context.get_registered_star("reload_probe")
+    assert (await env.plugin.sources.detail("reload_probe"))["local"]["status"] == "failed"
+    env.sync.assert_not_awaited()
+
+
 @pytest.mark.parametrize("active", [True, False])
 @pytest.mark.parametrize("source_kind", ["market", "repository"])
 @pytest.mark.parametrize("author_declaration", ["Probe", "Probe, Coauthor"])

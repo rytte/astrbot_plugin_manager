@@ -1581,7 +1581,7 @@ class TransferService:
                             {
                                 "directory": plugin["directory"],
                                 "status": "restored",
-                                "message": "已恢复到磁盘并保持停用；重启 AstrBot 后在 WebUI 手动启用。",
+                                "message": "已恢复到磁盘并保持停用；可点击「待加载」确认加载启用，或重启 AstrBot 后在 WebUI 手动启用。",
                             }
                         )
                         job["reload_required"] = True

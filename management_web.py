@@ -26,11 +26,12 @@ from .transfer_web import TransferWeb
 
 
 class ManagementWeb(TransferWeb):
-    def __init__(self, context, transfers, sources, manifests, updates) -> None:
+    def __init__(self, context, transfers, sources, manifests, updates, loading) -> None:
         super().__init__(context, transfers)
         self.sources = sources
         self.manifests = manifests
         self.updates = updates
+        self.loading = loading
 
     def register(self) -> None:
         for action, method in {
@@ -42,6 +43,7 @@ class ManagementWeb(TransferWeb):
             "check-updates": "POST",
             "updates": "GET",
             "update-plugin": "POST",
+            "load-plugin": "POST",
             "manifest-export": "POST",
             "manifest-download": "GET",
             "manifest-upload": "POST",
@@ -131,6 +133,11 @@ class ManagementWeb(TransferWeb):
                 if action == "check-updates":
                     exact_keys(body, {"csrf"})
                     data = await self.updates.start_check(owner)
+                elif action == "load-plugin":
+                    exact_keys(body, {"csrf", "directory", "revision", "acknowledged"})
+                    data = await self.loading.start(
+                        owner, body["directory"], body["revision"], body["acknowledged"]
+                    )
                 elif action == "update-plugin":
                     exact_keys(
                         body,

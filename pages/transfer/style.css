@@ -322,6 +322,10 @@ dialog h2{margin:0 0 18px;font-size:22px}
 
 /* Match the official plugin card's x-small tonal status chips. */
 .plugin-status{display:inline-flex;align-items:center;gap:4px;flex-shrink:0;height:18px;padding:0 6px;border-radius:9px;font-size:13px;font-weight:400;line-height:1;white-space:nowrap;color:var(--muted);background:var(--bg)}
+button.plugin-status{border:0;font-family:inherit;cursor:pointer}
+button.plugin-status:hover:not(:disabled){filter:brightness(.9)}
+button.plugin-status:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button.plugin-status:disabled{cursor:default;opacity:.55}
 .plugin-status-icon{display:block;width:14px;height:14px;flex-shrink:0;background:currentColor;mask:var(--status-icon) center/contain no-repeat}
 .plugin-status.enabled{color:rgb(var(--success-rgb));background:rgba(var(--success-rgb),.12);--status-icon:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20M10 17l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8z'/%3E%3C/svg%3E")}
 .plugin-status.disabled{background:color-mix(in srgb,var(--text) 8%,transparent);--status-icon:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20m0 2a8 8 0 1 1 0 16 8 8 0 0 1 0-16m-3.59 3L7 8.41 10.59 12 7 15.59 8.41 17 12 13.41 15.59 17 17 15.59 13.41 12 17 8.41 15.59 7 12 10.59z'/%3E%3C/svg%3E")}

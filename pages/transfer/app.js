@@ -232,6 +232,17 @@ async function updatePlugin(record, binding, result) {
   message("插件更新任务已启动，可在任务记录中查看结果。", false, {task: true});
   await pollJobs();
 }
+async function loadPlugin(plugin) {
+  const record = sourceRecord(plugin.directory);
+  if (!record || managementStatus !== "ready" || record.local.status !== "pending") throw new Error("插件信息或状态已变化，请刷新列表后重试。");
+  const revision = record.revision;
+  if (!await confirmOperation("确认加载插件", [{...plugin, description: "加载并启用"}], "将通过 AstrBot 加载并启用该插件，会执行插件代码；必要时由 AstrBot 处理依赖。请确认信任此插件。")) return;
+  const job = await managementPost("load-plugin", {directory: plugin.directory, revision, acknowledged: true});
+  busy = previousBusy = true;
+  renderJobs([job, ...displayedJobs.filter(previous => previous.id !== job.id)]);
+  message("插件加载任务已启动，可在任务记录中查看结果。", false, {task: true});
+  await pollJobs();
+}
 function metadataNotice(plugin, record) {
   const changed = record && managementStatus === "ready" ? record.metadata_changed : plugin.metadata_changed;
   if (!changed) return null;
@@ -279,11 +290,19 @@ function titleCell(plugin, showIcon = false, iconKey = plugin.directory) {
   heading.append(node("span", "plugin-title", plugin.display_name || plugin.name));
   const statuses = {enabled: "已打开", disabled: "已关闭", failed: "加载失败", pending: "待加载"};
   if (statuses[plugin.status]) {
-    const status = node("span", "plugin-status " + plugin.status);
+    const record = sourceRecord(plugin.directory);
+    const status = plugin.status === "pending"
+      ? button("", () => loadPlugin(plugin), managementStatus !== "ready" || !managementState.csrf || !record || record.local.status !== "pending" || record.identity_changed || Boolean(record.local.problem) || Boolean(plugin.blocked) || plugin.reserved)
+      : node("span");
+    status.className = "plugin-status " + plugin.status;
+    if (plugin.status === "pending") {
+      status.type = "button";
+      status.setAttribute("aria-label", "加载并启用 " + (plugin.display_name || plugin.name));
+      status.title = "点击加载并启用插件";
+    }
     const icon = node("span", "plugin-status-icon");
     icon.setAttribute("aria-hidden", "true");
     status.append(icon, document.createTextNode(statuses[plugin.status]));
-    if (plugin.status === "pending") status.title = "需要重启 AstrBot 扫描插件";
     heading.append(status);
   }
   const metadata = node("div", "plugin-meta");
@@ -671,7 +690,7 @@ async function downloadJob(job, kind) {
 }
 
 function confirmJobDeletion(job) {
-  const labels = {export: "导出插件包", import: "导入插件包", rollback: "还原到导入前", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件"};
+  const labels = {export: "导出插件包", import: "导入插件包", rollback: "还原到导入前", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件", plugin_load: "加载插件"};
   elements["delete-job-title"].textContent = (job.name ? job.name + " · " : "") + (labels[job.kind] || job.kind) + " · " + job.id.slice(0, 8);
   elements["delete-job-time"].textContent = new Date(job.created_at * 1000).toLocaleString("zh-CN");
   elements["delete-recovery-warning"].hidden = !job.backup_ready && !["interrupted", "rollback_failed"].includes(job.status);
@@ -739,7 +758,7 @@ function renderJobs(jobs) {
     const card = node("article", "job-card");
     const heading = node("div", "job-heading");
     const title = node("div", "job-heading-main");
-    const taskLabel = job.preview_task && ["queued", "running"].includes(job.status) ? "清单预检" : ({export: "导出插件包", import: "导入插件包", rollback: "还原到导入前", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件"}[job.kind] || job.kind);
+    const taskLabel = job.preview_task && ["queued", "running"].includes(job.status) ? "清单预检" : ({export: "导出插件包", import: "导入插件包", rollback: "还原到导入前", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件", plugin_load: "加载插件"}[job.kind] || job.kind);
     title.append(node("span", "job-title", (job.name ? job.name + " · " : "") + taskLabel), node("span", "pill job-status " + (job.preview_expired ? "expired" : job.status), job.preview_expired ? "预检已过期" : labels[job.status] || job.status));
     const menu = node("div", "job-menu");
     const toggle = node("button", "job-menu-toggle", "⋯");
@@ -902,7 +921,7 @@ function bindEvents() {
   }));
   elements["execute-import"].addEventListener("click", () => runRequest(async () => {
     const selected = Array.from(importChoices, ([directory, choice]) => ({directory, ...choice})).filter(choice => choice.code || choice.config || choice.data);
-    const accepted = await confirmOperation("确认恢复所选内容", selected.map(choice => {const plugin = preview.plugins.find(entry => entry.directory === choice.directory); return {...plugin, description: [choice.code && "替换代码", choice.config && "整体替换配置", choice.data && (plugin.manager_data ? "合并来源关联 + 替换导出规则" : "整体替换标准数据 / KV")].filter(Boolean).join(" + ")};}), "恢复前强制备份当前受影响内容。空数据也会清空目标数据，不做合并。一个插件失败会停止后续恢复。普通插件导入后保持停用，需要重启 AstrBot 后手动启用。管家仅合并来源关联、替换导出规则；新关联待校验，未安装或身份不匹配的来源项会跳过并提示，当前更新源保持不变。");
+    const accepted = await confirmOperation("确认恢复所选内容", selected.map(choice => {const plugin = preview.plugins.find(entry => entry.directory === choice.directory); return {...plugin, description: [choice.code && "替换代码", choice.config && "整体替换配置", choice.data && (plugin.manager_data ? "合并来源关联 + 替换导出规则" : "整体替换标准数据 / KV")].filter(Boolean).join(" + ")};}), "恢复前强制备份当前受影响内容。空数据也会清空目标数据，不做合并。一个插件失败会停止后续恢复。普通插件导入后保持停用，可点击「待加载」确认加载启用，或重启 AstrBot 后手动启用。管家仅合并来源关联、替换导出规则；新关联待校验，未安装或身份不匹配的来源项会跳过并提示，当前更新源保持不变。");
     if (!accepted) return;
     await post("import", {id: preview.job.id, selections: selected, acknowledged: true});
     preview = null;
@@ -935,7 +954,8 @@ async function pollJobs() {
     await loadState(true);
     const failed = finishedJobs.find(job => ["failed", "rollback_failed", "interrupted"].includes(job.status));
     const checked = finishedJobs.find(job => job.preview_task && job.status === "preview");
-    message(failed ? "任务执行未完成：" + (failed.error || "请查看任务记录中的原因和处理结果。") : checked ? "清单预检完成，可继续选择插件及安装来源。" : "任务已结束，请查看任务记录、下载文件或按提示处理警告。", Boolean(failed), {task: true});
+    const loaded = finishedJobs.find(job => job.kind === "plugin_load" && job.status === "completed");
+    message(failed ? "任务执行未完成：" + (failed.error || "请查看任务记录中的原因和处理结果。") : checked ? "清单预检完成，可继续选择插件及安装来源。" : loaded ? "插件已加载并启用。" : "任务已结束，请查看任务记录、下载文件或按提示处理警告。", Boolean(failed), {task: true});
   }
   if (busy !== previousBusy) renderPlugins();
   if (selectedRecord) await loadManagement();
