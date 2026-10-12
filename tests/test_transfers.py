@@ -4,14 +4,17 @@ import asyncio
 import copy
 import json
 import shutil
+import sqlite3
 import time
 import zipfile
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
+from astrbot_plugin_manager import transfer_bundle as bundle
 from astrbot_plugin_manager.sources import SourceService
 from astrbot_plugin_manager.transfer_bundle import (
     load_json,
@@ -305,6 +308,90 @@ async def test_export_rechecks_files_after_page_statistics(transfer_env):
     assert job["status"] == "failed"
     assert "硬链接" in job["error"]
     assert not (transfers.job_directory(job["id"]) / "package.zip").exists()
+
+
+@pytest.mark.parametrize("kind", ["code", "data"])
+@pytest.mark.parametrize("disappear", [False, True])
+async def test_export_change_error_identifies_plugin_component_and_path(
+    transfer_env, monkeypatch, caplog, kind, disappear
+):
+    env = transfer_env
+    target = env.make_transfer_plugin(active=True)
+    transfers = env.plugin.transfers
+    if kind == "code":
+        root = transfers.code_root / target.root_dir_name
+        expected_directory = f"plugins/{target.root_dir_name}/"
+        expected_component = "代码目录"
+    else:
+        root = transfers.data_root / target.name
+        root.mkdir()
+        expected_directory = f"plugin_data/{target.name}/"
+        expected_component = "标准数据目录"
+    changing = root / "session.json"
+    changing.write_text("before", encoding="utf-8")
+    original_copy = bundle.shutil.copyfile
+
+    def change_during_copy(path, destination):
+        if path == changing and disappear:
+            changing.unlink()
+        original_copy(path, destination)
+        if path == changing:
+            changing.write_text("after modification", encoding="utf-8")
+
+    monkeypatch.setattr(bundle.shutil, "copyfile", change_during_copy)
+    rule = await transfers.save_rule(
+        [{"directory": target.root_dir_name, "config": False, "data": True}]
+    )
+    started = await transfers.start_export("admin", rule["updated_at"], True)
+    await transfers.task
+    job = transfers.get_job(started["id"], "admin")
+    assert job["status"] == "failed"
+    assert f"插件 {target.name}（目录 {target.root_dir_name}）" in job["error"]
+    assert expected_component in job["error"]
+    assert expected_directory in job["error"]
+    assert "session.json" in job["error"]
+    assert ("路径消失" if disappear else "修改：session.json") in job["error"]
+    assert job["error"] in caplog.text
+    job_directory = transfers.job_directory(job["id"])
+    assert load_json(job_directory / "job.json")["error"] == job["error"]
+    assert not (job_directory / "package.zip").exists()
+    assert env.owners[target.module_path].activated
+    assert env.actions == ["terminate", "unbind", "load"]
+
+
+async def test_export_closed_wal_database_with_media_restores_enabled_plugin(
+    transfer_env,
+):
+    env = transfer_env
+    target = env.make_transfer_plugin(
+        name="astrbot_plugin_custom_plan",
+        directory="astrbot_plugin_custom_plan",
+        active=True,
+    )
+    transfers = env.plugin.transfers
+    data = transfers.data_root / target.name
+    (data / "media").mkdir(parents=True)
+    (data / "media" / "image.png").write_bytes(b"saved image")
+    with closing(sqlite3.connect(data / "plans.sqlite3")) as database:
+        database.execute("PRAGMA journal_mode=WAL")
+        database.execute("CREATE TABLE plans(media TEXT)")
+        database.execute("INSERT INTO plans VALUES ('image.png')")
+        database.commit()
+    assert not (data / "plans.sqlite3-wal").exists()
+    assert not (data / "plans.sqlite3-shm").exists()
+
+    package = await export_package(env, target, data=True)
+    stage = env.root / "wal-export"
+    unpack(package, stage)
+    archived_data = stage / "payload" / target.root_dir_name / "data"
+    with closing(sqlite3.connect(archived_data / "plans.sqlite3")) as snapshot:
+        assert snapshot.execute("SELECT media FROM plans").fetchone() == ("image.png",)
+        assert snapshot.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    assert (archived_data / "media" / "image.png").read_bytes() == b"saved image"
+    assert not (archived_data / "plans.sqlite3-wal").exists()
+    assert not (archived_data / "plans.sqlite3-shm").exists()
+    assert env.owners[target.module_path].activated
+    assert env.actions == ["terminate", "unbind", "load"]
 
 
 @pytest.mark.parametrize("active", [False, True])

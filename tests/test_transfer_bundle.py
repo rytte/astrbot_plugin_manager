@@ -4,6 +4,7 @@ import json
 import sqlite3
 import stat
 import zipfile
+from contextlib import closing
 
 import pytest
 from astrbot_plugin_manager import transfer_bundle as bundle
@@ -103,6 +104,175 @@ def test_database_snapshot_includes_committed_wal_data_and_empty_directories(tmp
         assert not (tmp_path / "snapshot" / "state.db-wal").exists()
     finally:
         database.close()
+
+
+def test_closed_wal_database_backup_can_create_source_sidecars(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    path = source / "plans.sqlite3"
+    with closing(sqlite3.connect(path)) as database:
+        database.execute("PRAGMA journal_mode=WAL")
+        database.execute("CREATE TABLE plans(value TEXT)")
+        database.execute("INSERT INTO plans VALUES ('saved plan')")
+        database.commit()
+    assert {file.name for file in source.iterdir()} == {"plans.sqlite3"}
+    (source / "media").mkdir()
+    (source / "media" / "image.png").write_bytes(b"saved media")
+
+    destination = tmp_path / "snapshot"
+    bundle.copy_tree(source, destination)
+
+    with closing(sqlite3.connect(destination / path.name)) as snapshot:
+        assert snapshot.execute("SELECT value FROM plans").fetchone() == ("saved plan",)
+        assert snapshot.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    assert (destination / "media" / "image.png").read_bytes() == b"saved media"
+    assert not (destination / "plans.sqlite3-wal").exists()
+    assert not (destination / "plans.sqlite3-shm").exists()
+
+
+@pytest.mark.parametrize("media_name", ["a_media.txt", "z_media.txt"])
+def test_wal_commit_during_snapshot_is_rejected_even_when_main_file_is_unchanged(
+    tmp_path, monkeypatch, media_name
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    path = source / "plans.sqlite3"
+    (source / media_name).write_text("unchanged", encoding="utf-8")
+    original_copy = bundle.shutil.copyfile
+    with closing(sqlite3.connect(path)) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE plans(value TEXT)")
+        writer.execute("INSERT INTO plans VALUES ('before')")
+        writer.commit()
+        initial_stamp = next(
+            entry for entry in bundle.stamp(source) if entry[0] == path.name
+        )
+
+        def copy_then_commit(file, target):
+            original_copy(file, target)
+            writer.execute("INSERT INTO plans VALUES ('concurrent write')")
+            writer.commit()
+
+        monkeypatch.setattr(bundle.shutil, "copyfile", copy_then_commit)
+        with pytest.raises(ValueError, match="修改：plans.sqlite3"):
+            bundle.copy_tree(source, tmp_path / "snapshot")
+        final_stamp = next(
+            entry for entry in bundle.stamp(source) if entry[0] == path.name
+        )
+        assert initial_stamp == final_stamp
+
+
+@pytest.mark.parametrize("relative", ["media/image.png", "orphan.sqlite3-wal"])
+def test_ordinary_files_and_unassociated_wal_files_still_reject_changes(
+    tmp_path, monkeypatch, relative
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    with closing(sqlite3.connect(source / "plans.sqlite3")) as database:
+        database.execute("PRAGMA journal_mode=WAL")
+        database.execute("CREATE TABLE plans(value TEXT)")
+        database.commit()
+    changed = source / relative
+    changed.parent.mkdir(exist_ok=True)
+    changed.write_bytes(b"before")
+    original_copy = bundle.shutil.copyfile
+
+    def copy_then_change(path, target):
+        original_copy(path, target)
+        if path == changed:
+            changed.write_bytes(b"after modification")
+
+    monkeypatch.setattr(bundle.shutil, "copyfile", copy_then_change)
+    with pytest.raises(ValueError) as caught:
+        bundle.copy_tree(source, tmp_path / "snapshot")
+    assert f"修改：{relative}" in str(caught.value)
+
+
+def test_snapshot_reports_added_deleted_and_modified_relative_paths(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "cache").mkdir()
+    (source / "cache" / "old.json").write_text("old", encoding="utf-8")
+    (source / "empty").mkdir()
+    (source / "state.json").write_text("before", encoding="utf-8")
+    (source / "z_keep.txt").write_text("unchanged", encoding="utf-8")
+    original_copy = bundle.shutil.copyfile
+
+    def copy_then_change(path, target):
+        original_copy(path, target)
+        if path.name == "z_keep.txt":
+            (source / "state.json").write_text("after modification", encoding="utf-8")
+            (source / "cache" / "old.json").unlink()
+            (source / "cache" / "new.json").write_text("new", encoding="utf-8")
+            (source / "empty").rmdir()
+            (source / "new_empty").mkdir()
+
+    monkeypatch.setattr(bundle.shutil, "copyfile", copy_then_change)
+    with pytest.raises(ValueError) as caught:
+        bundle.copy_tree(source, tmp_path / "snapshot", code=True)
+    message = str(caught.value)
+    for detail in (
+        "新增：cache/new.json",
+        "删除：cache/old.json",
+        "修改：state.json",
+        "删除：empty/",
+        "新增：new_empty/",
+        "未生成备份",
+    ):
+        assert detail in message
+    assert "z_keep.txt" not in message
+    assert str(source) not in message
+
+
+def test_snapshot_change_details_are_bounded_and_report_total(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "trigger.txt").write_text("unchanged", encoding="utf-8")
+    original_copy = bundle.shutil.copyfile
+
+    def copy_then_add(path, target):
+        original_copy(path, target)
+        for number in range(12):
+            (source / f"added_{number:02}.txt").write_text("new", encoding="utf-8")
+
+    monkeypatch.setattr(bundle.shutil, "copyfile", copy_then_add)
+    with pytest.raises(ValueError) as caught:
+        bundle.copy_tree(source, tmp_path / "snapshot")
+    message = str(caught.value)
+    assert message.count("新增：") == 10
+    assert "新增：added_09.txt" in message
+    assert "added_10.txt" not in message and "added_11.txt" not in message
+    assert "另有 2 项变化（共 12 项）" in message
+
+
+def test_source_disappearing_mid_copy_reports_relative_path(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "cache.txt").write_text("cached", encoding="utf-8")
+    original_copy = bundle.shutil.copyfile
+
+    def delete_then_copy(path, target):
+        path.unlink()
+        original_copy(path, target)
+
+    monkeypatch.setattr(bundle.shutil, "copyfile", delete_then_copy)
+    with pytest.raises(ValueError, match="路径消失.*cache.txt"):
+        bundle.copy_tree(source, tmp_path / "snapshot")
+
+
+def test_missing_destination_is_not_reported_as_a_source_change(tmp_path, monkeypatch):
+    source, destination = tmp_path / "source", tmp_path / "snapshot"
+    source.mkdir()
+    (source / "file.txt").write_text("unchanged", encoding="utf-8")
+
+    def destination_missing(path, target):
+        raise FileNotFoundError(2, "missing destination", str(target))
+
+    monkeypatch.setattr(bundle.shutil, "copyfile", destination_missing)
+    with pytest.raises(FileNotFoundError):
+        bundle.copy_tree(source, destination)
 
 
 @pytest.mark.parametrize(

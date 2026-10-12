@@ -16,7 +16,7 @@ import time
 import unicodedata
 import zipfile
 import zlib
-from contextlib import closing
+from contextlib import ExitStack, closing
 from pathlib import Path
 
 import yaml
@@ -212,49 +212,127 @@ def stamp(root: Path, *, code: bool = False) -> list[tuple]:
     return result
 
 
+def _describe_changes(
+    before: list[tuple], after: list[tuple], database_changes: set[str]
+) -> str:
+    """Report bounded paths with filesystem or SQLite content changes."""
+    previous = {entry[0]: entry for entry in before}
+    current = {entry[0]: entry for entry in after}
+    changes = []
+    for relative in sorted(previous.keys() | current.keys()):
+        old, new = previous.get(relative), current.get(relative)
+        if old == new and relative not in database_changes:
+            continue
+        entry = new if new is not None else old
+        path = relative or "."
+        if entry[1] == "directory":
+            path += "/"
+        action = "新增" if old is None else "删除" if new is None else "修改"
+        changes.append(f"{action}：{path}")
+    details = "；".join(changes[:10])
+    if len(changes) > 10:
+        details += f"；另有 {len(changes) - 10} 项变化（共 {len(changes)} 项）"
+    return details
+
+
 def copy_tree(source: Path, destination: Path, *, code: bool = False) -> None:
+    """Copy a stable tree and identify source paths that change or disappear."""
+    try:
+        _copy_tree(source, destination, code=code)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        if exc.filename is None:
+            raise
+        try:
+            relative = Path(exc.filename).absolute().relative_to(source.absolute())
+        except ValueError:
+            raise exc
+        raise ValueError(
+            "快照期间路径消失或不再是目录，未生成备份；"
+            f"变化路径（相对于当前目录）：{relative.as_posix()}；"
+            "请停止外部写入后重试。"
+        ) from exc
+
+
+def _copy_tree(source: Path, destination: Path, *, code: bool) -> None:
     """Copy a stable tree, using online SQLite backups for data databases."""
     before = stamp(source, code=code)
     files = tree_files(source, code=code)
     databases = set()
+    sidecars = set()
+    wal_paths = set()
     if not code:
         for path in files:
+            if path in sidecars:
+                continue
             with path.open("rb") as source_file:
                 if source_file.read(16) == b"SQLite format 3\x00":
                     databases.add(path)
+                    sidecars.update(
+                        Path(str(path) + suffix)
+                        for suffix in ("-wal", "-shm", "-journal")
+                    )
+                    wal_paths.update(
+                        path.relative_to(source).as_posix() + suffix
+                        for suffix in ("-wal", "-shm")
+                    )
+    # Reading a WAL database can itself create or alter its WAL/SHM files.
+    # Keep the full tree validation, but compare logical database changes below.
+    before = [
+        entry
+        for entry in before
+        if entry[1] == "directory" or entry[0] not in wal_paths
+    ]
     destination.mkdir(parents=True, exist_ok=True)
     for path in tree_directories(source, code=code):
         relative = path.relative_to(source).as_posix()
         safe_path(destination, relative).mkdir(parents=True, exist_ok=True)
-    for path in files:
-        if any(
-            path == Path(str(database) + suffix)
-            for database in databases
-            for suffix in ("-wal", "-shm", "-journal")
-        ):
-            continue
-        target = safe_path(destination, path.relative_to(source).as_posix())
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if path in databases:
-            started = time.monotonic()
-
-            def progress(status, remaining, total):
-                if time.monotonic() - started > 15:
-                    raise ValueError("SQLite 快照超时，请停止外部写入后重试。")
-
-            with (
+    with ExitStack() as connections:
+        monitors = {}
+        for path in sorted(databases):
+            input_db = connections.enter_context(
                 closing(
                     sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
-                ) as input_db,
-                closing(sqlite3.connect(target)) as output_db,
-            ):
-                input_db.backup(output_db, pages=256, progress=progress, sleep=0.05)
-                output_db.execute("PRAGMA journal_mode=DELETE")
-        else:
-            shutil.copyfile(path, target)
-        os.chmod(target, 0o600)
-    if before != stamp(source, code=code):
-        raise ValueError("快照期间文件发生变化，未生成备份；请停止外部写入后重试。")
+                )
+            )
+            # data_version is comparable only on the same open connection.
+            version = input_db.execute("PRAGMA data_version").fetchone()[0]
+            monitors[path] = (input_db, version)
+        for path in files:
+            if path in sidecars:
+                continue
+            target = safe_path(destination, path.relative_to(source).as_posix())
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if path in databases:
+                started = time.monotonic()
+
+                def progress(status, remaining, total):
+                    if time.monotonic() - started > 15:
+                        raise ValueError("SQLite 快照超时，请停止外部写入后重试。")
+
+                input_db, _ = monitors[path]
+                with closing(sqlite3.connect(target)) as output_db:
+                    input_db.backup(output_db, pages=256, progress=progress, sleep=0.05)
+                    output_db.execute("PRAGMA journal_mode=DELETE")
+            else:
+                shutil.copyfile(path, target)
+            os.chmod(target, 0o600)
+        after = [
+            entry
+            for entry in stamp(source, code=code)
+            if entry[1] == "directory" or entry[0] not in wal_paths
+        ]
+        database_changes = {
+            path.relative_to(source).as_posix()
+            for path, (input_db, version) in monitors.items()
+            if input_db.execute("PRAGMA data_version").fetchone()[0] != version
+        }
+        if before != after or database_changes:
+            raise ValueError(
+                "快照期间文件发生变化，未生成备份；"
+                "变化路径（相对于当前目录）："
+                f"{_describe_changes(before, after, database_changes)}；"
+                "请停止外部写入后重试。"
+            )
 
 
 def encode_value(value, depth: int = 0):

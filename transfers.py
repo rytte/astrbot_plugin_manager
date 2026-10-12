@@ -612,7 +612,10 @@ class TransferService:
                 else "任务失败，请检查日志和恢复资料。"
             )
             logger.error(
-                "Plugin transfer %s failed (%s).", job["id"], type(exc).__name__
+                "Plugin transfer %s failed (%s): %s",
+                job["id"],
+                type(exc).__name__,
+                job["error"],
             )
             if job["kind"] == "import":
                 processed = {result["directory"] for result in job["results"]}
@@ -791,13 +794,28 @@ class TransferService:
                 f"磁盘可用空间不足，当前任务需至少 {required / 1024 / 1024:.1f} MiB 可用空间。"
             )
 
+    @staticmethod
+    async def _copy_snapshot_tree(
+        source: Path, destination: Path, context: str, *, code: bool = False
+    ) -> None:
+        try:
+            await asyncio.to_thread(copy_tree, source, destination, code=code)
+        except ValueError as exc:
+            raise ValueError(f"{context}快照失败：{exc}") from exc
+
     async def _snapshot(
         self, source: dict, selection: dict, stage: Path, was_enabled: bool
     ) -> dict:
         directory = source["directory"]
+        context = f"插件 {source['metadata']['name']}（目录 {directory}）"
         prefix = safe_path(stage, f"payload/{directory}")
         prefix.mkdir(parents=True)
-        await asyncio.to_thread(copy_tree, source["code"], prefix / "code", code=True)
+        await self._copy_snapshot_tree(
+            source["code"],
+            prefix / "code",
+            f"{context}的代码目录（plugins/{directory}/）",
+            code=True,
+        )
         metadata = read_metadata(prefix / "code")
         if any(
             metadata[field] != source["metadata"][field]
@@ -817,7 +835,12 @@ class TransferService:
         file_data = bool(selection["data"] and source["data_path"].exists())
         if selection["data"]:
             if file_data:
-                await asyncio.to_thread(copy_tree, source["data_path"], prefix / "data")
+                await self._copy_snapshot_tree(
+                    source["data_path"],
+                    prefix / "data",
+                    f"{context}的标准数据目录"
+                    f"（plugin_data/{source['metadata']['name']}/）",
+                )
             values = await self._read_kv(source["kv_plugin_id"])
             await asyncio.to_thread(write_json, prefix / "kv.json", values)
         return {
