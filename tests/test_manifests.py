@@ -27,6 +27,7 @@ def manifest():
     return {
         "format": MANIFEST_FORMAT,
         "schema_version": 1,
+        "name": "分享清单",
         "plugins": [
             {
                 "display_name": "分享插件",
@@ -292,7 +293,12 @@ async def test_preview_ownership_confirmation_expiry_and_replay(env, market_mock
         )
 
 
-async def test_export_shares_display_name_and_associated_sources(env, market_mock):
+@pytest.mark.parametrize(
+    "name,expected", [("", "plugins"), (" 生产环境备份 ", "生产环境备份")]
+)
+async def test_export_shares_display_name_and_associated_sources(
+    env, market_mock, name, expected
+):
     target = env.add_target(name=NAME)
     target.author = AUTHOR
     env.prefs["plugin_install_sources"] = {
@@ -303,10 +309,11 @@ async def test_export_shares_display_name_and_associated_sources(env, market_moc
             "registry_url": None,
         }
     }
-    exported = await env.plugin.manifests.export([target.root_dir_name])
+    exported = await env.plugin.manifests.export([target.root_dir_name], name=name)
     value = exported["manifest"]
     assert validate_manifest(value) == value
     assert value["schema_version"] == 1
+    assert value["name"] == expected
     assert value["plugins"][0] == {
         "display_name": target.name,
         "market_plugin_id": ID,
@@ -482,6 +489,10 @@ def test_other_versions_are_rejected_and_optional_source_keys_are_normalized():
     unsupported["schema_version"] = 2
     with pytest.raises(ValueError, match="v1"):
         validate_manifest(unsupported)
+    missing_name = manifest()
+    del missing_name["name"]
+    with pytest.raises(ValueError, match="name.*重新导出"):
+        validate_manifest(missing_name)
     value = repository_manifest()
     del value["plugins"][0]["market_plugin_id"]
     assert validate_manifest(value)["plugins"][0]["market_plugin_id"] == ""
@@ -491,6 +502,29 @@ def test_other_versions_are_rejected_and_optional_source_keys_are_normalized():
     value["plugins"][0]["repo_url"] = "https://user:password@example.com/owner/repo"
     with pytest.raises(ValueError):
         validate_manifest(value)
+
+
+@pytest.mark.parametrize(
+    "name", ["", "  ", None, "../escaped", "CON", "备" * 81, " 清单"]
+)
+def test_manifest_rejects_invalid_top_level_names(name):
+    value = manifest()
+    value["name"] = name
+    with pytest.raises(ValueError):
+        validate_manifest(value)
+
+
+async def test_named_manifest_preview_and_recheck_keep_name(env, market_mock):
+    value = manifest()
+    value["name"] = "生产环境备份"
+    preview = await env.plugin.manifests.preview("admin", value)
+    assert preview["job"]["name"] == "生产环境备份"
+    assert preview["job"]["preview_task"] is True
+    pending = env.plugin.manifests.recheck("admin", preview["job"]["id"])
+    assert pending["job"]["name"] == "生产环境备份"
+    await env.plugin.transfers.task
+    rechecked = env.plugin.manifests.read_preview("admin", pending["job"]["id"])
+    assert rechecked["job"]["name"] == "生产环境备份"
 
 
 async def test_repository_only_export_uses_existing_sources_without_market(

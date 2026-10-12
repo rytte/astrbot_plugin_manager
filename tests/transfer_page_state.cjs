@@ -150,7 +150,7 @@ async function main() {
       }
       if (endpoint === "manage/source-select") {record.active_binding_id = body.binding_id; record.revision = "r3"; return structuredClone(record);}
       if (endpoint === "manage/manifest-export") {
-        const job = {id: "export-id", kind: "manifest_export", status: "completed", created_at: 100, phase: "清单已导出", results: [], warnings: [], expired: false};
+        const job = {id: "export-id", kind: "manifest_export", name: body.name, download_filename: body.name + ".json", status: "completed", created_at: 100, phase: "清单已导出", results: [], warnings: [], expired: false};
         state.jobs.unshift(job);
         return structuredClone(job);
       }
@@ -176,7 +176,7 @@ async function main() {
       assert.ok(!endpoint.includes("?"), "AstrBot native bridge rejects query strings in upload endpoints");
       if (endpoint === "transfer/upload/zip-token") return {job: {id: "zip-id", warnings: []}, astrbot_version: "4.27", plugins: [{...plugin, exists: false, config: true, data: true, problem: ""}]};
       assert.equal(endpoint, "manage/manifest-upload/source-token");
-      manifestResponse = {ready: true, job: {id: "install-id", kind: "manifest_install", status: "preview", phase: "等待选择", preview_task: true, preview_expires_at: 2000000000, created_at: 100, results: [], warnings: []}, expires_at: 2000000000, plugins: [
+      manifestResponse = {ready: true, job: {id: "install-id", name: "生产环境备份", kind: "manifest_install", status: "preview", phase: "等待选择", preview_task: true, preview_expires_at: 2000000000, created_at: 100, results: [], warnings: []}, expires_at: 2000000000, plugins: [
         {id: "0", display_name: "新插件", market_plugin_id: "Alice/new", repo_url: "https://github.com/alice/new", default_source: "market", sources: [{kind: "market", name: "new", directory: "new_dir", status: "install", version: "2.0"}, {kind: "repository", name: "new", directory: "new_dir", status: "install", version: "2.1"}]},
         {id: "1", display_name: "已有插件", market_plugin_id: "Alice/existing", repo_url: "", default_source: "market", sources: [{kind: "market", name: "existing", status: "skip", version: "2.0"}]},
         {id: "2", display_name: "冲突插件", market_plugin_id: "Alice/conflict", repo_url: "", default_source: "market", sources: [{kind: "market", name: "conflict", status: "blocked", problem: "身份冲突"}]},
@@ -364,9 +364,13 @@ async function main() {
   elements.search.value = ""; await elements.search.trigger("input");
   assert.equal(elements.export.disabled, false);
   assert.match(elements["plugin-list"].textContent, /暂不能分享/);
+  elements["export-name"].value = "生产环境备份";
   await elements.export.trigger("click");
   assert.deepEqual(Array.from(posts.find(item => item.endpoint === "manage/manifest-export").body.directories), ["demo_dir"]);
   assert.equal(downloads[0][0], "manage/manifest-download");
+  assert.equal(posts.find(item => item.endpoint === "manage/manifest-export").body.name, "生产环境备份");
+  assert.equal(downloads[0][2], "生产环境备份.json");
+  assert.match(elements["job-list"].textContent, /生产环境备份/);
   const manifestDownload = descendants(elements["job-list"]).find(element => element.tagName === "button" && element.textContent.includes("下载清单 JSON"));
   assert.ok(manifestDownload);
   assert.equal(manifestDownload.disabled, false, "A completed manifest remains downloadable immediately after export finishes");
@@ -448,6 +452,7 @@ async function main() {
   await vm.runInContext("pollJobs()", context);
   assert.equal(elements["manifest-progress"].hidden, true);
   assert.equal(elements["manifest-preview"].hidden, false);
+  assert.equal(elements["manifest-name"].textContent, "生产环境备份");
   assert.equal(vm.runInContext("installChoices.size", context), 1);
   const importChecks = descendants(elements["manifest-list"]).filter(element => element.tagName === "input");
   assert.deepEqual(importChecks.map(element => [element.checked, element.disabled]), [[true, false], [false, true], [false, true]]);

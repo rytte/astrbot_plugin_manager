@@ -395,6 +395,7 @@ function renderSummary() {
   elements.export.textContent = manifestMode() ? "导出清单 JSON" : "导出插件包 ↗";
   elements.export.disabled = busy || requesting || (manifestMode() ? !manifestSelections.size || Array.from(manifestSelections).some(directory => !eligible(sourceRecord(directory))) : !selected.length || selectedPlugins.some(plugin => plugin.blocked));
   elements["export-format"].disabled = requesting;
+  elements["export-name"].disabled = requesting;
   elements["import-format"].disabled = requesting;
   elements["manifest-file"].disabled = busy || requesting || manifestDraftSaving || !managementState.csrf;
   elements["install-manifest"].disabled = busy || requesting || manifestDraftSaving || manifestDraftError || !manifestPreview || manifestPreviewExpired() || !installChoices.size;
@@ -606,7 +607,7 @@ async function downloadJob(job, kind) {
   renderJobs(displayedJobs);
   const manifest = kind === "manifest";
   try {
-    await bridge.download(manifest ? "manage/manifest-download" : "transfer/download", manifest ? {id: job.id} : {id: job.id, kind}, manifest ? "plugins.astrbot-plugin-manifest.json" : "astrbot-" + kind + "-" + job.id.slice(0, 8) + ".zip");
+    await bridge.download(manifest ? "manage/manifest-download" : "transfer/download", manifest ? {id: job.id} : {id: job.id, kind}, kind === "rollback" ? "astrbot-rollback-" + job.id.slice(0, 8) + ".zip" : job.download_filename);
     message("已发起" + (manifest ? "清单 JSON" : kind === "package" ? "插件包" : "恢复资料") + "下载，请查看浏览器下载记录。");
   } catch (error) {
     message(error.message || "下载失败，请重试。", true);
@@ -618,7 +619,7 @@ async function downloadJob(job, kind) {
 
 function confirmJobDeletion(job) {
   const labels = {export: "导出插件包", import: "导入插件包", rollback: "还原到导入前", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件"};
-  elements["delete-job-title"].textContent = (labels[job.kind] || job.kind) + " · " + job.id.slice(0, 8);
+  elements["delete-job-title"].textContent = (job.name ? job.name + " · " : "") + (labels[job.kind] || job.kind) + " · " + job.id.slice(0, 8);
   elements["delete-job-time"].textContent = new Date(job.created_at * 1000).toLocaleString("zh-CN");
   elements["delete-recovery-warning"].hidden = !job.backup_ready && !["interrupted", "rollback_failed"].includes(job.status);
   elements["delete-confirmation"].showModal();
@@ -685,7 +686,8 @@ function renderJobs(jobs) {
     const card = node("article", "job-card");
     const heading = node("div", "job-heading");
     const title = node("div", "job-heading-main");
-    title.append(node("span", "job-title", (job.preview_task && ["queued", "running"].includes(job.status) ? "清单预检" : ({export: "导出插件包", import: "导入插件包", rollback: "还原到导入前", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件"}[job.kind] || job.kind))), node("span", "pill job-status " + (job.preview_expired ? "expired" : job.status), job.preview_expired ? "预检已过期" : labels[job.status] || job.status));
+    const taskLabel = job.preview_task && ["queued", "running"].includes(job.status) ? "清单预检" : ({export: "导出插件包", import: "导入插件包", rollback: "还原到导入前", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件"}[job.kind] || job.kind);
+    title.append(node("span", "job-title", (job.name ? job.name + " · " : "") + taskLabel), node("span", "pill job-status " + (job.preview_expired ? "expired" : job.status), job.preview_expired ? "预检已过期" : labels[job.status] || job.status));
     const menu = node("div", "job-menu");
     const toggle = node("button", "job-menu-toggle", "⋯");
     toggle.type = "button";
@@ -807,10 +809,11 @@ function bindEvents() {
   elements["save-rule"].addEventListener("click", () => runRequest(async () => {state.rule = await post("rule", {selections: selections()}); message(state.rule.selections.length ? "当前选择已保存为规则，下次可点击「应用已保存规则」恢复。" : "已清空保存的导出规则。");}));
   elements.export.addEventListener("click", () => runRequest(async () => {
     if (manifestMode()) {await exportManifest(); return;}
+    const name = elements["export-name"].value;
     const checked = await post("export-preview", {selections: selections()});
     const accepted = await confirmOperation("检查本次导出", checked.plugins.map(plugin => ({...plugin, description: "代码" + (plugin.config ? " + 当前配置" : "") + (plugin.data ? " + 标准数据 / KV" : "") + (plugin.pause_required ? " · 将短暂暂停" : "")})), "配置和数据按原样备份，不会自动脱敏。附带数据时会暂停相关插件并尝试恢复原运行状态；外部写入可能导致快照失败。");
     if (!accepted) return;
-    await post("export", {selections: checked.selections, acknowledged: true});
+    await post("export", {selections: checked.selections, acknowledged: true, name});
     busy = true;
     showTab("history-panel");
     message("导出任务已启动。任务在服务端继续运行，可以稍后下载。", false, {task: true});
@@ -1017,7 +1020,7 @@ function renderSource() {
 }
 
 async function exportManifest() {
-  const job = await managementPost("manifest-export", {directories: Array.from(manifestSelections)});
+  const job = await managementPost("manifest-export", {directories: Array.from(manifestSelections), name: elements["export-name"].value});
   await pollJobs();
   message("插件分享清单已导出，接收者可选择插件及安装来源。清单不包含配置和数据。");
   await downloadJob(job, "manifest");
@@ -1040,7 +1043,7 @@ function applyManifestResult(result) {
   if (result.ready === false) {
     pendingManifestId = result.job.id;
     elements["manifest-progress"].hidden = false;
-    elements["manifest-progress"].textContent = result.job.phase || "正在解析清单来源…";
+    elements["manifest-progress"].textContent = (result.job.name ? result.job.name + " · " : "") + (result.job.phase || "正在解析清单来源…");
     return;
   }
   pendingManifestId = null;
@@ -1116,6 +1119,7 @@ function selectedManifestSource(plugin) {return plugin.sources.find(source => so
 function renderManifest() {
   elements["manifest-preview"].hidden = !manifestPreview;
   if (!manifestPreview) return;
+  elements["manifest-name"].textContent = manifestPreview.job.name;
   elements["preview-expiry"].textContent = "有效至 " + new Date(manifestPreview.expires_at * 1000).toLocaleString("zh-CN");
   const body = elements["manifest-list"]; body.replaceChildren();
   for (const plugin of manifestPreview.plugins) {

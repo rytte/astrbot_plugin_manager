@@ -145,6 +145,7 @@ class Main(Star):
             {
                 "format": "astrbot-plugin-manager-manifest",
                 "schema_version": 1,
+                "name": "测试清单",
                 "plugins": [{"display_name": "Probe", "market_plugin_id": identifier}]
                 if source == "market"
                 else [{"display_name": "Probe", "repo_url": repo}],

@@ -19,6 +19,7 @@ from astrbot import __version__ as ASTRBOT_VERSION
 
 from . import service as operation_module
 from .bytecode import clear_plugin_bytecode
+from .export_names import export_filename, export_name
 from .recovery import RecoveryService
 from .redaction import redact
 from .transfer_bundle import (
@@ -228,11 +229,16 @@ class TransferService:
             "backup_ready",
             "reload_required",
             "source_id",
+            "name",
         }
         result = {
             key: copy.deepcopy(value) for key, value in job.items() if key in fields
         }
         result["expired"] = TransferService._expired(job)
+        if job["kind"] in {"export", "manifest_export"}:
+            result["download_filename"] = export_filename(
+                job, "package" if job["kind"] == "export" else "manifest"
+            )
         if job["kind"] == "rollback" and job["status"] == "preview":
             result.update(
                 preview_expires_at=job["created_at"] + PREVIEW_TTL,
@@ -645,8 +651,10 @@ class TransferService:
         acknowledged: bool,
         *,
         selections: list[dict] | None = None,
+        name: str = "",
     ) -> dict:
         self.operations.ensure_writable()
+        name = export_name(name)
         if acknowledged is not True:
             raise ValueError("请确认敏感内容和暂停插件风险。")
         if self.task and not self.task.done():
@@ -668,6 +676,7 @@ class TransferService:
         self._validate_selections(rule["selections"], identities=True)
         await self._rule_sources(rule)
         job = self._new_job(owner, "export")
+        job["name"] = name or f"astrbot-package-{job['id'][:8]}"
         job["rule"] = rule
         return self._start(job, self._export)
 

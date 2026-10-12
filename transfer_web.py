@@ -12,6 +12,7 @@ import jwt
 from astrbot.api.web import error_response, file_response, json_response, request
 from astrbot.core.workspace import API_KEY_USERNAME_PREFIX
 
+from .export_names import export_filename
 from .transfer_bundle import MAX_ARCHIVE, exact_keys, remove_path, safe_path
 
 
@@ -149,7 +150,9 @@ class TransferWeb:
                 path = self.transfers.download(request.query.get("id"), owner, kind)
                 return file_response(
                     path,
-                    filename=f"astrbot-{kind}-{path.parent.name}.zip",
+                    filename=export_filename(
+                        self.transfers.get_job(request.query.get("id"), owner), kind
+                    ),
                     content_type="application/zip",
                     headers={
                         "Cache-Control": "no-store",
@@ -194,7 +197,7 @@ class TransferWeb:
                         data = await self.transfers.export_preview()
                 elif action == "export":
                     if "selections" in body:
-                        exact_keys(body, {"csrf", "selections", "acknowledged"})
+                        exact_keys(body, {"csrf", "selections", "acknowledged", "name"})
                         if not isinstance(body["selections"], list):
                             raise ValueError("插件选择必须为列表。")
                         data = await self.transfers.start_export(
@@ -202,11 +205,17 @@ class TransferWeb:
                             None,
                             body["acknowledged"],
                             selections=body["selections"],
+                            name=body["name"],
                         )
                     else:
-                        exact_keys(body, {"csrf", "rule_updated_at", "acknowledged"})
+                        exact_keys(
+                            body, {"csrf", "rule_updated_at", "acknowledged", "name"}
+                        )
                         data = await self.transfers.start_export(
-                            owner, body["rule_updated_at"], body["acknowledged"]
+                            owner,
+                            body["rule_updated_at"],
+                            body["acknowledged"],
+                            name=body["name"],
                         )
                 elif action == "import":
                     exact_keys(body, {"csrf", "id", "selections", "acknowledged"})

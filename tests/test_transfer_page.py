@@ -206,6 +206,7 @@ async function main() {
   await elements["bulk-data"].trigger("change");
   assert.equal(elements["save-rule"].disabled, false);
   assert.equal(elements.export.disabled, false);
+  elements["export-name"].value = "生产环境备份";
   const currentExport = elements.export.trigger("click");
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(elements["apply-rule"].disabled, true);
@@ -213,6 +214,7 @@ async function main() {
   await elements["confirmation-form"].trigger("submit", {preventDefault() {}});
   await currentExport;
   assert.equal(exports.length, 1);
+  assert.equal(exports[0].name, "生产环境备份");
   assert.equal(exports[0].selections[0].data, true);
   assert.equal(exports[0].selections[0].plugin_id, plugin.plugin_id);
   assert.equal(JSON.stringify(state.rule), savedRule);

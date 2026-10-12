@@ -13,6 +13,7 @@ from astrbot.dashboard.services.plugin_service import (
     PluginServiceWarning,
 )
 
+from .export_names import export_filename
 from .redaction import redact
 from .transfer_bundle import (
     MAX_JSON,
@@ -89,7 +90,7 @@ class ManagementWeb(TransferWeb):
                         self.transfers.job_directory(job["id"]),
                         "plugins.astrbot-plugin-manifest.json",
                     ),
-                    filename="plugins.astrbot-plugin-manifest.json",
+                    filename=export_filename(job, "manifest"),
                     content_type="application/json",
                     headers={
                         "Cache-Control": "no-store",
@@ -175,11 +176,14 @@ class ManagementWeb(TransferWeb):
                         )
                     )
                 elif action == "manifest-export":
-                    exact_keys(body, {"csrf", "directories"})
+                    exact_keys(body, {"csrf", "directories", "name"})
                     self.transfers._ensure_idle()
-                    exported = await self.manifests.export(body["directories"])
+                    exported = await self.manifests.export(
+                        body["directories"], name=body["name"]
+                    )
                     async with self.transfers.operation_lock:
                         job = self.transfers._new_job(owner, "manifest_export")
+                        job["name"] = exported["manifest"]["name"]
                         path = safe_path(
                             self.transfers.job_directory(job["id"]),
                             "plugins.astrbot-plugin-manifest.json",

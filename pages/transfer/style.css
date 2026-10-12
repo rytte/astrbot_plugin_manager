@@ -24,6 +24,9 @@ p{margin:0}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
 .summary{padding:22px}
 .summary h2{margin:0 0 4px}
+.export-name-field{margin-top:14px}
+.export-name-field label{display:block;font-size:13px;margin-bottom:5px}
+.export-name-field input{width:100%;min-width:0;padding:7px 9px;border:1px solid var(--line);border-radius:7px;color:var(--text);background:var(--surface)}
 .summary-number{display:flex;gap:10px;align-items:baseline;margin:12px 0 20px}
 .summary-number strong{font-size:46px;font-weight:600;line-height:1}
 .summary-number span{color:var(--muted)}

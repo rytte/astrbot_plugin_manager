@@ -6,6 +6,7 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from urllib.parse import unquote
 
 import httpx
 import jwt
@@ -50,6 +51,7 @@ async def test_manifest_repository_upload_poll_and_selective_install(
     manifest = {
         "format": "astrbot-plugin-manager-manifest",
         "schema_version": 1,
+        "name": "分享清单",
         "plugins": [{"display_name": "分享插件", "repo_url": url}],
     }
     response = await client.post(
@@ -428,6 +430,7 @@ async def test_state_rules_and_csrf_through_real_extension_router(web_client):
         json={
             "csrf": state["csrf"],
             "rule_updated_at": preview.json()["data"]["rule_updated_at"],
+            "name": "",
             "acknowledged": False,
         },
     )
@@ -454,20 +457,77 @@ async def test_export_current_selection_without_saving_through_router(web_client
     ):
         response = await client.post(
             endpoint("export"),
-            json={"csrf": csrf, "selections": snapshot, "acknowledged": acknowledged},
+            json={
+                "csrf": csrf,
+                "selections": snapshot,
+                "acknowledged": acknowledged,
+                "name": "",
+            },
         )
         assert response.status_code == expected
         assert not transfers.jobs
     response = await client.post(
         endpoint("export"),
-        json={"csrf": state["csrf"], "selections": snapshot, "acknowledged": True},
+        json={
+            "csrf": state["csrf"],
+            "selections": snapshot,
+            "acknowledged": True,
+            "name": "生产环境备份",
+        },
     )
     assert response.status_code == 200, response.text
     await transfers.task
-    assert transfers.get_job(response.json()["data"]["id"], "admin")["status"] == (
-        "completed"
+    job = response.json()["data"]
+    assert job["name"] == "生产环境备份"
+    assert job["download_filename"] == "生产环境备份.zip"
+    assert transfers.get_job(job["id"], "admin")["status"] == "completed"
+    downloaded = await client.get(
+        endpoint("download"), params={"id": job["id"], "kind": "package"}
     )
+    assert downloaded.status_code == 200
+    assert "生产环境备份.zip" in unquote(downloaded.headers["content-disposition"])
+    assert transfers.download(job["id"], "admin", "package").name == "package.zip"
     assert not transfers.rule_path.exists()
+
+
+@pytest.mark.parametrize("kind", ["package", "manifest"])
+@pytest.mark.parametrize("name", [None, "../outside", "备" * 81])
+async def test_export_rejects_invalid_names_before_creating_jobs(
+    web_client, kind, name
+):
+    env, client = web_client
+    target = env.make_transfer_plugin()
+    state = (await client.get(endpoint("state"))).json()["data"]
+    if kind == "manifest":
+        management = (await client.get(management_endpoint("state"))).json()["data"]
+        url = management_endpoint("manifest-export")
+        body = {
+            "csrf": management["csrf"],
+            "directories": [target.root_dir_name],
+            "name": name,
+        }
+    else:
+        preview = await client.post(
+            endpoint("export-preview"),
+            json={
+                "csrf": state["csrf"],
+                "selections": [
+                    {"directory": target.root_dir_name, "config": False, "data": False}
+                ],
+            },
+        )
+        url = endpoint("export")
+        body = {
+            "csrf": state["csrf"],
+            "selections": preview.json()["data"]["selections"],
+            "acknowledged": True,
+            "name": name,
+        }
+    rejected = await client.post(url, json=body)
+    assert rejected.status_code == 400
+    assert "导出名称" in rejected.json()["message"]
+    assert not env.plugin.transfers.jobs
+    env.manager._terminate_plugin.assert_not_awaited()
 
 
 async def test_manual_job_deletion_checks_owner_and_csrf_and_removes_downloads(
@@ -913,10 +973,16 @@ async def test_management_manifest_export_download_and_upload_are_private(
     state = (await client.get(management_endpoint("state"))).json()["data"]
     exported = await client.post(
         management_endpoint("manifest-export"),
-        json={"csrf": state["csrf"], "directories": [target.root_dir_name]},
+        json={
+            "csrf": state["csrf"],
+            "directories": [target.root_dir_name],
+            "name": "生产环境备份",
+        },
     )
     assert exported.status_code == 200, exported.text
     job = exported.json()["data"]
+    assert job["name"] == "生产环境备份"
+    assert job["download_filename"] == "生产环境备份.json"
     env.plugin.transfers.get_job(job["id"], "admin")["created_at"] = (
         time.time() - 365 * 86400
     )
@@ -926,7 +992,10 @@ async def test_management_manifest_export_download_and_upload_are_private(
     assert downloaded.status_code == 200
     assert downloaded.headers["content-type"].startswith("application/json")
     assert downloaded.headers["cache-control"] == "no-store"
+    assert "生产环境备份.json" in unquote(downloaded.headers["content-disposition"])
     manifest = downloaded.json()
+    assert manifest["name"] == "生产环境备份"
+    assert manifest["schema_version"] == 1
     assert manifest["plugins"][0]["market_plugin_id"] == identifier
     assert "download_url" not in downloaded.text
     other = jwt.encode(
@@ -950,11 +1019,13 @@ async def test_management_manifest_export_download_and_upload_are_private(
     assert uploaded.status_code == 200, uploaded.text
     pending = uploaded.json()["data"]
     assert pending["ready"] is False
+    assert pending["job"]["name"] == "生产环境备份"
     await env.plugin.transfers.task
     checked = await client.get(
         management_endpoint("manifest-preview"), params={"id": pending["job"]["id"]}
     )
     assert checked.status_code == 200, checked.text
+    assert checked.json()["data"]["job"]["name"] == "生产环境备份"
     assert checked.json()["data"]["plugins"][0]["sources"][0]["status"] == "skip"
     env.manager.load.assert_not_awaited()
     env.manager.install_plugin.assert_not_awaited()

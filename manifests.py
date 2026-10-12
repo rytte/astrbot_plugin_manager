@@ -12,6 +12,7 @@ from astrbot.dashboard.services.plugin_service import (
     PluginServiceWarning,
 )
 
+from .export_names import export_name
 from .identity import authors_match
 from .market_archive import unpack_market_archive
 from .redaction import redact
@@ -53,8 +54,14 @@ def validate_manifest(value) -> dict:
         or value.get("schema_version") != MANIFEST_VERSION
     ):
         raise ValueError(f"仅支持分享清单（v{MANIFEST_VERSION}），请重新导出清单。")
-    exact_keys(value, {"format", "schema_version", "plugins"})
+    if "name" not in value:
+        raise ValueError(
+            f"分享清单 v{MANIFEST_VERSION} 缺少 name 名称字段，请重新导出。"
+        )
+    exact_keys(value, {"format", "schema_version", "name", "plugins"})
     value = copy.deepcopy(value)
+    if not export_name(value["name"]) or value["name"] != value["name"].strip():
+        raise ValueError("清单名称不能为空或包含首尾空白，请重新导出。")
     if not isinstance(value["plugins"], list) or not 1 <= len(value["plugins"]) <= 256:
         raise ValueError("插件清单须包含 1～256 个插件。")
     if len(json.dumps(value, ensure_ascii=False).encode("utf-8")) > MAX_JSON:
@@ -127,7 +134,8 @@ class ManifestService:
         remote["repo"] = repository_url(remote["repo"])
         return remote
 
-    async def export(self, directories: list[str]) -> dict:
+    async def export(self, directories: list[str], *, name: str = "") -> dict:
+        name = export_name(name) or "plugins"
         if (
             not isinstance(directories, list)
             or not 1 <= len(directories) <= 256
@@ -190,6 +198,7 @@ class ManifestService:
             {
                 "format": MANIFEST_FORMAT,
                 "schema_version": MANIFEST_VERSION,
+                "name": name,
                 "plugins": entries,
             }
         )
@@ -308,6 +317,7 @@ class ManifestService:
         self.operations.ensure_writable()
         self.transfers._ensure_idle()
         job = self.transfers._new_job(owner, "manifest_install")
+        job["name"] = manifest["name"]
         job["manifest"] = manifest
         self.transfers._start(job, self._prepare, preview=True)
         return self.read_preview(owner, job["id"])
