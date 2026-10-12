@@ -786,9 +786,9 @@ class SourceService:
                 store["archived"] = [*store["archived"], previous][-100:]
                 await asyncio.to_thread(write_json, self.path, store)
 
-    async def describe(self, identifier: str) -> str:
-        target = self.operations.resolve(identifier)
-        record = await self.detail(target.directory)
+    async def describe(self, directory: str) -> str:
+        """Summarize recorded provenance and bindings for a resolved directory."""
+        record = await self.detail(directory)
         active = next(
             (
                 item
@@ -801,8 +801,7 @@ class SourceService:
         return redact(
             "\n".join(
                 [
-                    f"插件：{record['local']['name'] or target.directory}",
-                    f"来源：{SOURCE_LABELS.get(provenance['method'], provenance['method'])}",
+                    f"安装来源：{SOURCE_LABELS.get(provenance['method'], provenance['method'])}",
                     "记录依据："
                     + (
                         "管家安装记录"
@@ -819,7 +818,7 @@ class SourceService:
                         if active
                         else "未绑定"
                     ),
-                    f"已关联来源：{len(record['bindings'])} 个；详细校验和切换请打开插件备份与迁移页面，点击该插件的「来源管理」。",
+                    f"已关联来源：{len(record['bindings'])} 个",
                 ]
             )
         )

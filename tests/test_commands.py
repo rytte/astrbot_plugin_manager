@@ -38,7 +38,6 @@ async def test_pm_is_the_only_registered_entry_point(env):
         "/pm search weather",
         "/pm refresh-market",
         "/pm info demo",
-        "/pm source demo",
         "/pm add https://example.com/repo",
         "/pm add alice/astrbot_plugin_weather",
         "/pm enable demo",
@@ -66,7 +65,6 @@ async def test_all_commands_require_admin_in_real_pipeline(env, command):
         "refresh-market",
         "help",
         "info bad",
-        "source bad",
         "add bad",
         "enable bad",
         "disable bad",
@@ -106,7 +104,6 @@ async def test_bare_entry_shows_help_without_calling_model(env, command):
         "refresh-market",
         "help",
         "info",
-        "source",
         "add",
         "enable",
         "disable",
@@ -125,6 +122,7 @@ async def test_bare_entry_shows_help_without_calling_model(env, command):
         "off demo_directory",
         "commands",
         "market weather",
+        "source demo_plugin",
     ],
 )
 async def test_old_subcommand_names_are_rejected_without_side_effects(
@@ -354,6 +352,9 @@ async def test_info_reports_failed_plugins_and_their_removal_command(env, metada
     assert f"插件名：{metadata.get('name') or '未声明'}" in output(event).splitlines()
     assert "插件目录：broken_directory" in output(event).splitlines()
     assert "状态：❌ 加载失败\n" in output(event)
+    assert "安装来源：来源未知" in output(event).splitlines()
+    assert "记录依据：缺少真实安装记录" in output(event).splitlines()
+    assert "当前更新源：未绑定" in output(event).splitlines()
     assert "/pm remove broken_directory" in output(event)
     assert event.is_stopped() and not env.model_calls
 

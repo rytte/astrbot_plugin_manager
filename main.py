@@ -35,7 +35,6 @@ USAGE = (
     "安装插件   /pm add <仓库地址或市场ID>\n"
     "卸载插件   /pm remove <插件名> [--all]\n"
     "插件信息   /pm info <插件名>\n"
-    "插件来源   /pm source <插件名>\n"
     "启用插件   /pm enable <插件名>\n"
     "停用插件   /pm disable <插件名>\n"
     "重载插件   /pm reload <插件名>\n"
@@ -139,7 +138,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
         "pm",
-        desc="管理员插件管理：list/cmds/tools/search/refresh-market/help/info/source/add/enable/disable/reload/remove。",
+        desc="管理员插件管理：list/cmds/tools/search/refresh-market/help/info/add/enable/disable/reload/remove。",
     )
     async def plugin(
         self, event: AstrMessageEvent, arguments: GreedyStr
@@ -189,13 +188,7 @@ class Main(Star):
             if action == "info":
                 if len(args) != 1:
                     raise ValueError("用法：/pm info <插件名或目录名>。")
-                await self.reply(event, self.service.plugin_info(args[0]))
-                yield
-                return
-            if action == "source":
-                if len(args) != 1:
-                    raise ValueError("用法：/pm source <插件名或目录名>。")
-                await self.reply(event, await self.sources.describe(args[0]))
+                await self.reply(event, await self.service.plugin_info(args[0]))
                 yield
                 return
             if action == "search":
@@ -312,7 +305,6 @@ class Main(Star):
                     "info",
                     "search",
                     "refresh-market",
-                    "source",
                 }
                 else "操作失败，可能已发生部分变更；请检查 AstrBot 日志，并通过 WebUI 检查或恢复插件。",
             )

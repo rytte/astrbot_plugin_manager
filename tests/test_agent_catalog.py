@@ -20,9 +20,10 @@ async def test_decorator_registered_agent_and_child_appear_in_plugin_details(
     manager = FunctionToolManager()
     monkeypatch.setattr(registration, "llm_tools", manager)
     env.context.provider_manager.llm_tools = manager
-    env.owners[__name__] = StarMetadata(
-        name="agent_plugin", module_path=__name__, activated=True
-    )
+    plugin = env.add_target(name="agent_plugin", directory="agent_plugin")
+    env.owners.pop(plugin.module_path)
+    plugin.module_path = __name__
+    env.owners[__name__] = plugin
 
     async def delegate(self, event):
         raise AssertionError("Catalog must not invoke the Agent")

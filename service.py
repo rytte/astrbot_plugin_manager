@@ -355,15 +355,18 @@ class PluginOperations:
             parts.append(f"下一页：/pm {kind} {page + 1}")
         return "\n\n".join(parts)
 
-    def plugin_info(self, identifier: str) -> str:
-        """Describe a resolved plugin and the commands and tools it owns."""
+    async def plugin_info(self, identifier: str) -> str:
+        """Describe a plugin, its recorded sources and its commands and tools."""
         target = self.resolve(identifier)
+        source_summary = await self.sources.describe(target.directory)
+        self.revalidate(target)
         if target.plugin is None:
             record = target.failure
             return redact(
                 f"显示名称：{record.get('display_name') or '未声明'}\n"
                 f"插件名：{record.get('name') or '未声明'}\n"
                 f"插件目录：{target.name}\n状态：❌ 加载失败\n"
+                f"\n{source_summary}\n\n"
                 f"请通过 WebUI 查看错误详情或恢复；可使用 /pm remove {target.name} 卸载。"
             )
         plugin = target.plugin
@@ -385,6 +388,8 @@ class PluginOperations:
             f"作者：{plugin.author or '未声明'}",
             f"说明：{plugin.desc or '无说明'}",
             f"仓库：{plugin.repo or '未声明'}",
+            "",
+            source_summary,
             "",
             "已注册指令：",
         ]

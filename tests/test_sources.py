@@ -54,7 +54,28 @@ async def test_unknown_and_implicit_sources_are_never_reported_as_market(env):
     assert record["provenance"]["method"] == "unknown"
     assert not record["bindings"] and record["active_binding_id"] is None
     env.preferences.global_put.assert_not_awaited()
-    assert "缺少真实安装记录" in await env.plugin.sources.describe(target.name)
+    event = env.event(f"/pm info {target.name}")
+    await env.scheduler.execute(event)
+    assert "安装来源：来源未知" in "\n".join(event.sent)
+    assert "记录依据：缺少真实安装记录" in "\n".join(event.sent)
+    assert "当前更新源：未绑定" in "\n".join(event.sent)
+    assert "已关联来源：0 个" in "\n".join(event.sent)
+
+
+async def test_info_reads_sources_for_resolved_directory_despite_name_collision(env):
+    target = env.add_target(name="first_plugin", directory="shared")
+    other = env.add_target(name="shared", directory="other_directory")
+    env.prefs["plugin_install_sources"] = {
+        target.root_dir_name: core_source(target),
+        other.root_dir_name: core_source(other),
+    }
+    event = env.event(f"/pm info {target.name}")
+    await env.scheduler.execute(event)
+    text = "\n".join(event.sent)
+    assert f"插件名：{target.name}" in text
+    assert f"当前更新源：{target.author}/{target.name}" in text
+    assert f"当前更新源：{other.author}/{other.name}" not in text
+    assert event.is_stopped() and not env.model_calls
 
 
 @pytest.mark.parametrize("market_author", ["Soulter", "FateTrial"])
@@ -119,6 +140,15 @@ async def test_observation_does_not_invent_original_install_fact_and_survives_re
     assert record["provenance"]["evidence"] == "core_record_observed"
     assert record["provenance"]["installed_at"] is None
     assert record["provenance"]["reported_installed_at"].startswith("2025")
+    event = env.event(f"/pm info {target.root_dir_name}")
+    await env.scheduler.execute(event)
+    text = "\n".join(event.sent)
+    assert f"插件名：{target.name}" in text
+    assert "安装来源：插件市场" in text
+    assert "记录依据：首次观察到的 AstrBot 记录，不能证明最初安装来源" in text
+    assert f"当前更新源：{target.author}/{target.name}" in text
+    assert "已关联来源：1 个" in text
+    assert text.index("仓库：") < text.index("安装来源：") < text.index("已注册指令：")
     restarted = SourceService(env.plugin.service, env.plugin.transfers)
     assert (await restarted.detail(target.root_dir_name))["record_id"] == record[
         "record_id"
@@ -152,6 +182,12 @@ async def test_repo_binding_and_switch_preserve_market_and_initial_observation(
     )
     assert changed["active_binding_id"] == repo["id"]
     assert changed["provenance"] == first["provenance"]
+    event = env.event(f"/pm info {target.name}")
+    await env.scheduler.execute(event)
+    text = "\n".join(event.sent)
+    assert "安装来源：插件市场" in text
+    assert "当前更新源：https://github.com/test/demo" in text
+    assert "已关联来源：2 个" in text
     assert (
         env.prefs["plugin_install_sources"][target.root_dir_name]["install_method"]
         == "repository"
