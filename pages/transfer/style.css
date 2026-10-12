@@ -65,6 +65,14 @@ summary::marker{color:var(--muted)}
 .panel-heading p{font-size:13px;margin-top:4px}
 .pill{font-size:12px;background:var(--bg);color:var(--muted);border:1px solid var(--line);border-radius:20px;padding:4px 10px;white-space:nowrap}
 .toolbar{display:flex;gap:12px;margin-bottom:14px}
+.toolbar .button{flex-shrink:0;white-space:nowrap}
+.update-summary{margin:0 0 14px;line-height:1.6}
+.source-update{margin-top:7px;font-size:12px;line-height:1.5;max-width:260px}
+.update-result{margin:0;overflow-wrap:anywhere}
+.source-update.update_available{color:var(--accent)}
+.source-update.error{color:var(--danger)}
+.source-update.stale{color:var(--muted)}
+.update-plugin{margin-top:5px}
 .search{display:flex;align-items:center;gap:9px;flex:1;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:6px 12px;min-height:38px}
 .search span{font-size:22px;color:var(--muted);line-height:1}
 .search input{width:100%;background:none;border:0;color:var(--text);outline:none;font-size:14px}
@@ -194,7 +202,8 @@ dialog h2{margin:0 0 18px;font-size:22px}
 .panel-heading{align-items:flex-start}
 .panel-heading .pill{display:none}
 .panel{padding:16px}
-.toolbar{gap:8px}
+.toolbar{gap:8px;flex-wrap:wrap}
+.toolbar .search{flex-basis:100%}
 .toolbar select{font-size:13px;padding:7px}
 .search{min-width:0}
 .tabs{justify-content:space-between}

@@ -107,12 +107,14 @@ def test_manifest_rejects_unknown_fields_arbitrary_downloads_and_other_sources(
         validate_manifest(value)
 
 
+@pytest.mark.parametrize("author", [AUTHOR, AUTHOR + ", Coauthor"])
 async def test_manifest_install_uses_official_pipeline_and_reports_loaded_state(
-    env, market_mock, core_installs
+    env, market_mock, core_installs, author
 ):
     data, fetch, installer = market_mock
     directory = NAME + "_source"
     core_installs[data[ID]["download_url"]]["directory"] = directory
+    core_installs[data[ID]["download_url"]]["author"] = author
     service = env.plugin.manifests
     preview = await service.preview("admin", manifest())
     assert preview["plugins"][0]["sources"][0]["status"] == "install"
@@ -135,6 +137,7 @@ async def test_manifest_install_uses_official_pipeline_and_reports_loaded_state(
     record = await env.plugin.sources.detail(directory)
     assert record["provenance"]["evidence"] == "manager_operation"
     assert record["local"]["status"] == "enabled"
+    assert record["local"]["author"] == author
     assert record["history"][-1]["actor"] == "admin"
     installer.assert_awaited_once_with(
         data[ID]["repo"],
@@ -196,11 +199,12 @@ async def test_incomplete_core_registration_is_never_reported_as_installed(
     assert not job.get("installed_artifacts")
 
 
+@pytest.mark.parametrize("author", [AUTHOR, AUTHOR + ", Coauthor"])
 async def test_existing_same_identity_is_skipped_and_conflicting_identity_blocked(
-    env, market_mock
+    env, market_mock, author
 ):
     target = env.add_target(name=NAME)
-    target.author = AUTHOR
+    target.author = author
     first = await env.plugin.manifests.preview("admin", manifest())
     assert first["plugins"][0]["sources"][0]["status"] == "skip"
     target.author = "impostor"
@@ -579,6 +583,32 @@ async def test_repository_identity_must_match_market_id(env, market_mock, monkey
     assert options[0]["status"] == "install"
     assert options[1]["status"] == "blocked"
     assert "不一致" in options[1]["problem"]
+
+
+async def test_repository_with_coauthors_can_install_with_one_market_author(
+    env, market_mock, core_installs, monkeypatch
+):
+    author = AUTHOR + ", Coauthor"
+
+    async def download(url, path):
+        write_archive(path, author=author)
+
+    monkeypatch.setattr(
+        "astrbot_plugin_manager.manifests.download_repository_archive", download
+    )
+    core_installs[REPO] = {"name": NAME, "author": author, "version": "2.0.0"}
+    preview = await env.plugin.manifests.preview(
+        "admin", repository_manifest(with_market=True)
+    )
+    assert preview["plugins"][0]["sources"][1]["status"] == "install"
+    await env.plugin.manifests.start(
+        "admin", preview["job"]["id"], [{"id": "0", "source": "repository"}], True
+    )
+    await env.plugin.transfers.task
+    job = env.plugin.transfers.get_job(preview["job"]["id"], "admin")
+    assert job["status"] == "completed", job["error"]
+    assert job["results"][0]["status"] == "installed", job["results"]
+    assert env.context.get_registered_star(NAME).author == author
 
 
 async def test_repository_install_records_actual_version_from_official_installer(

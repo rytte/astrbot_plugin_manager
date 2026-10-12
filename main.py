@@ -23,6 +23,7 @@ from .service import INSTALL_USAGE, PluginOperations, PluginTarget
 from .sources import SourceService
 from .transfer_web import TransferWeb
 from .transfers import TransferService
+from .updates import UpdateService
 
 USAGE = (
     "插件管家（仅限 AstrBot 管理员）\n"
@@ -78,8 +79,9 @@ class Main(Star):
         self.sources = SourceService(self.service, self.transfers)
         self.service.sources = self.sources
         self.manifests = ManifestService(self.sources, self.transfers)
+        self.updates = UpdateService(self.sources, self.transfers)
         self.management_web = ManagementWeb(
-            context, self.transfers, self.sources, self.manifests
+            context, self.transfers, self.sources, self.manifests, self.updates
         )
 
     async def initialize(self) -> None:

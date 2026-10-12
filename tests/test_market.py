@@ -55,11 +55,12 @@ def mock_registry(env, monkeypatch, data=None, notice=None):
 
 
 @pytest.mark.parametrize("download_url", [DOWNLOAD_URL, ""])
+@pytest.mark.parametrize("author", ["alice", "alice, Coauthor"])
 async def test_market_install_uses_official_service_and_records_source(
-    env, monkeypatch, download_url
+    env, monkeypatch, download_url, author
 ):
     target = env.add_target("astrbot_plugin_weather", "weather_directory")
-    target.author = "alice"
+    target.author = author
     env.manager.install_plugin.return_value = {"name": target.name, "repo": REPOSITORY}
     fetch = mock_registry(env, monkeypatch, market_data(download_url=download_url))
     monkeypatch.setattr("astrbot.dashboard.services.plugin_service.sp", env.preferences)
@@ -78,6 +79,11 @@ async def test_market_install_uses_official_service_and_records_source(
     assert record["registry_url"] is None
     assert record["repo"] == REPOSITORY
     assert record["download_url"] == download_url
+    assert target.author == author
+    assert (await env.plugin.sources.detail(target.root_dir_name))["local"][
+        "author"
+    ] == author
+    assert target.plugin_id == author.lower() + "/" + target.name
     assert "已安装" in output(event)
     env.sync.assert_awaited_once()
     assert event.is_stopped() and not env.model_calls

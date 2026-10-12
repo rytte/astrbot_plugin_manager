@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 import yaml
 from astrbot.core.repository import normalize_repository_url, parse_repository_url
 
+from .identity import authors_match
 from .redaction import redact
 from .service import MARKET_QUERY_TIMEOUT_SECONDS, is_market_id
 from .source_bundle import METHODS, portable_binding, validate_sources
@@ -459,8 +460,8 @@ class SourceService:
                         "registry_url": None,
                         "repo_url": repository_url(metadata.get("repo")),
                     }
-                if any(
-                    metadata.get(field) != local[field] for field in ("name", "author")
+                if metadata.get("name") != local["name"] or not authors_match(
+                    local["author"], metadata.get("author"), market=kind == "market"
                 ):
                     raise ValueError("来源中的作者或插件名与本机不一致，拒绝绑定。")
                 if (

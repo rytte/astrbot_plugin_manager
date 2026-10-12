@@ -143,7 +143,7 @@ async function main() {
   const bridge = {
     async ready() {}, onContext(handler) {handler({isDark: true});},
     async apiGet(endpoint) {
-      if (endpoint === "manage/state") return {csrf: "source-test", busy: false, plugins: [], jobs: []};
+      if (endpoint === "manage/state") return {csrf: "source-test", busy: false, plugins: [], jobs: [], updates: {id: null, status: "idle", results: [], done: 0, total: 0}};
       return structuredClone(state);
     },
     async apiPost(endpoint, body) {

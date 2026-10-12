@@ -12,6 +12,7 @@ from astrbot.dashboard.services.plugin_service import (
     PluginServiceWarning,
 )
 
+from .identity import authors_match
 from .market_archive import unpack_market_archive
 from .redaction import redact
 from .repository_archive import download_repository_archive
@@ -104,10 +105,11 @@ class ManifestService:
         metadata = self.operations.web.resolve_market_plugin_entry_by_id(
             data, entry["market_plugin_id"]
         )
+        market_author, market_name = entry["market_plugin_id"].split("/", 1)
         if (
             not metadata
-            or f"{metadata.get('author')}/{metadata.get('name')}"
-            != entry["market_plugin_id"]
+            or metadata.get("name") != market_name
+            or not authors_match(metadata.get("author"), market_author, market=True)
         ):
             raise ValueError("官方市场中缺少该 ID，或作者/插件名已变化。")
         component(metadata["name"], module=True)
@@ -193,7 +195,7 @@ class ManifestService:
         )
         return {"manifest": manifest, "notice": None}
 
-    def _check_local(self, remote: dict, locals_: list[dict]) -> dict:
+    def _check_local(self, remote: dict, locals_: list[dict], *, kind: str) -> dict:
         name = component(remote["name"], module=True)
         matches = [
             local
@@ -204,8 +206,9 @@ class ManifestService:
         if matches:
             if (
                 len(matches) == 1
-                and all(
-                    matches[0][field] == remote[field] for field in ("name", "author")
+                and matches[0]["name"] == remote["name"]
+                and authors_match(
+                    matches[0]["author"], remote["author"], market=kind == "market"
                 )
                 and not matches[0]["problem"]
             ):
@@ -232,11 +235,12 @@ class ManifestService:
             unpack_market_archive, archive, safe_path(directory, "checked")
         )
         metadata = await _file_work(read_metadata, code)
-        if (
-            item["market_plugin_id"]
-            and f"{metadata['author']}/{metadata['name']}" != item["market_plugin_id"]
-        ):
-            raise ValueError("仓库中的作者或名称与清单市场 ID 不一致。")
+        if item["market_plugin_id"]:
+            market_author, market_name = item["market_plugin_id"].split("/", 1)
+            if metadata["name"] != market_name or not authors_match(
+                metadata["author"], market_author, market=True
+            ):
+                raise ValueError("仓库中的作者或名称与清单市场 ID 不一致。")
         return {
             **{field: metadata[field] for field in ("name", "author", "version")},
             "repo": url,
@@ -285,7 +289,7 @@ class ManifestService:
                             for field in ("name", "author", "version")
                         },
                     )
-                    option.update(self._check_local(remote, locals_))
+                    option.update(self._check_local(remote, locals_, kind=kind))
                 except Exception as exc:
                     option["problem"] = (
                         redact(str(exc))
@@ -493,7 +497,12 @@ class ManifestService:
                     ):
                         raise ValueError("市场条目已变化，请重新预检。")
                 locals_ = [record["local"] for record in await self.sources.inventory()]
-                if self._check_local(item["remote"], locals_)["status"] != "install":
+                if (
+                    self._check_local(item["remote"], locals_, kind=selected["source"])[
+                        "status"
+                    ]
+                    != "install"
+                ):
                     raise ValueError(
                         "目标插件或市场条目已变化，请重新预检；未覆盖现有插件。"
                     )

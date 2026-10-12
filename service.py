@@ -16,9 +16,11 @@ from astrbot.core.star.filter.command_group import CommandGroupFilter
 from astrbot.core.star.star import StarMetadata
 from astrbot.core.star.star_handler import star_handlers_registry
 from astrbot.dashboard.services.plugin_service import PluginService, PluginServiceError
+from packaging.version import Version
 
 from .bytecode import clear_plugin_bytecode
 from .catalog import command_entries, tool_entries
+from .identity import authors_match
 from .redaction import redact
 
 PLUGIN_NAME_PREFIX = "astrbot_plugin_"
@@ -252,15 +254,20 @@ class PluginOperations:
         Raises:
             ValueError: The requested operation is unsafe or unsupported.
         """
-        if action == "remove":
+        if action in {"remove", "update"}:
             if target.reserved:
-                raise ValueError("该插件是 AstrBot 保留插件，无法卸载。")
-        elif target.plugin is None:
+                raise ValueError(
+                    "该插件是 AstrBot 保留插件，无法"
+                    + ("更新。" if action == "update" else "卸载。")
+                )
+        if target.plugin is None and action != "remove":
             raise ValueError(
                 "该插件加载失败，请通过 WebUI 恢复；聊天命令仅支持卸载加载失败插件。"
             )
         plugin = target.plugin
         if plugin is not None:
+            if plugin.module_path == self.owner_module and action == "update":
+                raise ValueError("插件管家自身请通过官方插件页面更新。")
             if plugin.module_path == self.owner_module and action in {
                 "disable",
                 "remove",
@@ -582,17 +589,21 @@ class PluginOperations:
         ):
             raise RuntimeError("安装后插件未完成注册和初始化。")
         if payload.get("install_method") == "market":
-            installed_id = self.web.get_market_plugin_id(
-                {"author": target.plugin.author, "name": target.name}
-            )
-            if installed_id != identifier:
+            market_author, market_name = identifier.split("/", 1)
+            if target.name != market_name or not authors_match(
+                target.plugin.author, market_author, market=True
+            ):
                 raise PluginServiceError(
                     "Installed plugin identity does not match the marketplace request.",
                     public_message="安装包的作者或插件名与市场 ID 不一致，可能已产生部分变更",
                 )
-        if (
-            expected_identity is not None
-            and (target.name, target.plugin.author) != expected_identity
+        if expected_identity is not None and (
+            target.name != expected_identity[0]
+            or not authors_match(
+                target.plugin.author,
+                expected_identity[1],
+                market=payload.get("install_method") == "market",
+            )
         ):
             raise PluginServiceError(
                 "Installed plugin identity does not match the preview.",
@@ -609,6 +620,83 @@ class PluginOperations:
             except Exception:
                 warning = "来源历史保存失败，请在插件页面检查；安装已完成。"
         return PluginInstallResult(target, warning)
+
+    async def update_target(
+        self,
+        target: PluginTarget,
+        *,
+        repo_url: str,
+        download_url: str,
+        source_revision: str,
+    ) -> StarMetadata:
+        """Use AstrBot's updater and reload one plugin while preserving its enabled state.
+
+        Args:
+            target: Registered plugin captured after source revalidation.
+            repo_url: Current source repository, including an explicit branch.
+            download_url: Official market archive URL, or empty for repository sources.
+            source_revision: Source and local metadata snapshot checked before updating.
+
+        Returns:
+            Newly registered plugin metadata after a verified version upgrade.
+
+        Raises:
+            ValueError: The target changed, lacks update interfaces, or did not upgrade.
+            Exception: Downloading, dependency preparation, or loading failed.
+        """
+        self.ensure_writable()
+        self.check_operation(target, "update")
+        if not hasattr(self.manager, "_updater") or not hasattr(
+            self.manager, "_ensure_plugin_requirements"
+        ):
+            raise ValueError("当前 AstrBot 缺少插件更新接口，请检查主程序版本。")
+        was_active = target.plugin.activated
+        old_version = Version(str(target.plugin.version))
+        old_identity = (target.plugin.name, target.plugin.author)
+        async with self.manager._pm_lock:
+            self.revalidate(target)
+            self.check_operation(target, "update")
+            directory = self.validated_directory(target)
+            record = await self.sources.detail(target.directory)
+            if record["revision"] != source_revision:
+                raise ValueError("插件或当前更新源已变化，请重新检查。")
+            await self.manager._updater.update(
+                target.plugin, repo_url=repo_url, download_url=download_url
+            )
+            await self.manager._ensure_plugin_requirements(str(directory), target.name)
+            await asyncio.to_thread(
+                clear_plugin_bytecode, str(directory.parent), directory.name
+            )
+            await self.manager._terminate_plugin(target.plugin)
+            await self.manager._unbind_plugin(target.name, target.plugin.module_path)
+            success, error = await self.manager.load(
+                specified_module_path=target.plugin.module_path
+            )
+            if not success:
+                raise ValueError(error or "插件更新后加载失败。")
+            registered = [
+                plugin
+                for plugin in self.context.get_all_stars()
+                if plugin.root_dir_name == target.directory
+            ]
+            if len(registered) != 1:
+                raise ValueError("插件更新后未唯一注册，请通过官方插件页面检查。")
+            current = registered[0]
+            if (
+                (current.name, current.author) != old_identity
+                or current.activated != was_active
+                or Version(str(current.version)) <= old_version
+                or (
+                    was_active
+                    and (
+                        current.star_cls is None
+                        or current.star_cls is target.plugin.star_cls
+                    )
+                )
+            ):
+                raise ValueError("插件更新后的身份、版本或启停状态与预期不一致。")
+        await self.web.sync_skills_after_plugin_change()
+        return current
 
     async def disable(self, target: PluginTarget) -> str:
         """Disable using the core service and verify the resulting state.

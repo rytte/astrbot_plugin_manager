@@ -54,7 +54,7 @@ async function main() {
     local: {directory: "demo_dir", name: "demo", author: "Alice", display_name: "<img src=x onerror=alert(1)>", status: "enabled", version: "1.0.0", problem: "", reserved: false},
   };
   const unbound = structuredClone(record); unbound.local.directory = "unknown_dir"; unbound.local.name = "unknown"; unbound.bindings = []; unbound.active_binding_id = null; unbound.provenance.method = "unknown";
-  const management = {csrf: "source-token", busy: false, plugins: [record, unbound], jobs: []};
+  const management = {csrf: "source-token", busy: false, plugins: [record, unbound], jobs: [], updates: {id: null, status: "idle", results: [], done: 0, total: 0}};
   const plugin = {...record.local, plugin_id: "Alice/demo", logo: "/api/file/icon-token", blocked: "", ranges: [], data_available: true, config_available: true, code_size: 1024, config_size: 32, data_size: 2048, kv_count: 1};
   const state = {csrf: "zip-token", busy: false, plugins: [plugin, {...plugin, ...unbound.local, logo: null}], jobs: [], rule: {updated_at: null, selections: []}, limits: {archive_bytes: 268435456}};
   const posts = [], downloads = [], uploads = [];
@@ -64,9 +64,11 @@ async function main() {
   let pendingDownload = null;
   let delayedPreview, failPreview = false;
   let manifestResponse = null, failDraft = false;
+  let updateRequests = 0, failUpdate = false;
   const bridge = {
     async ready() {}, onContext(handler) {handler({isDark: true});},
     async apiGet(endpoint, params) {
+      if (endpoint === "manage/updates") {updateRequests += 1; return structuredClone(management.updates);}
       if (endpoint === "manage/manifest-preview") {
         const job = state.jobs.find(job => job.id === params.id);
         return job && ["queued", "running"].includes(job.status) ? {ready: false, job: structuredClone(job)} : structuredClone(manifestResponse);
@@ -95,6 +97,22 @@ async function main() {
     async apiPost(endpoint, body) {
       posts.push({endpoint, body});
       if (endpoint.startsWith("manage/")) assert.equal(body.csrf, "source-token");
+      if (endpoint === "manage/check-updates") {
+        assert.deepEqual(Object.keys(body), ["csrf"]);
+        management.updates = {id: "check-id", status: "running", checked_at: "2026-10-12T10:00:00Z", done: 0, total: 2, results: record.bindings.map(source => ({directory: record.local.directory, binding_id: source.id, revision: record.revision, is_current: source.id === record.active_binding_id, status: "pending", local_version: "1.0.0", remote_version: "", message: "等待检查", can_update: false}))};
+        return structuredClone(management.updates);
+      }
+      if (endpoint === "manage/update-plugin") {
+        if (failUpdate) throw new Error("远端版本或来源已变化，请重新检查后更新。");
+        assert.equal(body.check_id, management.updates.id);
+        assert.equal(body.binding_id, record.active_binding_id);
+        assert.equal(body.acknowledged, true);
+        const job = {id: "update-job", kind: "plugin_update", status: "running", created_at: 100, phase: "正在更新", results: [], warnings: [], expired: false};
+        state.jobs.unshift(job); state.busy = true;
+        management.updates.results[0].status = "updating";
+        management.updates.results[0].can_update = false;
+        return structuredClone(job);
+      }
       if (endpoint === "transfer/delete-job") {
         assert.equal(body.csrf, "zip-token"); assert.equal(body.acknowledged, true);
         if (failDelete) throw new Error("任务文件删除失败，请重试。");
@@ -211,6 +229,61 @@ async function main() {
   const icon = descendants(elements["plugin-list"]).find(element => element.tagName === "img");
   assert.equal(icon.src, plugin.logo);
   assert.equal(descendants(elements["plugin-list"]).filter(element => element.tagName === "img")[1].src, "/favicon.svg");
+
+  // A manual check covers all bindings even with a filter, and polls only while running.
+  const repositoryBinding = {...binding, id: "repository", kind: "repository", market_plugin_id: ""};
+  record.bindings.push(repositoryBinding);
+  elements.search.value = "unknown"; await elements.search.trigger("input");
+  await elements["check-updates"].trigger("click");
+  assert.equal(elements["check-updates"].disabled, true);
+  assert.match(elements["update-summary"].textContent, /0 \/ 2/);
+  await vm.runInContext("pollJobs()", context);
+  assert.equal(updateRequests, 1);
+  management.updates.status = "completed"; management.updates.done = 2;
+  for (const result of management.updates.results) Object.assign(result, {status: "update_available", message: "发现新版本", remote_version: result.is_current ? "2.0.0" : "3.0.0", can_update: result.is_current});
+  await vm.runInContext("pollJobs()", context);
+  assert.match(elements["update-summary"].textContent, /当前更新源有新版本：1/);
+  await vm.runInContext("pollJobs()", context);
+  assert.equal(updateRequests, 2, "Completed checks must not keep fetching source status");
+  elements.search.value = ""; await elements.search.trigger("input");
+  const updateButtons = () => descendants(elements["plugin-list"]).filter(element => element.tagName === "button" && element.textContent === "更新");
+  assert.equal(updateButtons().length, 1);
+  assert.match(elements["plugin-list"].textContent, /来源 2.0.0/);
+  assert.doesNotMatch(elements["plugin-list"].textContent, /3.0.0/);
+  await vm.runInContext("openSource('demo_dir')", context);
+  assert.match(elements["binding-list"].textContent, /来源 3.0.0/);
+  assert.equal(descendants(elements["binding-list"]).filter(element => element.tagName === "button" && element.textContent === "更新").length, 1);
+  await elements["close-source"].trigger("click");
+  record.revision = "source-changed";
+  await vm.runInContext("loadManagement()", context);
+  assert.equal(updateButtons().length, 0);
+  assert.match(elements["plugin-list"].textContent, /重新检查/);
+  record.revision = "r1"; await vm.runInContext("loadManagement()", context);
+  const cancelledUpdate = updateButtons()[0].trigger("click"); await settle();
+  assert.equal(elements.confirmation.open, true);
+  await elements["confirmation-cancel"].trigger("click"); await cancelledUpdate;
+  assert.ok(!posts.some(item => item.endpoint === "manage/update-plugin"));
+  failUpdate = true;
+  const rejectedUpdate = updateButtons()[0].trigger("click"); await settle();
+  elements.acknowledged.checked = true; await elements["confirmation-form"].trigger("submit"); await rejectedUpdate;
+  assert.match(elements.message.textContent, /远端版本或来源已变化/);
+  assert.equal(updateButtons().length, 1);
+  failUpdate = false;
+  const updating = updateButtons()[0].trigger("click"); await settle();
+  elements.acknowledged.checked = true; await elements["confirmation-form"].trigger("submit"); await updating;
+  assert.equal(updateButtons().length, 0);
+  assert.match(elements["job-list"].textContent, /更新插件/);
+  state.busy = false; state.jobs[0].status = "completed";
+  record.local.version = "2.0.0"; state.plugins[0].version = "2.0.0"; record.revision = "updated";
+  management.updates.results[0].status = "updated"; management.updates.results[0].message = "已更新至 2.0.0";
+  await vm.runInContext("pollJobs()", context); await settle();
+  assert.match(elements["plugin-list"].textContent, /已更新至 2.0.0/);
+  assert.equal(updateButtons().length, 0);
+  // Restore the base fixture for the remaining export/import and source scenarios.
+  record.bindings.pop(); record.local.version = "1.0.0"; record.revision = "r1"; state.plugins[0].version = "1.0.0";
+  management.updates = {id: null, status: "idle", done: 0, total: 0, results: []};
+  state.jobs = state.jobs.filter(job => job.kind !== "plugin_update");
+  await refresh();
 
   // The export sidebar is specific to its tab; switching keeps the current choices.
   assert.equal(elements["export-sidebar"].hidden, false);

@@ -19,6 +19,7 @@ const notifications = new Map();
 let confirmationResolve = null;
 let deletionResolve = null;
 let managementState = {plugins: []};
+let updateState = {id: null, status: "idle", results: [], done: 0, total: 0};
 let managementStatus = "loading", managementRequest = 0;
 let selectedRecord = null, bindingPreview = null, manifestPreview = null;
 let manifestSelections = new Set(), installChoices = new Set();
@@ -176,6 +177,57 @@ function button(text, action, disabled = false) {
   element.addEventListener("click", () => runRequest(action));
   return element;
 }
+function checkedSource(record, binding) {
+  return updateState.results.find(result => result.directory === record.local.directory && result.binding_id === binding.id);
+}
+function outdatedCheck(record, result) {
+  return result.revision !== record.revision || result.is_current !== (result.binding_id === record.active_binding_id);
+}
+function sourceUpdate(record, binding) {
+  const result = checkedSource(record, binding);
+  if (!result || result.status === "no_update") return null;
+  const outdated = outdatedCheck(record, result) && !["updated", "updating"].includes(result.status);
+  const container = node("div", "source-update " + (outdated ? "stale" : result.status));
+  const versions = result.remote_version ? "本机 " + result.local_version + " → 来源 " + result.remote_version + " · " : "";
+  container.append(node("p", "update-result", versions + result.message + (outdated ? "；信息已变化，请重新检查" : "")));
+  if (result.can_update && result.is_current && !outdated && updateState.status === "completed") {
+    const action = button("更新", () => updatePlugin(record, binding, result), managementStatus !== "ready");
+    action.className = "text-button update-plugin";
+    action.setAttribute("aria-label", "更新 " + record.local.name + " 至 " + result.remote_version);
+    container.append(action);
+  }
+  return container;
+}
+function renderUpdateSummary() {
+  const checking = updateState.status === "running";
+  elements["check-updates"].disabled = busy || requesting || checking || managementStatus !== "ready" || !managementState.csrf || !managementState.plugins.some(record => record.bindings.length);
+  elements["check-updates"].textContent = checking ? "检查中…" : "检查更新";
+  let text = "手动检查全部已关联来源；在来源管理中查看各来源结果。";
+  if (checking) text = "正在检查已关联来源：" + updateState.done + " / " + updateState.total;
+  else if (updateState.status === "completed") {
+    const currentUpdates = updateState.results.filter(result => result.is_current && result.status === "update_available").length;
+    const errors = updateState.results.filter(result => result.status === "error").length;
+    text = "已检查 " + updateState.total + " 个关联来源 · 当前更新源有新版本：" + currentUpdates + " 个插件" + (errors ? " · 失败：" + errors + " 个来源" : "") + " · " + sourceTime(updateState.checked_at);
+  } else if (updateState.status === "interrupted") text = updateState.error;
+  elements["update-summary"].textContent = text;
+}
+async function checkUpdates() {
+  updateState = await managementPost("check-updates", {});
+  renderPlugins(); renderSummary();
+  if (selectedRecord) renderSource();
+}
+async function updatePlugin(record, binding, result) {
+  const checkId = updateState.id;
+  if (outdatedCheck(record, result) || !result.can_update || binding.id !== record.active_binding_id) throw new Error("更新来源或插件信息已变化，请重新检查。");
+  if (!await confirmOperation("确认更新插件", [{...record.local, description: sourceText(binding) + " · " + result.local_version + " → " + result.remote_version}], "将通过 AstrBot 下载、处理依赖并加载插件，保持原来的启停状态。更新前会重新核对当前来源和版本。")) return;
+  const job = await managementPost("update-plugin", {check_id: checkId, directory: record.local.directory, binding_id: binding.id, acknowledged: true});
+  result.can_update = false; result.status = "updating"; result.message = "正在更新";
+  busy = true;
+  previousBusy = true;
+  renderJobs([job, ...displayedJobs.filter(previous => previous.id !== job.id)]);
+  message("插件更新任务已启动，可在任务记录中查看结果。", false, {task: true});
+  await pollJobs();
+}
 function metadataNotice(plugin, record) {
   const changed = record && managementStatus === "ready" ? record.metadata_changed : plugin.metadata_changed;
   if (!changed) return null;
@@ -303,6 +355,10 @@ function renderPlugins() {
     manageButton.className = "text-button source-manage";
     manageButton.setAttribute("aria-label", "管理 " + plugin.name + " 的插件来源");
     sourceCell.append(sourceLabel, manageButton);
+    if (binding) {
+      const result = sourceUpdate(record, binding);
+      if (result) sourceCell.append(result);
+    }
     row.append(selectCell, title, dataCell, configCell, sizeCell, sourceCell);
     body.append(row);
   }
@@ -317,6 +373,7 @@ function renderPlugins() {
 
 function renderSummary() {
   renderFormats();
+  renderUpdateSummary();
   const selected = manifestMode() ? Array.from(manifestSelections, directory => ({directory, config: false, data: false})) : selections();
   const selectedPlugins = state.plugins.filter(plugin => choices.get(plugin.directory)?.selected);
   const dirty = isDirty();
@@ -494,7 +551,7 @@ async function downloadJob(job, kind) {
 }
 
 function confirmJobDeletion(job) {
-  const labels = {export: "导出插件包", import: "导入插件包", manifest_export: "导出插件清单", manifest_install: "清单安装"};
+  const labels = {export: "导出插件包", import: "导入插件包", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件"};
   elements["delete-job-title"].textContent = (labels[job.kind] || job.kind) + " · " + job.id.slice(0, 8);
   elements["delete-job-time"].textContent = new Date(job.created_at * 1000).toLocaleString("zh-CN");
   elements["delete-recovery-warning"].hidden = !job.backup_ready && !["interrupted", "rollback_failed"].includes(job.status);
@@ -562,7 +619,7 @@ function renderJobs(jobs) {
     const card = node("article", "job-card");
     const heading = node("div", "job-heading");
     const title = node("div", "job-heading-main");
-    title.append(node("span", "job-title", (job.preview_task && ["queued", "running"].includes(job.status) ? "清单预检" : ({export: "导出插件包", import: "导入插件包", manifest_export: "导出插件清单", manifest_install: "清单安装"}[job.kind] || job.kind))), node("span", "pill job-status " + (job.preview_expired ? "expired" : job.status), job.preview_expired ? "预检已过期" : labels[job.status] || job.status));
+    title.append(node("span", "job-title", (job.preview_task && ["queued", "running"].includes(job.status) ? "清单预检" : ({export: "导出插件包", import: "导入插件包", manifest_export: "导出插件清单", manifest_install: "清单安装", plugin_update: "更新插件"}[job.kind] || job.kind))), node("span", "pill job-status " + (job.preview_expired ? "expired" : job.status), job.preview_expired ? "预检已过期" : labels[job.status] || job.status));
     const menu = node("div", "job-menu");
     const toggle = node("button", "job-menu-toggle", "⋯");
     toggle.type = "button";
@@ -632,6 +689,7 @@ function renderJobs(jobs) {
 }
 
 function bindEvents() {
+  elements["check-updates"].addEventListener("click", () => runRequest(checkUpdates));
   bindManagementEvents();
   document.addEventListener("click", event => {
     const menu = jobMenus.get(openJobMenuId);
@@ -713,6 +771,11 @@ function bindEvents() {
 
 async function pollJobs() {
   const response = await bridge.apiGet("transfer/jobs");
+  if (updateState.status === "running") {
+    updateState = await bridge.apiGet("manage/updates");
+    renderPlugins();
+    if (selectedRecord) renderSource();
+  }
   const finishedJobs = response.jobs.filter(job => displayedJobs.some(previous => previous.id === job.id && ["queued", "running"].includes(previous.status)));
   busy = response.busy;
   renderJobs(response.jobs);
@@ -750,6 +813,7 @@ async function initialize() {
 
 function updateManagement(updated) {
   managementState = updated;
+  updateState = updated.updates;
   for (const plugin of state.plugins) {
     const record = sourceRecord(plugin.directory);
     if (record && record.local.name === plugin.name) {
@@ -836,6 +900,8 @@ function renderSource() {
     if (binding.kind === "market" && binding.repo_url) content.append(sourceAddress("binding-repo", binding.repo_url));
     const verified = binding.verification === "identity_matched";
     content.append(node("p", "detail", verified ? "名称与作者已匹配" + (binding.checked_at ? " · " + sourceTime(binding.checked_at) : "") : binding.verification === "metadata_changed" ? "作者信息已变更 · 请重新校验后分享清单" : binding.verification === "imported" ? "从备份恢复 · 待校验" : "AstrBot 来源记录 · 尚未重新校验"));
+    const result = sourceUpdate(record, binding);
+    if (result) content.append(result);
     card.append(content);
     if (!isCurrent && (binding.kind === "repository" || binding.registry_url === null)) card.append(button(binding.verification === "imported" ? "校验并设为更新源" : "设为更新源", async () => {
       if (!await confirmOperation("切换更新源", [{name: local.name, directory: local.directory, description: sourceText(binding)}], "将重新校验该来源并同步到 AstrBot，后续原生 WebUI 更新使用此来源。最初安装记录保留。")) return;
@@ -864,7 +930,7 @@ function renderSource() {
   }
   const history = elements["source-history"]; history.replaceChildren();
   elements["source-history-count"].textContent = record.history.length;
-  const labels = {installed: "管家安装", uninstalled: "管家卸载", binding_added: "保存来源关联", active_changed: "切换当前更新源", core_observed: "观察到 AstrBot 来源变更", metadata_synced: "同步插件信息", bundle_imported: "从迁移包恢复代码", bundle_sources_imported: "恢复来源信息，等待重新校验"};
+  const labels = {installed: "管家安装", updated: "更新插件", uninstalled: "管家卸载", binding_added: "保存来源关联", active_changed: "切换当前更新源", core_observed: "观察到 AstrBot 来源变更", metadata_synced: "同步插件信息", bundle_imported: "从迁移包恢复代码", bundle_sources_imported: "恢复来源信息，等待重新校验"};
   for (const event of record.history.slice().reverse()) {const row = node("div", "history-row"); row.append(node("span", "history-event", labels[event.action] || event.action), node("span", "history-meta", sourceTime(event.at) + " · " + event.actor)); history.append(row);}
   if (!record.history.length) history.append(node("p", "source-empty", "暂无管家操作记录。"));
 }

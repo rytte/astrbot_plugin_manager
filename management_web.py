@@ -25,10 +25,11 @@ from .transfer_web import TransferWeb
 
 
 class ManagementWeb(TransferWeb):
-    def __init__(self, context, transfers, sources, manifests) -> None:
+    def __init__(self, context, transfers, sources, manifests, updates) -> None:
         super().__init__(context, transfers)
         self.sources = sources
         self.manifests = manifests
+        self.updates = updates
 
     def register(self) -> None:
         for action, method in {
@@ -37,6 +38,9 @@ class ManagementWeb(TransferWeb):
             "source-bind": "POST",
             "source-select": "POST",
             "metadata-sync": "POST",
+            "check-updates": "POST",
+            "updates": "GET",
+            "update-plugin": "POST",
             "manifest-export": "POST",
             "manifest-download": "GET",
             "manifest-upload": "POST",
@@ -66,7 +70,10 @@ class ManagementWeb(TransferWeb):
                     "busy": bool(
                         self.transfers.task and not self.transfers.task.done()
                     ),
+                    "updates": self.updates.state(owner),
                 }
+            elif action == "updates":
+                data = self.updates.state(owner)
             elif action == "manifest-preview":
                 data = self.manifests.read_preview(owner, request.query.get("id"))
             elif action == "manifest-download":
@@ -118,7 +125,22 @@ class ManagementWeb(TransferWeb):
                 if not isinstance(body, dict):
                     raise ValueError("请求必须是 JSON 对象。")
                 self._check_nonce(owner, body.get("csrf"))
-                if action == "metadata-sync":
+                if action == "check-updates":
+                    exact_keys(body, {"csrf"})
+                    data = await self.updates.start_check(owner)
+                elif action == "update-plugin":
+                    exact_keys(
+                        body,
+                        {"csrf", "check_id", "directory", "binding_id", "acknowledged"},
+                    )
+                    data = await self.updates.start_update(
+                        owner,
+                        body["check_id"],
+                        body["directory"],
+                        body["binding_id"],
+                        body["acknowledged"],
+                    )
+                elif action == "metadata-sync":
                     exact_keys(body, {"csrf", "directory", "revision"})
                     data = redact(
                         await self.sources.sync_metadata(
@@ -217,6 +239,7 @@ class ManagementWeb(TransferWeb):
 
     async def close(self) -> None:
         self.closed = True
+        await self.updates.close()
         self.context.registered_web_apis[:] = [
             entry
             for entry in self.context.registered_web_apis

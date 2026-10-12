@@ -47,7 +47,8 @@
       <div class="content">
         <section id="export-panel" class="card panel">
           <div class="panel-heading"><div><h2>插件列表</h2><p class="muted">选择插件及备份内容，或打开来源管理查看安装来源与更新源。</p></div><span id="plugin-count" class="pill">0 个插件</span></div>
-          <div class="toolbar"><label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="搜索显示名称、插件名或目录" aria-label="搜索插件"></label><select id="status-filter" aria-label="按状态筛选"><option value="all">全部状态</option><option value="enabled">已打开</option><option value="disabled">已关闭</option><option value="failed">加载失败</option><option value="pending">待加载</option></select></div>
+          <div class="toolbar"><label class="search"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="搜索显示名称、插件名或目录" aria-label="搜索插件"></label><select id="status-filter" aria-label="按状态筛选"><option value="all">全部状态</option><option value="enabled">已打开</option><option value="disabled">已关闭</option><option value="failed">加载失败</option><option value="pending">待加载</option></select><button id="check-updates" class="button secondary" title="联网检查全部已关联来源的版本，不受筛选或勾选范围影响" disabled>检查更新</button></div>
+          <p id="update-summary" class="update-summary muted small" role="status" aria-live="polite">手动检查全部已关联来源；在来源管理中查看各来源结果。</p>
           <div class="batch">
             <div class="selection-summary"><strong id="selection-label" aria-live="polite">已选 0 个插件</strong><button id="clear-selection" class="text-button" disabled>清空选择</button></div>
             <div class="bulk-options" data-zip-only><span class="muted">批量附带</span><label><input id="bulk-data" type="checkbox" aria-label="所选插件附带标准数据">标准数据</label><label><input id="bulk-config" type="checkbox" aria-label="所选插件附带当前配置">当前配置</label></div>

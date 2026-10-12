@@ -57,6 +57,59 @@ async def test_unknown_and_implicit_sources_are_never_reported_as_market(env):
     assert "缺少真实安装记录" in await env.plugin.sources.describe(target.name)
 
 
+@pytest.mark.parametrize("market_author", ["Soulter", "FateTrial"])
+async def test_market_coauthor_binding_uses_cache_and_preserves_full_author(
+    env, monkeypatch, market_cache, market_author
+):
+    target = env.add_target(name="astrbot_plugin_essential")
+    target.author = "Soulter,FateTrial"
+    original_plugin_id = target.plugin_id
+    market_id = f"{market_author}/{target.name}"
+    env.prefs["plugin_install_sources"] = {
+        target.root_dir_name: {**core_source(target), "market_plugin_id": market_id}
+    }
+    env.plugin.service.web.save_plugin_cache(
+        str(market_cache),
+        {
+            market_id: {
+                "name": target.name,
+                "author": market_author,
+                "repo": "https://github.com/test/demo",
+            }
+        },
+    )
+    fetch = AsyncMock(
+        side_effect=AssertionError("Matched coauthor cache must not fetch")
+    )
+    monkeypatch.setattr(env.plugin.service.web, "get_online_plugins", fetch)
+    preview = await env.plugin.sources.preview_binding(
+        "admin", target.root_dir_name, "market", market_id
+    )
+    saved = await env.plugin.sources.bind("admin", preview["id"], True, True)
+    assert saved["local"]["author"] == "Soulter,FateTrial"
+    assert target.plugin_id == original_plugin_id
+    assert (
+        env.prefs["plugin_install_sources"][target.root_dir_name]["market_plugin_id"]
+        == market_id
+    )
+    fetch.assert_not_awaited()
+
+
+async def test_repository_binding_cannot_omit_coauthors(env, monkeypatch):
+    target = env.add_target()
+    target.author = "Soulter,FateTrial"
+    monkeypatch.setattr(
+        env.manager,
+        "inspect_plugin_repository",
+        AsyncMock(return_value={"name": target.name, "author": "Soulter"}),
+        raising=False,
+    )
+    with pytest.raises(ValueError, match="作者或插件名"):
+        await env.plugin.sources.preview_binding(
+            "admin", target.root_dir_name, "repository", "https://github.com/test/demo"
+        )
+
+
 async def test_observation_does_not_invent_original_install_fact_and_survives_restart(
     env,
 ):

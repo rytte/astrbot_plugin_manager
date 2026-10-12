@@ -568,7 +568,7 @@ class TransferService:
 
     def _ensure_idle(self) -> None:
         if self.closing or self.deleting_jobs or (self.task and not self.task.done()):
-            raise ValueError("已有导入导出任务运行或管家正在关闭，请稍后重试。")
+            raise ValueError("已有插件管理任务运行或管家正在关闭，请稍后重试。")
 
     def _start(self, job: dict, operation, *, preview: bool = False) -> dict:
         self._ensure_idle()

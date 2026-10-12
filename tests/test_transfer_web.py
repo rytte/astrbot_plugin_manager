@@ -140,7 +140,11 @@ async def test_manifest_repository_upload_poll_and_selective_install(
     unsupported = await client.post(
         management_endpoint("manifest-upload/" + state["csrf"]),
         files={
-            "file": ("unsupported.json", json.dumps(manifest).encode(), "application/json")
+            "file": (
+                "unsupported.json",
+                json.dumps(manifest).encode(),
+                "application/json",
+            )
         },
     )
     assert unsupported.status_code == 400
@@ -541,6 +545,103 @@ async def test_malformed_upload_returns_400_and_removes_staging(web_client):
 
 def management_endpoint(action):
     return "/api/v1/plugins/extensions/astrbot_plugin_manager/manage/" + action
+
+
+async def test_manual_update_routes_auth_csrf_owner_and_job(web_client, monkeypatch):
+    env, client = web_client
+    target = env.make_transfer_plugin(active=False)
+    market_id = f"{target.author}/{target.name}"
+    env.prefs["plugin_install_sources"] = {
+        target.root_dir_name: {
+            "root_dir_name": target.root_dir_name,
+            "name": target.name,
+            "author": target.author,
+            "install_method": "market",
+            "registry_url": None,
+            "market_plugin_id": market_id,
+            "repo": "https://github.com/test/demo",
+        }
+    }
+    remote = {
+        "name": target.name,
+        "author": target.author,
+        "version": "2.0.0",
+        "repo": "https://github.com/test/demo",
+    }
+    monkeypatch.setattr(
+        env.plugin.service.web,
+        "get_online_plugins",
+        AsyncMock(return_value=({market_id: remote}, None)),
+    )
+    initial = (await client.get(management_endpoint("state"))).json()["data"]
+    assert initial["updates"]["status"] == "idle"
+    token = initial["csrf"]
+    for action in ("check-updates", "update-plugin"):
+        denied = await client.post(management_endpoint(action), json={"csrf": "wrong"})
+        assert denied.status_code == 403
+    assert not env.plugin.updates.task
+    invalid = await client.post(
+        management_endpoint("check-updates"),
+        json={"csrf": token, "directories": [target.root_dir_name]},
+    )
+    assert invalid.status_code == 400
+    started = await client.post(
+        management_endpoint("check-updates"), json={"csrf": token}
+    )
+    assert started.status_code == 200, started.text
+    await env.plugin.updates.task
+    checked = await client.get(management_endpoint("updates"))
+    assert checked.status_code == 200, checked.text
+    report = checked.json()["data"]
+    assert report["status"] == "completed"
+    assert report["results"][0]["can_update"], report["results"][0]["message"]
+    other_token = jwt.encode(
+        {"username": "other", "exp": time.time() + 3600},
+        env.context.get_config()["dashboard"]["jwt_secret"],
+        algorithm="HS256",
+    )
+    other = await client.get(
+        management_endpoint("updates"),
+        headers={"Authorization": "Bearer " + other_token},
+    )
+    assert other.json()["data"]["status"] == "idle"
+    entry = report["results"][0]
+    body = {
+        "csrf": token,
+        "check_id": report["id"],
+        "directory": entry["directory"],
+        "binding_id": entry["binding_id"],
+        "acknowledged": False,
+    }
+    unconfirmed = await client.post(management_endpoint("update-plugin"), json=body)
+    assert unconfirmed.status_code == 400 and not env.plugin.transfers.jobs
+
+    async def update(captured, **kwargs):
+        target.version = "2.0.0"
+        path = (
+            Path(env.manager.plugin_store_path) / target.root_dir_name / "metadata.yaml"
+        )
+        metadata = yaml.safe_load(path.read_text(encoding="utf-8"))
+        metadata["version"] = target.version
+        path.write_text(yaml.safe_dump(metadata), encoding="utf-8")
+        return target
+
+    monkeypatch.setattr(
+        env.plugin.service, "update_target", AsyncMock(side_effect=update)
+    )
+    body["acknowledged"] = True
+    result = await client.post(management_endpoint("update-plugin"), json=body)
+    assert result.status_code == 200, result.text
+    assert result.json()["data"]["kind"] == "plugin_update"
+    assert "update_plan" not in result.text
+    await env.plugin.transfers.task
+    final = (await client.get(management_endpoint("state"))).json()["data"]
+    assert final["jobs"][0]["status"] == "completed"
+    assert final["updates"]["results"][0]["status"] == "updated"
+    assert not target.activated
+    client.headers.pop("Authorization")
+    for action in ("state", "updates"):
+        assert (await client.get(management_endpoint(action))).status_code in (401, 403)
 
 
 async def test_metadata_sync_uses_csrf_and_only_updates_manager_records(web_client):

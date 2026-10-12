@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from astrbot.core.star.star_manager import PluginManager
+from astrbot.core.star.updater import _PluginUpdater
 
 
 @pytest.fixture
@@ -233,6 +234,146 @@ class Main(Star):
     assert not env.model_calls
 
 
+@pytest.mark.parametrize("active", [True, False])
+@pytest.mark.parametrize("source_kind", ["market", "repository"])
+@pytest.mark.parametrize("author_declaration", ["Probe", "Probe, Coauthor"])
+async def test_update_uses_core_archive_and_preserves_enabled_state(
+    live_env, monkeypatch, active, source_kind, author_declaration
+):
+    env = live_env
+    directory = env.live_root / "reload_probe"
+    directory.mkdir()
+    module_path = "data.plugins.reload_probe.main"
+    main_code = '''from astrbot.api.star import Star
+from astrbot.api.event import filter
+from .helper import VALUE
+class Main(Star):
+    def __init__(self, context):
+        self.marker = VALUE
+    async def initialize(self):
+        self.initialized = True
+    async def terminate(self):
+        self.terminated = True
+    @filter.command("update_probe")
+    async def probe(self, event):
+        event.set_result(event.plain_result(str(VALUE)))
+    @filter.llm_tool(name="update_probe_tool")
+    async def tool(self, event):
+        """Return the installed update revision."""
+        return str(VALUE)
+'''
+    original_metadata = f"name: reload_probe\nauthor: {author_declaration}\ndesc: Update probe\nversion: 1.0.0\n"
+    (directory / "metadata.yaml").write_text(original_metadata, encoding="utf-8")
+    (directory / "main.py").write_text(main_code, encoding="utf-8")
+    (directory / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
+    if not active:
+        env.prefs["inactivated_plugins"] = [module_path]
+    env.live_modules.append({"pname": "reload_probe", "module": "main"})
+    success, error = await env.live_manager.load(specified_dir_name="reload_probe")
+    assert success, error
+    original = env.context.get_registered_star("reload_probe")
+    assert original.activated is active
+    previous_instance = original.star_cls
+    repo_url = "https://github.com/probe/reload_probe/tree/stable"
+    download_url = "https://example.com/update.zip" if source_kind == "market" else ""
+    remote = {
+        "name": "reload_probe",
+        "author": "Probe" if source_kind == "market" else author_declaration,
+        "version": "2.0.0",
+        "repo": repo_url,
+        "download_url": download_url,
+    }
+    env.prefs["plugin_install_sources"] = {
+        "reload_probe": {
+            "root_dir_name": "reload_probe",
+            "name": "reload_probe",
+            "author": author_declaration,
+            "install_method": source_kind,
+            "repo": repo_url,
+            "registry_url": None,
+            "market_plugin_id": "Probe/reload_probe" if source_kind == "market" else "",
+            "installed_at": "2025-01-01T00:00:00Z",
+        }
+    }
+    monkeypatch.setattr(
+        env.plugin.service.web,
+        "get_online_plugins",
+        AsyncMock(return_value=({"Probe/reload_probe": remote}, None)),
+    )
+    monkeypatch.setattr(
+        env.live_manager, "inspect_plugin_repository", AsyncMock(return_value=remote)
+    )
+    updater = _PluginUpdater()
+    updater.plugin_store_path = str(env.live_root)
+
+    async def download(url, destination):
+        assert env.live_manager._pm_lock.locked()
+        assert url == download_url
+        with zipfile.ZipFile(destination, "w") as archive:
+            archive.writestr(
+                "plugin/metadata.yaml", original_metadata.replace("1.0.0", "2.0.0")
+            )
+            archive.writestr("plugin/main.py", main_code)
+            archive.writestr("plugin/helper.py", "VALUE = 2\n")
+
+    async def repository_download(path, url, *, proxy):
+        assert url == repo_url
+        await download("", path + ".zip")
+
+    monkeypatch.setattr(updater, "_download_file", AsyncMock(side_effect=download))
+    monkeypatch.setattr(
+        updater, "_download_repository", AsyncMock(side_effect=repository_download)
+    )
+    env.live_manager._updater = updater
+    env.live_manager._ensure_plugin_requirements = AsyncMock()
+    provenance = (await env.plugin.sources.detail("reload_probe"))["provenance"]
+    await env.plugin.updates.start_check("admin")
+    await env.plugin.updates.task
+    report = env.plugin.updates.state("admin")
+    entry = report["results"][0]
+    assert entry["can_update"]
+    job = await env.plugin.updates.start_update(
+        "admin", report["id"], "reload_probe", entry["binding_id"], True
+    )
+    await env.plugin.transfers.task
+    completed = env.plugin.transfers.get_job(job["id"], "admin")
+    assert completed["status"] == "completed", completed["error"]
+    current = env.context.get_registered_star("reload_probe")
+    assert current.version == "2.0.0" and current.activated is active
+    assert (
+        len(
+            [
+                plugin
+                for plugin in env.context.get_all_stars()
+                if plugin.root_dir_name == "reload_probe"
+            ]
+        )
+        == 1
+    )
+    if active:
+        assert previous_instance.terminated
+        assert current.star_cls is not previous_instance
+        assert current.star_cls.initialized and current.star_cls.marker == 2
+    else:
+        assert current.star_cls is None
+        assert env.prefs["inactivated_plugins"] == [module_path]
+    commands = [
+        item
+        for item in env.registry
+        if item.handler_module_path == module_path and item.handler_name == "probe"
+    ]
+    assert len(commands) == 1
+    tools = [tool for tool in env.tools.func_list if tool.name == "update_probe_tool"]
+    assert len(tools) == 1 and tools[0].active is active
+    current_source = await env.plugin.sources.detail("reload_probe")
+    assert current_source["provenance"] == provenance
+    assert not current_source["metadata_changed"]
+    env.live_manager._ensure_plugin_requirements.assert_awaited_once_with(
+        str(directory), "reload_probe"
+    )
+    env.sync.assert_awaited_once()
+
+
 @pytest.mark.parametrize("allow_prefix_omission", [True, False])
 @pytest.mark.parametrize("broken_revision", [False, True])
 async def test_manager_reloads_itself_and_clears_confirmations(
@@ -247,7 +388,9 @@ async def test_manager_reloads_itself_and_clears_confirmations(
         source_root / "_conf_schema.json",
     ]:
         shutil.copy2(source, directory / source.name)
-    config_path = Path(env.live_manager.plugin_config_path) / f"{directory.name}_config.json"
+    config_path = (
+        Path(env.live_manager.plugin_config_path) / f"{directory.name}_config.json"
+    )
     config_path.write_text(
         json.dumps({"allow_prefix_omission": allow_prefix_omission}), encoding="utf-8"
     )
