@@ -8,7 +8,7 @@ import math
 
 from .export_names import export_name
 from .identity import authors_match
-from .source_bundle import validate_bindings
+from .source_bundle import validate_source
 from .transfer_bundle import MAX_JSON, component, exact_keys
 
 FORMAT = "astrbot-plugin-manager-data"
@@ -32,9 +32,7 @@ def validate_manager_data(value) -> dict:
         raise ValueError("管家数据最多包含 256 个插件的来源关联。")
     seen = set()
     for entry in value["sources"]:
-        exact_keys(
-            entry, {"directory", "name", "author", "bindings", "active_binding_id"}
-        )
+        exact_keys(entry, {"directory", "name", "author", "source"})
         component(entry["directory"], module=True)
         component(entry["name"], module=True)
         if (
@@ -46,7 +44,9 @@ def validate_manager_data(value) -> dict:
         if entry["name"].casefold() in seen:
             raise ValueError("管家数据包含重复插件来源关联。")
         seen.add(entry["name"].casefold())
-        validate_bindings(entry["bindings"], entry["active_binding_id"])
+        validate_source(entry["source"])
+        if entry["source"] is None:
+            raise ValueError("管家数据中的来源不能为空。")
     rule = value["rule"]
     exact_keys(rule, {"rule_version", "updated_at", "selections"})
     if type(rule["rule_version"]) is not int or rule["rule_version"] != 1:

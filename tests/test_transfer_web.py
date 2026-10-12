@@ -753,7 +753,9 @@ async def test_upload_preflight_and_private_downloads_are_owner_bound(
     assert downloaded.headers["cache-control"] == "no-store"
     if icon_state == "unavailable":
         monkeypatch.setattr(
-            env.plugin.service.web, "get_plugin_logo_token", AsyncMock(return_value=None)
+            env.plugin.service.web,
+            "get_plugin_logo_token",
+            AsyncMock(return_value=None),
         )
     elif icon_state == "present":
         logo.write_bytes(b"\x89PNG\r\n\x1a\ncurrent instance icon")
@@ -828,7 +830,9 @@ async def test_pending_load_route_requires_auth_nonce_and_confirmation(web_clien
     env.owners.pop(target.module_path)
     state = (await client.get(management_endpoint("state"))).json()["data"]
     record = next(
-        item for item in state["plugins"] if item["local"]["directory"] == target.root_dir_name
+        item
+        for item in state["plugins"]
+        if item["local"]["directory"] == target.root_dir_name
     )
     body = {
         "csrf": "wrong",
@@ -890,9 +894,14 @@ async def test_pending_load_route_requires_auth_nonce_and_confirmation(web_clien
     assert final["jobs"] == []
     assert not final["busy"]
     assert not list(env.plugin.transfers.jobs_root.glob("*"))
-    assert next(
-        item for item in final["plugins"] if item["local"]["directory"] == target.root_dir_name
-    )["local"]["status"] == "enabled"
+    assert (
+        next(
+            item
+            for item in final["plugins"]
+            if item["local"]["directory"] == target.root_dir_name
+        )["local"]["status"]
+        == "enabled"
+    )
 
 
 async def test_pending_load_failure_returns_error_without_task_record(web_client):
@@ -1098,7 +1107,6 @@ async def test_management_binding_requires_csrf_confirmation_and_authentication(
         json={
             "csrf": state["csrf"],
             "id": identifier,
-            "activate": True,
             "acknowledged": False,
         },
     )
@@ -1108,7 +1116,6 @@ async def test_management_binding_requires_csrf_confirmation_and_authentication(
         json={
             "csrf": state["csrf"],
             "id": identifier,
-            "activate": True,
             "acknowledged": True,
         },
     )

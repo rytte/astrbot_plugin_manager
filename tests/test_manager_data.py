@@ -25,8 +25,7 @@ def manager_data(*, name="demo_plugin", author="Tester", directory="old_director
                 "directory": directory,
                 "name": name,
                 "author": author,
-                "bindings": [binding],
-                "active_binding_id": binding["id"],
+                "source": binding,
             }
         ],
         "rule": {
@@ -69,9 +68,9 @@ def test_manager_data_rejects_unknown_fields_inherited_trust_and_invalid_rules(a
     elif attack in {"history", "jobs"}:
         value[attack] = []
     elif attack == "trust":
-        value["sources"][0]["bindings"][0]["verification"] = "identity_matched"
+        value["sources"][0]["source"]["verification"] = "identity_matched"
     elif attack == "credentials":
-        value["sources"][0]["bindings"][0]["repo_url"] = (
+        value["sources"][0]["source"]["repo_url"] = (
             "https://user:secret@github.com/test/new"
         )
     elif attack == "duplicate":
@@ -222,8 +221,7 @@ async def test_zip_snapshot_has_all_plugin_sources_rules_and_no_private_state(
         assert value["rule"] == rule
         assert value["sources"][0]["name"] == target.name
         assert (
-            value["sources"][0]["bindings"][0]["repo_url"]
-            == "https://github.com/test/demo"
+            value["sources"][0]["source"]["repo_url"] == "https://github.com/test/demo"
         )
         assert not any(
             field in raw
@@ -238,7 +236,7 @@ async def test_zip_snapshot_has_all_plugin_sources_rules_and_no_private_state(
         assert f"payload/{manager.root_dir_name}/sources.json" in archive.namelist()
 
 
-async def test_zip_import_merges_sources_maps_rule_preserves_core_and_manager(
+async def test_zip_import_preserves_current_sources_maps_rule_and_keeps_manager_running(
     transfer_env, tmp_path
 ):
     env = transfer_env
@@ -251,7 +249,7 @@ async def test_zip_import_merges_sources_maps_rule_preserves_core_and_manager(
         }
     }
     current = copy.deepcopy(
-        (await env.plugin.sources.detail(target.root_dir_name))["bindings"][0]
+        (await env.plugin.sources.detail(target.root_dir_name))["current_source"]
     )
     before_prefs = copy.deepcopy(env.prefs)
     package = rewrite(
@@ -264,11 +262,8 @@ async def test_zip_import_merges_sources_maps_rule_preserves_core_and_manager(
     await env.plugin.transfers.task
     assert job["status"] == "completed", job
     record = await env.plugin.sources.detail(target.root_dir_name)
-    assert record["bindings"][0] == current
-    assert record["active_binding_id"] == current["id"]
-    assert record["bindings"][1]["verification"] == "imported"
-    assert record["bindings"][1]["checked_at"] is None
-    assert record["bindings"][1]["imported_active"] is True
+    assert record["current_source"] == current
+    assert record["pending_source"] is None
     assert env.plugin.transfers.rule()["selections"][0]["directory"] == "new_directory"
     assert env.prefs == before_prefs
     assert not job.get("reload_required")
@@ -281,7 +276,9 @@ async def test_zip_import_merges_sources_maps_rule_preserves_core_and_manager(
     )
     await env.plugin.transfers.task
     assert repeated["status"] == "completed"
-    assert len((await env.plugin.sources.detail(target.root_dir_name))["bindings"]) == 2
+    assert (await env.plugin.sources.detail(target.root_dir_name))[
+        "pending_source"
+    ] is None
 
 
 @pytest.mark.parametrize(
@@ -459,9 +456,9 @@ async def test_manager_data_restores_after_new_plugins_in_same_zip(transfer_env)
         manager.root_dir_name,
     ]
     assert len(transfers.rule()["selections"]) == 2
-    assert (await env.plugin.sources.detail(target.root_dir_name))["bindings"][0][
-        "verification"
-    ] == "imported"
+    restored = await env.plugin.sources.detail(target.root_dir_name)
+    assert restored["current_source"] is None
+    assert restored["pending_source"] is not None
     assert env.context.get_registered_star(manager.name) is manager
     assert all(
         call.args[0].module_path != manager.module_path
@@ -502,7 +499,8 @@ async def test_unmatched_source_is_reported_without_inheriting_identity(
     assert imported["status"] == "completed_with_warning", imported
     assert "未恢复来源关联" in imported["warnings"][0]
     assert not any(
-        record["bindings"] for record in await env.plugin.sources.inventory()
+        (record["current_source"] or record["pending_source"])
+        for record in await env.plugin.sources.inventory()
     )
 
 
@@ -542,7 +540,7 @@ async def test_combined_page_restore_preserves_original_plugin_sources(transfer_
         }
     }
     original = copy.deepcopy(
-        (await env.plugin.sources.detail(target.root_dir_name))["bindings"]
+        (await env.plugin.sources.detail(target.root_dir_name))["current_source"]
     )
     package = await export_zip(env, [manager, target])
     before_store = env.plugin.sources._store()
@@ -571,7 +569,7 @@ async def test_combined_page_restore_preserves_original_plugin_sources(transfer_
         == before_store["plugins"][target.root_dir_name]
     )
     assert (await env.plugin.sources.detail(target.root_dir_name))[
-        "bindings"
+        "current_source"
     ] == original
     assert env.context.get_registered_star(manager.name) is manager
 

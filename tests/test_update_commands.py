@@ -39,12 +39,10 @@ def bind(env, target, kind="market"):
     return core
 
 
-async def add_repository_binding(env, target):
+async def add_pending_repository_source(env, target):
     record = await env.plugin.sources.detail(target.root_dir_name)
-    record["bindings"].append(
-        env.plugin.sources._binding(
-            {"install_method": "repository", "repo": metadata(target)["repo"]}
-        )
+    record["pending_source"] = env.plugin.sources._binding(
+        {"install_method": "repository", "repo": metadata(target)["repo"]}
     )
     await env.plugin.sources._save_record(record)
 
@@ -64,16 +62,15 @@ def chat_plugin(env, monkeypatch):
     return env, target, market, repository
 
 
-async def test_check_reports_all_sources_without_listing_unchanged_plugins(chat_plugin):
+async def test_check_reports_current_sources_without_listing_unchanged_plugins(chat_plugin):
     env, target, market, repository = chat_plugin
-    await add_repository_binding(env, target)
+    await add_pending_repository_source(env, target)
     unchanged = env.add_target("unchanged", "unchanged")
     bind(env, unchanged)
     broken = env.add_target("broken", "broken")
     bind(env, broken)
     alternative = env.add_target("alternative", "alternative")
-    bind(env, alternative)
-    await add_repository_binding(env, alternative)
+    bind(env, alternative, "repository")
     market.return_value = (
         {
             target.plugin_id: metadata(target),
@@ -96,27 +93,27 @@ async def test_check_reports_all_sources_without_listing_unchanged_plugins(chat_
     await env.scheduler.execute(event)
 
     text = output(event)
-    assert event.sent[0] == "正在检查全部关联来源的更新，请稍候。"
-    assert "4 个插件，6 个关联来源" in text
-    assert "可更新 1 个插件 · 无版本更新 2 个来源 · 检查失败 1 个来源" in text
+    assert event.sent[0] == "正在按各插件的当前来源检查更新，请稍候。"
+    assert "4 个插件。" in text
+    assert "可更新 2 个插件 · 无版本更新 1 个插件 · 检查失败 1 个插件" in text
     assert "示例插件（astrbot_plugin_demo）：1.0.0 → 2.0.0" in text
     assert "/pm update demo_directory" in text
-    assert "其他来源有新版本" in text and "alternative" in text
+    assert "/pm update alternative" in text and "其他来源有新版本" not in text
     assert "检查失败" in text and "来源中未找到该插件" in text
     assert "unchanged" not in text
     market.assert_awaited_once_with(custom_registry=None, force_refresh=True)
-    assert repository.await_count == 2
+    assert repository.await_count == 1
     assert env.plugin.updates.state("web-user") == web_report
     assert not env.plugin.transfers.jobs
     assert event.is_stopped() and not env.model_calls
 
 
-async def test_check_without_bindings_does_not_access_network(env, monkeypatch):
+async def test_check_without_current_sources_does_not_access_network(env, monkeypatch):
     fetch = AsyncMock(side_effect=AssertionError("must not query the market"))
     monkeypatch.setattr(env.plugin.service.web, "get_online_plugins", fetch)
     event = env.event("/pm check-update")
     await env.scheduler.execute(event)
-    assert "没有已关联来源可检查" in output(event)
+    assert "没有当前更新源可检查" in output(event)
     fetch.assert_not_awaited()
     assert event.is_stopped() and not env.model_calls
 
@@ -131,7 +128,7 @@ async def test_direct_update_uses_current_source_and_preserves_state(
     target.star_cls = object() if active else None
     bind(env, target, kind)
     if kind == "market":
-        await add_repository_binding(env, target)
+        await add_pending_repository_source(env, target)
     original = await env.plugin.sources.detail(target.root_dir_name)
     old_provenance = copy.deepcopy(original["provenance"])
     path = Path(env.manager.plugin_store_path) / target.root_dir_name
@@ -185,7 +182,7 @@ async def test_direct_update_uses_current_source_and_preserves_state(
     assert repository.await_count == (1 if kind == "repository" else 0)
     current = await env.plugin.sources.detail(target.root_dir_name)
     assert current["provenance"] == old_provenance
-    assert current["active_binding_id"] == original["active_binding_id"]
+    assert current["current_source"] == original["current_source"]
     assert not current["metadata_changed"]
     assert env.plugin.updates.state("web-user") == web_report
     assert not env.plugin.transfers.history("web-user")
@@ -214,11 +211,11 @@ async def test_direct_update_without_new_version_does_not_download(
     assert job["status"] == "completed" and job["results"][0]["status"] == "no_update"
 
 
-async def test_missing_current_source_does_not_infer_repo_or_use_other_bindings(
+async def test_missing_current_source_does_not_infer_repo_or_activate_pending_source(
     chat_plugin,
 ):
     env, target, market, repository = chat_plugin
-    await add_repository_binding(env, target)
+    await add_pending_repository_source(env, target)
     env.prefs["plugin_install_sources"] = {}
     target.repo = metadata(target)["repo"]
     event = env.event("/pm update demo")
@@ -232,11 +229,11 @@ async def test_missing_current_source_does_not_infer_repo_or_use_other_bindings(
 @pytest.mark.parametrize(
     "failure", ["identity", "version", "cache", "timeout", "network"]
 )
-async def test_current_source_failure_does_not_fall_back_to_other_bindings(
+async def test_current_source_failure_does_not_fall_back_to_pending_source(
     chat_plugin, failure
 ):
     env, target, market, repository = chat_plugin
-    await add_repository_binding(env, target)
+    await add_pending_repository_source(env, target)
     if failure == "identity":
         market.return_value = (
             {target.plugin_id: metadata(target, author="Impostor")},

@@ -556,8 +556,8 @@ async def test_repository_only_export_uses_existing_sources_without_market(
         {"display_name": NAME, "market_plugin_id": "", "repo_url": REPO}
     ]
     record = await env.plugin.sources.detail(target.root_dir_name)
-    record["bindings"][0]["verification"] = "imported"
-    await env.plugin.sources._save_record(record)
+    incoming, _ = env.plugin.sources.portable_sources(record)
+    await env.plugin.sources.note_bundle(target.root_dir_name, "admin", incoming)
     with pytest.raises(ValueError, match="来源"):
         await env.plugin.manifests.export([target.root_dir_name])
     fetch.assert_not_awaited()

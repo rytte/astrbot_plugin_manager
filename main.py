@@ -242,7 +242,7 @@ class Main(Star):
                     separators=(",", ":"),
                 )
                 if action == "check-update":
-                    await self.reply(event, "正在检查全部关联来源的更新，请稍候。")
+                    await self.reply(event, "正在按各插件的当前来源检查更新，请稍候。")
                     yield
                     await self.reply(event, await self.chat_updates.check_all(owner))
                 else:

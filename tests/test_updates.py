@@ -1,4 +1,4 @@
-"""Check every associated source and guard explicit updates against stale identities."""
+"""Check each current source and guard explicit updates against stale identities."""
 
 import asyncio
 import copy
@@ -55,11 +55,12 @@ async def check(env):
 
 
 async def associate(env, url):
-    target = env.context.get_registered_star("demo_plugin")
-    preview = await env.plugin.sources.preview_binding(
-        "admin", target.root_dir_name, "repository", url
+    target = env.add_target(name="repository_demo", directory="repository_demo")
+    env.prefs["plugin_install_sources"][target.root_dir_name] = source(
+        target, "repository", repo=url
     )
-    return await env.plugin.sources.bind("admin", preview["id"], False, True)
+    env.manager.inspect_plugin_repository.return_value = metadata(target, repo=url)
+    return await env.plugin.sources.detail(target.root_dir_name)
 
 
 async def queue_update(env, report):
@@ -71,33 +72,31 @@ async def queue_update(env, report):
     return env.plugin.transfers.get_job(job["id"], "admin")
 
 
-async def test_checks_all_associated_sources_deduplicates_market_and_keeps_active(
-    registered,
-):
+async def test_checks_only_current_sources_and_deduplicates_market(registered):
     env, target, market, repository = registered
     original = await env.plugin.sources.detail(target.root_dir_name)
-    record = await associate(env, "https://github.com/test/demo_plugin")
+    repo_record = await associate(env, "https://github.com/test/repository_demo")
     second = env.add_target(name="second", directory="second")
     env.prefs["plugin_install_sources"][second.root_dir_name] = source(second)
     market.return_value = (
         {target.plugin_id: metadata(target), second.plugin_id: metadata(second)},
         None,
     )
-    repository.reset_mock()
     report = await check(env)
     assert report["status"] == "completed"
     assert report["done"] == report["total"] == 3
-    assert all(item["status"] == "update_available" for item in report["results"])
-    assert sum(item["can_update"] for item in report["results"]) == 2
-    alternative = next(
+    assert all(
+        item["status"] == "update_available" and item["can_update"]
+        for item in report["results"]
+    )
+    repo_result = next(
         item for item in report["results"] if item["kind"] == "repository"
     )
-    assert not alternative["is_current"] and not alternative["can_update"]
-    assert alternative["revision"] == record["revision"]
+    assert repo_result["revision"] == repo_record["revision"]
     market.assert_awaited_once_with(custom_registry=None, force_refresh=True)
-    repository.assert_awaited_once_with("https://github.com/test/demo_plugin")
+    repository.assert_awaited_once_with("https://github.com/test/repository_demo")
     current = await env.plugin.sources.detail(target.root_dir_name)
-    assert current["active_binding_id"] == original["active_binding_id"]
+    assert current["current_source"] == original["current_source"]
     assert current["provenance"] == original["provenance"]
     assert not any(key.startswith("_") for item in report["results"] for key in item)
     assert env.plugin.updates.state("other")["status"] == "idle"
@@ -188,7 +187,7 @@ async def test_remote_identity_or_repository_mismatch_fails(registered, changes)
 
 
 @pytest.mark.parametrize("failure", ["cache", "missing", "timeout", "network"])
-async def test_one_failed_source_does_not_interrupt_other_bindings(registered, failure):
+async def test_one_failed_source_does_not_interrupt_other_plugins(registered, failure):
     env, target, market, _ = registered
     await associate(env, "https://github.com/test/demo_plugin")
     if failure == "cache":
@@ -203,7 +202,7 @@ async def test_one_failed_source_does_not_interrupt_other_bindings(registered, f
     assert report["status"] == "completed" and report["done"] == 2
     failed, available = report["results"]
     assert failed["status"] == "error" and not failed["can_update"]
-    assert available["status"] == "update_available" and not available["can_update"]
+    assert available["status"] == "update_available" and available["can_update"]
 
 
 async def test_check_limits_concurrency_and_close_cancels_requests(env, monkeypatch):
@@ -249,19 +248,14 @@ async def test_update_requires_owned_completed_report_confirmation_and_active_so
     registered, invalid
 ):
     env, _, _, _ = registered
-    await associate(env, "https://github.com/test/demo_plugin")
     report = await check(env)
-    entry = next(
-        item
-        for item in report["results"]
-        if item["is_current"] is (invalid != "inactive")
-    )
+    entry = report["results"][0]
     with pytest.raises(ValueError):
         await env.plugin.updates.start_update(
             "other" if invalid == "owner" else "admin",
             "old-report" if invalid == "report" else report["id"],
             entry["directory"],
-            entry["binding_id"],
+            "unrelated-source" if invalid == "inactive" else entry["binding_id"],
             invalid != "confirmation",
         )
     assert not env.plugin.transfers.jobs
@@ -332,7 +326,7 @@ async def test_successful_update_preserves_provenance_and_records_current_source
     assert job["results"][0]["status"] == "updated"
     current = await env.plugin.sources.detail(target.root_dir_name)
     assert current["provenance"] == original["provenance"]
-    assert current["active_binding_id"] == original["active_binding_id"]
+    assert current["current_source"] == original["current_source"]
     assert current["metadata_snapshot"]["version"] == "2.0.0"
     assert not current["metadata_changed"]
     assert current["history"][-1]["action"] == "updated"
@@ -417,7 +411,7 @@ async def test_check_can_run_in_demo_but_update_cannot(registered, monkeypatch):
     assert not env.plugin.transfers.jobs
 
 
-async def test_check_without_bindings_completes_without_network(env, monkeypatch):
+async def test_check_without_current_sources_completes_without_network(env, monkeypatch):
     fetch = AsyncMock(side_effect=AssertionError("no bindings"))
     monkeypatch.setattr(env.plugin.service.web, "get_online_plugins", fetch)
     report = await check(env)

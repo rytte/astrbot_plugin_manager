@@ -1,4 +1,4 @@
-"""Check registered sources on demand and update only the active source."""
+"""Check and update plugins using AstrBot's current source records."""
 
 from __future__ import annotations
 
@@ -57,7 +57,6 @@ class UpdateService:
             "directory": local["directory"],
             "revision": record["revision"],
             "binding_id": binding["id"],
-            "is_current": binding["id"] == record["active_binding_id"],
             "kind": binding["kind"],
             "locator": binding["market_plugin_id"]
             if binding["kind"] == "market"
@@ -73,16 +72,16 @@ class UpdateService:
         }
 
     async def start_check(self, owner: str) -> dict:
-        """Start one bounded background check of all registered bindings."""
+        """Start one bounded background check of each plugin's current source."""
         async with self.lock:
             self.transfers._ensure_idle()
             if self.closing or (self.task and not self.task.done()):
                 raise ValueError("已有来源检查正在运行或管家正在关闭，请稍后重试。")
             records = await self.sources.inventory()
             entries = [
-                self._entry(record, binding)
+                self._entry(record, record["current_source"])
                 for record in records
-                for binding in record["bindings"]
+                if record["current_source"]
             ]
             self.report = {
                 "id": uuid.uuid4().hex,
@@ -105,8 +104,8 @@ class UpdateService:
         if report["status"] != "completed":
             raise ValueError(report["error"] or "更新检查未完成，请重新执行命令。")
         if not report["total"]:
-            return "没有已关联来源可检查，请先在插件页面的「来源管理」中绑定来源。"
-        available, other, blocked, failed = [], [], [], []
+            return "没有当前更新源可检查，请先在官方插件页面选择来源，或在「来源详情」中补充来源。"
+        available, blocked, failed = [], [], []
         for entry in report["results"]:
             local = entry["_record"]["local"]
             label = (
@@ -125,22 +124,17 @@ class UpdateService:
                     f"- {label}：{versions}\n  /pm update {entry['directory']}"
                 )
             elif entry["status"] == "update_available":
-                if entry["is_current"]:
-                    blocked.append(f"- {label}：{versions}；{entry['message']}")
-                else:
-                    other.append(f"- {label}：{versions}（{source}）")
+                blocked.append(f"- {label}：{versions}；{entry['message']}")
             elif entry["status"] == "error":
-                current = "当前更新源" if entry["is_current"] else "关联来源"
-                failed.append(f"- {label}（{current} · {source}）：{entry['message']}")
+                failed.append(f"- {label}（当前更新源 · {source}）：{entry['message']}")
         unchanged = sum(entry["status"] == "no_update" for entry in report["results"])
         plugins = len({entry["directory"] for entry in report["results"]})
         lines = [
-            f"更新检查完成：{plugins} 个插件，{report['total']} 个关联来源。",
-            f"可更新 {len(available)} 个插件 · 无版本更新 {unchanged} 个来源 · 检查失败 {len(failed)} 个来源",
+            f"更新检查完成：{plugins} 个插件。",
+            f"可更新 {len(available)} 个插件 · 无版本更新 {unchanged} 个插件 · 检查失败 {len(failed)} 个插件",
         ]
         for title, entries in (
             ("可更新：", available),
-            ("其他来源有新版本（请在来源管理中切换更新源）：", other),
             ("当前来源有新版本，暂无法更新：", blocked),
             ("检查失败：", failed),
         ):
@@ -214,7 +208,7 @@ class UpdateService:
             "message": ("发现新版本" if has_update else "无版本更新")
             + ("；" + reason if has_update and reason else ""),
             "can_update": has_update
-            and binding["id"] == record["active_binding_id"]
+            and binding["id"] == (record["current_source"] or {}).get("id")
             and not reason,
             "_metadata": {
                 key: metadata.get(key, "")
@@ -336,17 +330,10 @@ class UpdateService:
                 raise ValueError(
                     "插件信息已变化，请先在插件页面点击「更新信息」后重试。"
                 )
-            binding = next(
-                (
-                    item
-                    for item in record["bindings"]
-                    if item["id"] == record["active_binding_id"]
-                ),
-                None,
-            )
+            binding = record["current_source"]
             if binding is None:
                 raise ValueError(
-                    "插件没有当前更新源，请先在插件页面的「来源管理」中绑定并设为更新源。"
+                    "插件没有当前更新源，请先在官方插件页面选择来源，或在「来源详情」中补充来源。"
                 )
             job = self.transfers._new_job(owner, "plugin_update")
             job["update_plan"] = self._entry(record, binding)
@@ -362,7 +349,7 @@ class UpdateService:
             record = await self.sources.detail(directory)
             if (
                 record["revision"] != entry["_record"]["revision"]
-                or record["active_binding_id"] != entry["binding_id"]
+                or (record["current_source"] or {}).get("id") != entry["binding_id"]
             ):
                 raise ValueError("插件身份、版本或当前更新源已变化，请重新检查。")
             binding = entry["_binding"]

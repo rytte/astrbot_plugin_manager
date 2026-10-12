@@ -50,11 +50,11 @@ async function main() {
   Element.document = document;
   const binding = {id: "official", kind: "market", registry_url: null, market_plugin_id: "Alice/demo", repo_url: "https://github.com/alice/demo", verification: "observed"};
   const record = {
-    revision: "r1", identity_changed: false, active_binding_id: binding.id, bindings: [binding], history: [],
+    revision: "r1", identity_changed: false, current_source: binding, pending_source: null, history: [],
     provenance: {method: "market", evidence: "core_record_observed", observed_at: "2026-10-11"},
     local: {directory: "demo_dir", name: "demo", author: "Alice", display_name: "<img src=x onerror=alert(1)>", status: "enabled", version: "1.0.0", problem: "", reserved: false},
   };
-  const unbound = structuredClone(record); unbound.local.directory = "unknown_dir"; unbound.local.name = "unknown"; unbound.bindings = []; unbound.active_binding_id = null; unbound.provenance.method = "unknown";
+  const unbound = structuredClone(record); unbound.local.directory = "unknown_dir"; unbound.local.name = "unknown"; unbound.current_source = null; unbound.provenance.method = "unknown";
   const management = {csrf: "source-token", busy: false, plugins: [record, unbound], jobs: [], updates: {id: null, status: "idle", results: [], done: 0, total: 0}};
   const plugin = {...record.local, plugin_id: "Alice/demo", logo: "/api/file/icon-token", blocked: "", ranges: [], data_available: true, config_available: true, code_size: 1024, config_size: 32, data_size: 2048, kv_count: 1};
   const state = {csrf: "zip-token", busy: false, plugins: [plugin, {...plugin, ...unbound.local, logo: null}], jobs: [], rule: {updated_at: null, selections: []}, limits: {archive_bytes: 268435456}};
@@ -105,13 +105,13 @@ async function main() {
       if (endpoint.startsWith("manage/")) assert.equal(body.csrf, "source-token");
       if (endpoint === "manage/check-updates") {
         assert.deepEqual(Object.keys(body), ["csrf"]);
-        management.updates = {id: "check-id", status: "running", checked_at: "2026-10-12T10:00:00Z", done: 0, total: 2, results: record.bindings.map(source => ({directory: record.local.directory, binding_id: source.id, revision: record.revision, is_current: source.id === record.active_binding_id, status: "pending", local_version: "1.0.0", remote_version: "", message: "等待检查", can_update: false}))};
+        management.updates = {id: "check-id", status: "running", checked_at: "2026-10-12T10:00:00Z", done: 0, total: 1, results: [record.current_source].filter(Boolean).map(source => ({directory: record.local.directory, binding_id: source.id, revision: record.revision, status: "pending", local_version: "1.0.0", remote_version: "", message: "等待检查", can_update: false}))};
         return structuredClone(management.updates);
       }
       if (endpoint === "manage/update-plugin") {
         if (failUpdate) throw new Error("远端版本或来源已变化，请重新检查后更新。");
         assert.equal(body.check_id, management.updates.id);
-        assert.equal(body.binding_id, record.active_binding_id);
+        assert.equal(body.binding_id, record.current_source.id);
         assert.equal(body.acknowledged, true);
         const job = {id: "update-job", kind: "plugin_update", status: "running", created_at: 100, phase: "正在更新", results: [], warnings: [], expired: false};
         state.jobs.unshift(job); state.busy = true;
@@ -145,12 +145,12 @@ async function main() {
         job.status = "running"; state.busy = true;
         return structuredClone(job);
       }
-      if (endpoint === "manage/source-preview") {
+      if (["manage/source-preview", "manage/source-revalidate"].includes(endpoint)) {
         if (failPreview) throw new Error("仓库身份不一致");
         if (delayedPreview) return new Promise(resolve => {delayedPreview.resolve = resolve;});
         return {id: "preview", binding};
       }
-      if (endpoint === "manage/source-bind") return structuredClone(record);
+      if (endpoint === "manage/source-bind") {assert.equal(body.acknowledged, true); assert.ok(!("activate" in body)); record.current_source = binding; record.pending_source = null; return structuredClone(record);}
       if (endpoint === "manage/metadata-sync") {
         if (failMetadataSync) throw new Error("插件信息已变化，请刷新后重试。");
         assert.equal(body.directory, record.local.directory);
@@ -159,7 +159,6 @@ async function main() {
         record.revision = "metadata-r2";
         return structuredClone(record);
       }
-      if (endpoint === "manage/source-select") {record.active_binding_id = body.binding_id; record.revision = "r3"; return structuredClone(record);}
       if (endpoint === "manage/manifest-export") {
         const job = {id: "export-id", kind: "manifest_export", name: body.name, download_filename: body.name + ".json", status: "completed", created_at: 100, phase: "清单已导出", results: [], warnings: [], expired: false};
         state.jobs.unshift(job);
@@ -260,17 +259,16 @@ async function main() {
   assert.equal(icon.src, plugin.logo);
   assert.equal(descendants(elements["plugin-list"]).filter(element => element.tagName === "img")[1].src, "/favicon.svg");
 
-  // A manual check covers all bindings even with a filter, and polls only while running.
-  const repositoryBinding = {...binding, id: "repository", kind: "repository", market_plugin_id: ""};
-  record.bindings.push(repositoryBinding);
+  // A manual check covers all current sources even with a filter, and polls only while running.
+
   elements.search.value = "unknown"; await elements.search.trigger("input");
   await elements["check-updates"].trigger("click");
   assert.equal(elements["check-updates"].disabled, true);
-  assert.match(elements["update-summary"].textContent, /0 \/ 2/);
+  assert.match(elements["update-summary"].textContent, /0 \/ 1/);
   await vm.runInContext("pollJobs()", context);
   assert.equal(updateRequests, 1);
-  management.updates.status = "completed"; management.updates.done = 2;
-  for (const result of management.updates.results) Object.assign(result, {status: "update_available", message: "发现新版本", remote_version: result.is_current ? "2.0.0" : "3.0.0", can_update: result.is_current});
+  management.updates.status = "completed"; management.updates.done = 1;
+  for (const result of management.updates.results) Object.assign(result, {status: "update_available", message: "发现新版本", remote_version: "2.0.0", can_update: true});
   await vm.runInContext("pollJobs()", context);
   assert.match(elements["update-summary"].textContent, /当前更新源有新版本：1/);
   await vm.runInContext("pollJobs()", context);
@@ -281,8 +279,9 @@ async function main() {
   assert.match(elements["plugin-list"].textContent, /来源 2.0.0/);
   assert.doesNotMatch(elements["plugin-list"].textContent, /3.0.0/);
   await vm.runInContext("openSource('demo_dir')", context);
-  assert.match(elements["binding-list"].textContent, /来源 3.0.0/);
-  assert.equal(descendants(elements["binding-list"]).filter(element => element.tagName === "button" && element.textContent === "更新").length, 1);
+  assert.match(elements["source-summary"].textContent, /来源 2.0.0/);
+  assert.equal(elements["source-repair"].hidden, true);
+  assert.equal(descendants(elements["source-summary"]).filter(element => element.tagName === "button" && element.textContent === "更新").length, 1);
   await elements["close-source"].trigger("click");
   record.revision = "source-changed";
   await vm.runInContext("loadManagement()", context);
@@ -310,7 +309,7 @@ async function main() {
   assert.match(elements["plugin-list"].textContent, /已更新至 2.0.0/);
   assert.equal(updateButtons().length, 0);
   // Restore the base fixture for the remaining export/import and source scenarios.
-  record.bindings.pop(); record.local.version = "1.0.0"; record.revision = "r1"; state.plugins[0].version = "1.0.0";
+  record.local.version = "1.0.0"; record.revision = "r1"; state.plugins[0].version = "1.0.0";
   management.updates = {id: null, status: "idle", done: 0, total: 0, results: []};
   state.jobs = state.jobs.filter(job => job.kind !== "plugin_update");
   await refresh();
@@ -394,8 +393,9 @@ async function main() {
   assert.equal(elements["save-rule"].disabled, false);
   assert.equal(elements.export.disabled, false);
 
-  // Source management opens from the plugin row and handles errors in its dialog.
-  const sourceButton = descendants(elements["plugin-list"]).find(element => element.tagName === "button" && element.textContent === "来源管理");
+  // Missing sources can be repaired; ordinary switching stays in the official UI.
+  record.current_source = null; await refresh();
+  const sourceButton = descendants(elements["plugin-list"]).find(element => element.tagName === "button" && element.textContent === "来源详情");
   await sourceButton.trigger("click");
   assert.equal(elements["source-dialog"].open, true);
   elements["binding-kind"].value = "repository"; elements["binding-value"].value = binding.repo_url;
@@ -409,34 +409,36 @@ async function main() {
   await elements["binding-form"].trigger("submit");
   assert.equal(elements["save-binding"].disabled, false);
   await elements["save-binding"].trigger("click");
-  assert.equal(posts.find(item => item.endpoint === "manage/source-bind").body.activate, true);
+  assert.equal(posts.find(item => item.endpoint === "manage/source-bind").body.acknowledged, true);
+  assert.equal(elements["source-repair"].hidden, true);
   assert.equal(elements["save-binding"].disabled, true);
-  await elements["binding-form"].trigger("submit");
+  await descendants(elements["source-summary"]).find(element => element.tagName === "button" && element.textContent === "重新校验当前来源").trigger("click");
   // External changes invalidate the preview and update the current source.
-  record.revision = "r2"; record.active_binding_id = null;
+  record.revision = "r2"; record.current_source = null;
   await vm.runInContext("pollJobs()", context);
   assert.equal(elements["save-binding"].disabled, true);
   assert.ok(elements["source-summary"].textContent.includes("未绑定更新源"));
   // Imported locators remain visible but cannot be shared before revalidation.
-  record.bindings[0].verification = "imported"; record.bindings[0].imported_active = true;
+  record.pending_source = structuredClone(binding);
   record.provenance.evidence = "bundle_record";
   await elements.refresh.trigger("click"); await settle();
-  assert.match(elements["source-summary"].textContent, /来源信息已从备份恢复/);
-  assert.match(elements["binding-list"].textContent, /备份时的更新源/);
-  assert.match(elements["binding-list"].textContent, /待校验/);
+  assert.match(elements["source-summary"].textContent, /备份来源尚未生效/);
+  assert.match(elements["source-pending"].textContent, /备份来源待校验/);
   assert.match(elements["source-provenance"].textContent, /备份中的安装来源记录/);
   elements["export-format"].value = "manifest"; await elements["export-format"].trigger("change");
   assert.equal(elements.export.disabled, true);
   assert.match(elements["plugin-list"].textContent, /暂不能分享/);
   elements["export-format"].value = "zip"; await elements["export-format"].trigger("change");
-  record.bindings[0].verification = "observed"; delete record.bindings[0].imported_active;
-  record.provenance.evidence = "core_record_observed";
-  await elements.refresh.trigger("click"); await settle();
-  const selectSource = descendants(elements["binding-list"]).find(element => element.tagName === "button");
-  const selecting = selectSource.trigger("click"); await settle();
-  assert.equal(elements.confirmation.open, true);
-  elements.acknowledged.checked = true; await elements["confirmation-form"].trigger("submit"); await selecting;
-  assert.ok(posts.some(item => item.endpoint === "manage/source-select" && item.body.revision === "r2"));
+  const validateImported = descendants(elements["source-pending"]).find(element => element.tagName === "button");
+  await validateImported.trigger("click");
+  assert.equal(elements["source-validation"].hidden, false);
+  await elements["save-binding"].trigger("click");
+  assert.ok(posts.some(item => item.endpoint === "manage/source-revalidate" && item.body.revision === "r2"));
+  assert.equal(record.pending_source, null);
+  assert.equal(elements["source-pending"].hidden, true);
+  assert.equal(elements["source-repair"].hidden, true);
+  assert.ok(!posts.some(item => item.endpoint === "manage/source-select"));
+  record.current_source = null; await refresh();
   // Closing during remote validation must not resurrect the dialog or preview.
   delayedPreview = {};
   const checking = elements["binding-form"].trigger("submit");
@@ -445,6 +447,8 @@ async function main() {
   delayedPreview.resolve({id: "late", binding}); await checking;
   assert.equal(vm.runInContext("bindingPreview", context), null);
   assert.equal(elements["source-dialog"].open, false);
+
+  record.current_source = binding; await refresh();
 
   // ZIP preview stays visibly pending, clears failures, and can retry the same file.
   elements["bundle-file"].files = [{name: "plugins.zip", size: 100}];
@@ -633,24 +637,24 @@ async function main() {
   assert.equal(downloads.length, beforeExpired);
   vm.runInContext("requesting = false; busy = false;", context);
   // If the official association disappears, stale sharing selections are cleared.
-  record.bindings = [];
+  record.current_source = null;
   await refresh();
   elements["export-format"].value = "manifest"; await elements["export-format"].trigger("change");
   assert.equal(elements["selected-count"].textContent, "0");
   assert.equal(elements.export.disabled, true);
 
-  // Source labels use the active binding, independently of installation history.
+  // Source labels use the current source, independently of installation history.
   record.provenance.method = "upload";
-  record.bindings = [{...binding, kind: "repository"}]; record.active_binding_id = binding.id;
+  record.current_source = {...binding, kind: "repository"};
   await refresh();
   const sourceLabel = elements["plugin-list"].children[0].children.at(-1).children[0];
   assert.equal(sourceLabel.textContent, "Git 仓库");
   assert.ok(sourceLabel.title.includes(binding.repo_url));
   assert.ok(sourceLabel.title.includes("上传安装"));
-  record.bindings = [{...binding, registry_url: "https://registry.example/plugins.json"}];
+  record.current_source = {...binding, registry_url: "https://registry.example/plugins.json"};
   await refresh();
   assert.match(elements["plugin-list"].children[0].children.at(-1).textContent, /自定义市场/);
-  record.active_binding_id = null; await refresh();
+  record.current_source = null; await refresh();
   assert.match(elements["plugin-list"].children[0].children.at(-1).textContent, /未绑定更新源/);
 
   // Editing the author keeps the plugin selectable; sync only updates its record.
@@ -697,7 +701,7 @@ async function main() {
   await refresh();
   const oldStatistics = statisticsRequests.at(-1), oldManagement = managementRequests.at(-1);
   state.plugins[0].code_size = 4096;
-  record.bindings = [{...binding, kind: "repository"}]; record.active_binding_id = binding.id;
+  record.current_source = {...binding, kind: "repository"};
   await refresh();
   const latestStatistics = statisticsRequests.at(-1), latestManagement = managementRequests.at(-1);
   latestStatistics.resolve(latestStatistics.response); latestManagement.resolve(latestManagement.response); await settle();
@@ -893,11 +897,11 @@ async function main() {
   // Manager data is selected within the ZIP; its code and config are protected.
   vm.runInContext("busy = false; requesting = false; clearManifestPreview()", context);
   elements["export-format"].value = "zip";
-  const managerPlugin = {...plugin, directory: "astrbot_plugin_manager", name: "astrbot_plugin_manager", display_name: "插件管家", manager_data: true, ranges: ["仅导出来源关联和导出规则"], kv_count: 0};
+  const managerPlugin = {...plugin, directory: "astrbot_plugin_manager", name: "astrbot_plugin_manager", display_name: "插件管家", manager_data: true, ranges: ["仅导出来源快照和导出规则"], kv_count: 0};
   elements.search.value = ""; elements["status-filter"].value = "all";
   vm.runInContext("state.plugins.push(" + JSON.stringify(managerPlugin) + "); choices.set('astrbot_plugin_manager', {selected: true, data: false, config: false}); renderPlugins()", context);
   const managerRow = descendants(elements["plugin-list"]).find(element => element.tagName === "tr" && element.textContent.includes("插件管家"));
-  assert.match(managerRow.textContent, /仅导出来源关联和导出规则/);
+  assert.match(managerRow.textContent, /仅导出来源快照和导出规则/);
   const managerCheckbox = descendants(managerRow).find(element => element.attributes["aria-label"] === "附带 astrbot_plugin_manager 的标准数据");
   assert.equal(managerCheckbox.disabled, false);
   managerCheckbox.checked = true; await managerCheckbox.trigger("change");
@@ -905,7 +909,7 @@ async function main() {
   vm.runInContext(`preview = {job: {id: 'manager-zip', warnings: []}, astrbot_version: '4.27', plugins: [{name: 'astrbot_plugin_manager', directory: 'astrbot_plugin_manager', manager_data: true, exists: true, data: true, config: true, problem: ''}]};
     importChoices = new Map([['astrbot_plugin_manager', {code: false, config: false, data: false}]]); renderImportPreview();`, context);
   assert.deepEqual(descendants(elements["import-list"]).filter(element => element.tagName === "input").map(element => element.disabled), [true, true, false]);
-  assert.match(elements["import-list"].textContent, /仅恢复来源关联和导出规则/);
+  assert.match(elements["import-list"].textContent, /仅恢复来源快照和导出规则/);
   assert.equal(elements["import-all-code"].disabled, true);
   assert.equal(elements["import-all-config"].disabled, true);
   assert.equal(descendants(elements["import-list"]).find(element => element.tagName === "img").src, "/favicon.svg");

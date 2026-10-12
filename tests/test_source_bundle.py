@@ -26,8 +26,7 @@ def snapshot():
             "reported_installed_at": None,
             "source": copy.deepcopy(binding),
         },
-        "bindings": [binding],
-        "active_binding_id": binding["id"],
+        "source": binding,
     }
 
 
@@ -37,15 +36,15 @@ def snapshot():
         "identity",
         "validation",
         "unknown_field",
-        "duplicate",
-        "wrong_active",
+        "source_list",
+        "unknown_source_field",
         "credentials",
         "download_query",
         "file_url",
         "false_id",
         "unknown_method",
         "wrong_schema",
-        "too_many",
+        "invalid_source_type",
         "bad_timestamp",
         "bad_kind",
         "bad_registry",
@@ -55,35 +54,33 @@ def test_invalid_or_trust_claiming_source_snapshots_are_rejected(snapshot, attac
     if attack == "identity":
         snapshot["identity"]["author"] = "Someone else"
     elif attack == "validation":
-        snapshot["bindings"][0]["verification"] = "identity_matched"
+        snapshot["source"]["verification"] = "identity_matched"
     elif attack == "unknown_field":
         snapshot["download_url"] = "https://example.com/arbitrary.zip"
-    elif attack == "duplicate":
-        snapshot["bindings"].append(copy.deepcopy(snapshot["bindings"][0]))
-    elif attack == "wrong_active":
-        snapshot["active_binding_id"] = "not-in-bindings"
+    elif attack == "source_list":
+        snapshot["source"] = [copy.deepcopy(snapshot["source"])]
+    elif attack == "unknown_source_field":
+        snapshot["unexpected"] = "invalid"
     elif attack == "credentials":
-        snapshot["bindings"][0]["repo_url"] = (
-            "https://user:secret@github.com/alice/demo"
-        )
+        snapshot["source"]["repo_url"] = "https://user:secret@github.com/alice/demo"
     elif attack == "download_query":
-        snapshot["bindings"][0]["repo_url"] += "?token=secret"
+        snapshot["source"]["repo_url"] += "?token=secret"
     elif attack == "file_url":
-        snapshot["bindings"][0]["repo_url"] = "file:///private/repo"
+        snapshot["source"]["repo_url"] = "file:///private/repo"
     elif attack == "false_id":
-        snapshot["bindings"][0]["id"] = "different"
+        snapshot["source"]["id"] = "different"
     elif attack == "unknown_method":
         snapshot["provenance"]["method"] = {"method": "market"}
     elif attack == "wrong_schema":
         snapshot["schema_version"] = True
-    elif attack == "too_many":
-        snapshot["bindings"] *= 257
+    elif attack == "invalid_source_type":
+        snapshot["source"] = "invalid"
     elif attack == "bad_timestamp":
         snapshot["provenance"]["installed_at"] = {"time": "now"}
     elif attack == "bad_kind":
-        snapshot["bindings"][0]["kind"] = []
+        snapshot["source"]["kind"] = []
     else:
-        snapshot["bindings"][0]["registry_url"] = (
+        snapshot["source"]["registry_url"] = (
             "https://user:password@example.com/registry"
         )
     with pytest.raises(ValueError):
@@ -100,6 +97,5 @@ def test_custom_market_reference_is_preserved_without_private_url_fields(snapsho
         }
     )
     assert binding["registry_url"] == "https://example.com/registry.json"
-    snapshot["bindings"] = [binding]
-    snapshot["active_binding_id"] = binding["id"]
+    snapshot["source"] = binding
     validate_sources(snapshot, snapshot["identity"])

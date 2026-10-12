@@ -1,4 +1,4 @@
-"""Local provenance and multiple bindings, with AstrBot owning the active source."""
+"""Observe AstrBot's current source and retain pending migration references."""
 
 from __future__ import annotations
 
@@ -258,7 +258,7 @@ class SourceService:
                     "observed_at": first_seen,
                     "installed_at": None,
                 },
-                "bindings": [],
+                "pending_source": None,
                 "history": [],
                 "metadata_snapshot": copy.deepcopy(local["runtime_metadata"]),
             }
@@ -277,14 +277,25 @@ class SourceService:
             if saved["metadata_snapshot"].get(field, "") != local[field]
         ]
         active = self._binding(core)
-        if active and not any(item["id"] == active["id"] for item in saved["bindings"]):
-            saved["bindings"].append(active)
-        if saved["identity"]["author"] != local["author"]:
-            for binding in saved["bindings"]:
-                binding["verification"] = "metadata_changed"
+        validation = saved.get("source_validation")
+        if active:
+            if not validation or validation["id"] != active["id"]:
+                validation = {
+                    "id": active["id"],
+                    "author": saved["identity"]["author"],
+                    "checked_at": None,
+                }
+            if validation["author"] != local["author"]:
+                active["verification"] = "metadata_changed"
+            elif validation["checked_at"]:
+                active.update(
+                    verification="identity_matched", checked_at=validation["checked_at"]
+                )
         saved.update(
             local=local,
-            active_binding_id=active["id"] if active else None,
+            current_source=active,
+            pending_source=None if active else saved["pending_source"],
+            source_validation=validation if active else None,
             core_revision=fingerprint(core),
             identity_changed=mismatch,
             metadata_changed=bool(changes) and not mismatch and not local["problem"],
@@ -402,26 +413,31 @@ class SourceService:
             raise ValueError("官方市场响应超时，请稍后重试。") from exc
 
     async def preview_binding(
-        self, owner: str, directory: str, kind: str, value: str
+        self, owner: str, directory: str, kind: str, value: str, *, registry_url=None
     ) -> dict:
         record = await self.detail(directory)
         self._editable(record)
         local = record["local"]
         if record["identity"]["author"] != local["author"]:
             raise ValueError("作者信息已变更，请先点击「更新信息」，再校验来源。")
-        current = next(
-            (
-                item
-                for item in record["bindings"]
-                if item["id"] == record["active_binding_id"]
-            ),
-            None,
-        )
+        current = record["current_source"]
+        if current and (
+            kind != current["kind"]
+            or (
+                kind == "market"
+                and (
+                    value != current["market_plugin_id"]
+                    or registry_url != current["registry_url"]
+                )
+            )
+            or (kind == "repository" and value != current["repo_url"])
+        ):
+            raise ValueError("已有当前更新源，更换来源请使用 AstrBot 官方插件页面。")
         notice = None
         if kind == "market":
             if not is_market_id(value):
                 raise ValueError("请填写完整的作者/插件技术名。")
-            source = self.operations.web.build_registry_source(None)
+            source = self.operations.web.build_registry_source(registry_url)
             data = self.operations.web.load_plugin_cache(source.cache_file)
         elif kind == "repository":
             url = repository_url(value)
@@ -441,10 +457,18 @@ class SourceService:
         for attempt in range(2):
             if kind == "market":
                 if attempt:
-                    data, notice = await self.official_market(fresh=True)
+                    try:
+                        data, notice = await asyncio.wait_for(
+                            self.operations.web.get_online_plugins(
+                                custom_registry=registry_url, force_refresh=True
+                            ),
+                            timeout=MARKET_QUERY_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.TimeoutError as exc:
+                        raise ValueError("市场响应超时，请稍后重试。") from exc
                     if notice:
                         raise ValueError(
-                            "官方市场联网校验失败，当前只能取得旧缓存，请稍后重试。"
+                            "市场联网校验失败，当前只能取得旧缓存，请稍后重试。"
                         )
                 metadata = self.operations.web.resolve_market_plugin_entry_by_id(
                     data, value
@@ -456,7 +480,7 @@ class SourceService:
                     binding = {
                         "kind": "market",
                         "market_plugin_id": value,
-                        "registry_url": None,
+                        "registry_url": registry_url,
                         "repo_url": repository_url(metadata.get("repo")),
                     }
                 if metadata.get("name") != local["name"] or not authors_match(
@@ -469,7 +493,7 @@ class SourceService:
                     and not same_repository(current["repo_url"], binding["repo_url"])
                 ):
                     raise ValueError(
-                        "仓库地址与当前来源不同，不能作为同一插件的关联来源。"
+                        "仓库地址与当前来源不同，请使用 AstrBot 官方插件页面处理。"
                     )
             except ValueError:
                 if kind != "market" or attempt:
@@ -500,12 +524,28 @@ class SourceService:
             "expires_at": self.previews[identifier]["expires_at"],
         }
 
-    async def bind(
-        self, owner: str, identifier: str, activate: bool, acknowledged: bool
-    ) -> dict:
+    async def preview_existing(self, owner: str, directory: str, revision: str) -> dict:
+        """Revalidate the current or imported source without choosing another source."""
+        record = await self.detail(directory)
+        if record["revision"] != revision:
+            raise ValueError("来源记录已变化，请刷新后重试。")
+        source = record["current_source"] or record["pending_source"]
+        if not source:
+            raise ValueError("没有可校验的来源，请先补充来源。")
+        return await self.preview_binding(
+            owner,
+            directory,
+            source["kind"],
+            source["market_plugin_id"]
+            if source["kind"] == "market"
+            else source["repo_url"],
+            registry_url=source.get("registry_url"),
+        )
+
+    async def bind(self, owner: str, identifier: str, acknowledged: bool) -> dict:
         self.operations.ensure_writable()
-        if type(activate) is not bool or acknowledged is not True:
-            raise ValueError("请确认来源校验结果，并选择是否作为更新源。")
+        if acknowledged is not True:
+            raise ValueError("请确认来源校验结果并设为当前更新源。")
         preview = self.previews.get(identifier)
         if (
             not preview
@@ -521,43 +561,13 @@ class SourceService:
             if record["revision"] != preview["revision"]:
                 raise ValueError("插件身份或来源已变化，请重新校验。")
             binding = preview["binding"]
-            record["bindings"] = [
-                item for item in record["bindings"] if item["id"] != binding["id"]
-            ] + [binding]
-            self._event(record, "binding_added", owner, binding["id"])
             # Save the original observation before replacing AstrBot's active record.
             await self._save_record(record)
-            if activate:
-                await self._activate(record, binding, owner)
+            await self._activate(record, binding, owner)
+            record["pending_source"] = None
             await self._save_record(record)
             self.previews.pop(identifier, None)
         return await self.detail(preview["directory"])
-
-    async def select(
-        self, owner: str, directory: str, binding_id: str, revision: str
-    ) -> dict:
-        self.operations.ensure_writable()
-        self.transfers._ensure_idle()
-        record = await self.detail(directory)
-        binding = next(
-            (item for item in record["bindings"] if item["id"] == binding_id), None
-        )
-        if record["revision"] != revision or not binding:
-            raise ValueError("来源记录已变化，请刷新后重试。")
-        if binding["kind"] == "market" and binding["registry_url"] is not None:
-            raise ValueError(
-                "自定义市场关联暂不支持在此切换，请使用 AstrBot 原生页面。"
-            )
-        # Recheck every switch, including a binding restored from old observations.
-        preview = await self.preview_binding(
-            owner,
-            directory,
-            binding["kind"],
-            binding["market_plugin_id"]
-            if binding["kind"] == "market"
-            else binding["repo_url"],
-        )
-        return await self.bind(owner, preview["id"], True, True)
 
     @staticmethod
     def _event(record: dict, action: str, actor: str, binding_id: str = "") -> None:
@@ -580,19 +590,33 @@ class SourceService:
             "install_method": binding["kind"],
             "repo": binding["repo_url"],
             "registry_url": binding["registry_url"],
-            "registry_name": "Default" if binding["kind"] == "market" else "Repository",
+            "registry_name": await self.operations.web.resolve_registry_name(
+                binding["registry_url"]
+            )
+            if binding["kind"] == "market"
+            else "Repository",
             "market_plugin_id": binding["market_plugin_id"],
             "download_url": "",
             "updated_at": now(),
         }
         if current and current.get("installed_at"):
             core["installed_at"] = current["installed_at"]
+        if local["name"] != local["directory"] and (
+            (records.get(local["name"]) or {}).get("root_dir_name")
+            == local["directory"]
+            or self._core(local, {local["name"]: records.get(local["name"])})
+            is not None
+        ):
+            records.pop(local["name"], None)
         records[local["directory"]] = core
         await self.operations.web.save_plugin_install_sources(records)
         record["last_core_revision"] = fingerprint(core)
-        for item in record["bindings"]:
-            item.pop("imported_active", None)
-        self._event(record, "active_changed", owner, binding["id"])
+        record["source_validation"] = {
+            "id": binding["id"],
+            "author": local["author"],
+            "checked_at": binding["checked_at"],
+        }
+        self._event(record, "source_repaired", owner, binding["id"])
 
     @staticmethod
     def _stored_record(record: dict) -> dict:
@@ -602,7 +626,8 @@ class SourceService:
                 "record_id",
                 "identity",
                 "provenance",
-                "bindings",
+                "pending_source",
+                "source_validation",
                 "history",
                 "last_core_revision",
                 "metadata_snapshot",
@@ -687,17 +712,6 @@ class SourceService:
                         pass
                 return None
 
-        bindings = {}
-        active_id = None
-        for binding in record["bindings"]:
-            entry = portable(binding)
-            if entry is None:
-                continue
-            bindings[entry["id"]] = entry
-            if binding["id"] == record["active_binding_id"] or (
-                not record["active_binding_id"] and binding.get("imported_active")
-            ):
-                active_id = entry["id"]
         provenance = record["provenance"]
         data = {
             "schema_version": 1,
@@ -718,8 +732,7 @@ class SourceService:
                 },
                 "source": portable(provenance.get("source")),
             },
-            "bindings": list(bindings.values()),
-            "active_binding_id": active_id,
+            "source": portable(record["current_source"] or record["pending_source"]),
         }
         return validate_sources(data, record["local"]), warnings
 
@@ -743,15 +756,7 @@ class SourceService:
         record["metadata_snapshot"] = {
             field: record["local"][field] for field in METADATA_FIELDS
         }
-        record["bindings"] = [
-            {
-                **copy.deepcopy(binding),
-                "verification": "imported",
-                "checked_at": None,
-                "imported_active": binding["id"] == incoming["active_binding_id"],
-            }
-            for binding in incoming["bindings"]
-        ]
+        record["pending_source"] = copy.deepcopy(incoming["source"])
         record["last_core_revision"] = fingerprint(None)
         self._event(record, "bundle_imported", actor)
         self._event(record, "bundle_sources_imported", actor)
@@ -764,16 +769,11 @@ class SourceService:
             "evidence": "manager_operation",
             "installed_at": now(),
             "observed_at": now(),
-            "source": next(
-                (
-                    item
-                    for item in record["bindings"]
-                    if item["id"] == record["active_binding_id"]
-                ),
-                None,
-            ),
+            "source": record["current_source"],
         }
-        self._event(record, "installed", actor, record["active_binding_id"] or "")
+        self._event(
+            record, "installed", actor, (record["current_source"] or {}).get("id", "")
+        )
         await self._save_record(record)
 
     async def retire(self, directory: str, actor: str) -> None:
@@ -787,16 +787,9 @@ class SourceService:
                 await asyncio.to_thread(write_json, self.path, store)
 
     async def describe(self, directory: str) -> str:
-        """Summarize recorded provenance and bindings for a resolved directory."""
+        """Summarize provenance and AstrBot's current source for a directory."""
         record = await self.detail(directory)
-        active = next(
-            (
-                item
-                for item in record["bindings"]
-                if item["id"] == record["active_binding_id"]
-            ),
-            None,
-        )
+        active = record["current_source"]
         provenance = record["provenance"]
         return redact(
             "\n".join(
@@ -808,7 +801,7 @@ class SourceService:
                         if provenance["evidence"] == "manager_operation"
                         else "首次观察到的 AstrBot 记录，不能证明最初安装来源"
                         if provenance["evidence"] == "core_record_observed"
-                        else "备份中的安装来源记录，仅供参考；关联来源须重新校验"
+                        else "备份中的安装来源记录，仅供参考；更新源须重新校验"
                         if provenance["evidence"] == "bundle_record"
                         else "缺少真实安装记录"
                     ),
@@ -818,7 +811,14 @@ class SourceService:
                         if active
                         else "未绑定"
                     ),
-                    f"已关联来源：{len(record['bindings'])} 个",
+                    "来源状态："
+                    + (
+                        "跟随 AstrBot"
+                        if active
+                        else "备份来源待校验"
+                        if record["pending_source"]
+                        else "缺少更新源"
+                    ),
                 ]
             )
         )

@@ -152,35 +152,24 @@ class ManifestService:
             if not record:
                 raise ValueError("所选插件已不存在，请刷新。")
             self.sources._editable(record)
-            bindings = sorted(
-                (
-                    binding
-                    for binding in record["bindings"]
-                    if binding.get("verification")
-                    not in {"metadata_changed", "imported"}
-                ),
-                key=lambda binding: binding["id"] != record["active_binding_id"],
-            )
-            market = next(
-                (
-                    binding
-                    for binding in bindings
-                    if binding["kind"] == "market" and binding["registry_url"] is None
-                ),
-                None,
-            )
-            repository = next(
-                (
-                    binding
-                    for binding in bindings
-                    if binding["kind"] == "repository" and binding.get("repo_url")
-                ),
-                market,
+            source = record["current_source"]
+            if record["metadata_changed"] or (
+                source and source["verification"] == "metadata_changed"
+            ):
+                raise ValueError(
+                    f"{directory} 插件信息已变化，请更新信息并重新校验来源。"
+                )
+            market = (
+                source
+                if source
+                and source["kind"] == "market"
+                and source["registry_url"] is None
+                else None
             )
             repo_url = ""
-            if repository and repository.get("repo_url"):
+            if source and source.get("repo_url"):
                 try:
-                    repo_url = repository_url(repository["repo_url"])
+                    repo_url = repository_url(source["repo_url"])
                 except ValueError:
                     pass
             local = record["local"]
@@ -191,7 +180,7 @@ class ManifestService:
             }
             if not entry["market_plugin_id"] and not repo_url:
                 raise ValueError(
-                    f"{directory} 缺少可分享的来源，请先校验并关联官方市场或 HTTPS 仓库。"
+                    f"{directory} 缺少可分享的来源，请在「来源详情」中补充或校验更新源。"
                 )
             entries.append(entry)
         manifest = validate_manifest(

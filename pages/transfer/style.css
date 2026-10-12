@@ -273,17 +273,14 @@ dialog h2{margin:0 0 18px;font-size:22px}
 .source-current-value{font-size:16px;font-weight:600;line-height:1.6;overflow-wrap:anywhere}
 .source-current-note{font-size:13px;color:var(--muted);margin-top:4px}
 .source-section{margin-top:24px}
-#binding-list{display:grid;gap:10px}
+#source-summary>.source-action,#source-pending>.source-action{margin-top:12px}
+#source-pending h3{margin-bottom:8px}
+#source-validation .binding-preview{margin-top:0;margin-bottom:12px}
+#source-validation+.source-details{margin-top:24px}
 .detail{font-size:13px;color:var(--muted);margin-top:5px;overflow-wrap:anywhere}
-.binding-card{display:flex;align-items:center;justify-content:space-between;gap:18px;border:1px solid var(--line);border-radius:10px;padding:14px 16px}
-.binding-card.current{border-color:color-mix(in srgb,var(--accent) 38%,var(--line))}
-.binding-content{min-width:0}
-.binding-heading{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:5px}
-.binding-type{font-size:14px;font-weight:600}
 .badge{display:inline-block;padding:1px 7px;border-radius:6px;background:var(--accent-bg);color:var(--accent);font-size:12px;white-space:nowrap}
 .binding-address{font-size:14px;line-height:1.6;overflow-wrap:anywhere}
 .binding-repo{font-size:13px;color:var(--muted);line-height:1.6;margin-top:2px;overflow-wrap:anywhere}
-.binding-card .source-action{flex-shrink:0}
 .source-empty{font-size:14px;color:var(--muted);background:var(--bg);border:1px dashed var(--line);border-radius:8px;padding:16px}
 .source-add{padding-top:22px;border-top:1px solid var(--line)}
 .source-description{font-size:13px;color:var(--muted);margin-top:5px}
@@ -294,7 +291,6 @@ dialog h2{margin:0 0 18px;font-size:22px}
 .binding-actions .button{min-height:42px;font-size:14px;white-space:nowrap;flex-shrink:0}
 .binding-preview{margin-top:16px;padding:13px 15px;border:1px solid var(--line);border-radius:8px;background:var(--bg);overflow-wrap:anywhere}
 .binding-preview>strong{display:block;font-size:14px;margin-bottom:4px}
-.source-add+.source-details{margin-top:24px}
 .source-details{border-top:1px solid var(--line)}
 .source-details>summary{padding:14px 0;font-size:14px}
 .source-detail-summary,.source-details>summary .counter{float:right;margin-left:12px;font-size:13px;font-weight:400;color:var(--muted)}
@@ -321,8 +317,6 @@ dialog h2{margin:0 0 18px;font-size:22px}
 .source-body{padding:18px;scrollbar-gutter:auto}
 .source-overview{padding:14px}
 .source-current-value{font-size:15px}
-.binding-card{align-items:flex-start;flex-direction:column;gap:12px;padding:14px}
-.binding-card .source-action{align-self:flex-end}
 .binding-fields{grid-template-columns:minmax(0,1fr);gap:12px}
 .binding-actions{justify-self:end}
 .source-facts>div{grid-template-columns:94px minmax(0,1fr);gap:12px}

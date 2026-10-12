@@ -118,27 +118,17 @@ def _binding(value) -> None:
         raise ValueError("来源标识与地址不一致。")
 
 
-def validate_bindings(bindings, active) -> None:
-    """Validate portable associations without importing verification state."""
-    if not isinstance(bindings, list) or len(bindings) > 256:
-        raise ValueError("来源关联数量超过限制。")
-    identifiers = set()
-    for binding in bindings:
-        _binding(binding)
-        if binding["id"] in identifiers:
-            raise ValueError("来源关联重复。")
-        identifiers.add(binding["id"])
-    if active is not None and (
-        not isinstance(active, str) or active not in identifiers
-    ):
-        raise ValueError("备份时的更新源不在关联来源中。")
+def validate_source(source) -> None:
+    """Validate one portable source without importing verification state."""
+    if source is not None:
+        _binding(source)
 
 
 def validate_sources(value, identity: dict) -> dict:
     """Validate a closed schema before a bundle can modify local source records."""
     _keys(
         value,
-        {"schema_version", "identity", "provenance", "bindings", "active_binding_id"},
+        {"schema_version", "identity", "provenance", "source"},
     )
     if type(value["schema_version"]) is not int or value["schema_version"] != 1:
         raise ValueError("来源快照版本不受支持。")
@@ -157,5 +147,5 @@ def validate_sources(value, identity: dict) -> dict:
             raise ValueError("来源记录时间无效。")
     if provenance["source"] is not None:
         _binding(provenance["source"])
-    validate_bindings(value["bindings"], value["active_binding_id"])
+    validate_source(value["source"])
     return value

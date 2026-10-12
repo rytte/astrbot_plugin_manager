@@ -26,7 +26,9 @@ from .transfer_web import TransferWeb
 
 
 class ManagementWeb(TransferWeb):
-    def __init__(self, context, transfers, sources, manifests, updates, loading) -> None:
+    def __init__(
+        self, context, transfers, sources, manifests, updates, loading
+    ) -> None:
         super().__init__(context, transfers)
         self.sources = sources
         self.manifests = manifests
@@ -38,7 +40,7 @@ class ManagementWeb(TransferWeb):
             "state": "GET",
             "source-preview": "POST",
             "source-bind": "POST",
-            "source-select": "POST",
+            "source-revalidate": "POST",
             "metadata-sync": "POST",
             "check-updates": "POST",
             "updates": "GET",
@@ -161,26 +163,14 @@ class ManagementWeb(TransferWeb):
                         owner, body["directory"], body["kind"], body["value"]
                     )
                 elif action == "source-bind":
-                    exact_keys(body, {"csrf", "id", "activate", "acknowledged"})
+                    exact_keys(body, {"csrf", "id", "acknowledged"})
                     data = redact(
-                        await self.sources.bind(
-                            owner, body["id"], body["activate"], body["acknowledged"]
-                        )
+                        await self.sources.bind(owner, body["id"], body["acknowledged"])
                     )
-                elif action == "source-select":
-                    exact_keys(
-                        body,
-                        {"csrf", "directory", "binding_id", "revision", "acknowledged"},
-                    )
-                    if body["acknowledged"] is not True:
-                        raise ValueError("请确认切换更新源。")
-                    data = redact(
-                        await self.sources.select(
-                            owner,
-                            body["directory"],
-                            body["binding_id"],
-                            body["revision"],
-                        )
+                elif action == "source-revalidate":
+                    exact_keys(body, {"csrf", "directory", "revision"})
+                    data = await self.sources.preview_existing(
+                        owner, body["directory"], body["revision"]
                     )
                 elif action == "manifest-export":
                     exact_keys(body, {"csrf", "directories", "name"})

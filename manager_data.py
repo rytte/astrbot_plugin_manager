@@ -9,7 +9,6 @@ import time
 
 from .identity import authors_match
 from .manager_data_bundle import FORMAT, validate_manager_data
-from .source_bundle import portable_binding
 from .sources import fingerprint
 from .transfer_bundle import MAX_JSON, exact_keys, write_json
 
@@ -22,7 +21,7 @@ class ManagerDataService:
     async def snapshot(self) -> tuple[dict, list[str]]:
         entries, warnings = [], []
         for record in await self.sources.inventory():
-            if not record["bindings"]:
+            if not (record["current_source"] or record["pending_source"]):
                 continue
             local = record["local"]
             if local["reserved"] or local["problem"] or record["identity_changed"]:
@@ -32,13 +31,12 @@ class ManagerDataService:
                 continue
             snapshot, notices = self.sources.portable_sources(record)
             warnings.extend(notices)
-            if snapshot["bindings"]:
+            if snapshot["source"]:
                 entries.append(
                     {
                         "directory": local["directory"],
                         **snapshot["identity"],
-                        "bindings": snapshot["bindings"],
-                        "active_binding_id": snapshot["active_binding_id"],
+                        "source": snapshot["source"],
                     }
                 )
         return validate_manager_data(
@@ -101,20 +99,6 @@ class ManagerDataService:
                 else:
                     await asyncio.to_thread(path.unlink, missing_ok=True)
 
-    @staticmethod
-    def _new_bindings(record: dict, incoming: dict) -> list[dict]:
-        known = set()
-        for binding in record["bindings"]:
-            try:
-                portable = portable_binding(binding)
-                if portable:
-                    known.add(portable["id"])
-            except ValueError:
-                pass
-        return [
-            binding for binding in incoming["bindings"] if binding["id"] not in known
-        ]
-
     async def plan(self, value: dict, replacements: dict | None = None) -> dict:
         records = await self.sources.inventory()
         plugins = []
@@ -143,14 +127,12 @@ class ManagerDataService:
                 self.sources._editable(record)
                 if record["metadata_changed"]:
                     raise ValueError("请先更新插件信息，再重新预检。")
-                added = self._new_bindings(record, incoming)
-                if len(record["bindings"]) + len(added) > 256:
-                    raise ValueError("合并后的来源关联超过 256 条限制。")
+                missing = not (record["current_source"] or record["pending_source"])
                 item.update(
                     directory=record["local"]["directory"],
                     display_name=record["local"]["display_name"] or incoming["name"],
-                    status="ready" if added else "skip",
-                    count=len(added),
+                    status="ready" if missing else "skip",
+                    count=1 if missing else 0,
                 )
             except ValueError as exc:
                 item["problem"] = str(exc)
@@ -227,17 +209,7 @@ class ManagerDataService:
                 if item["status"] != "ready":
                     continue
                 record = store["plugins"][item["directory"]]
-                added = self._new_bindings(record, incoming)
-                record["bindings"].extend(
-                    {
-                        **copy.deepcopy(binding),
-                        "verification": "imported",
-                        "checked_at": None,
-                        "imported_active": binding["id"]
-                        == incoming["active_binding_id"],
-                    }
-                    for binding in added
-                )
+                record["pending_source"] = copy.deepcopy(incoming["source"])
                 self.sources._event(record, "manager_data_imported", owner)
             await asyncio.to_thread(write_json, self.sources.path, store)
             await asyncio.to_thread(
