@@ -613,6 +613,20 @@ async function executeRecovery() {
   });
 }
 
+function setImportStatus(status, title, detail, file) {
+  const target = elements["bundle-status"];
+  target.dataset.status = status;
+  target.setAttribute("role", status === "failed" ? "alert" : "status");
+  target.setAttribute("aria-live", status === "failed" ? "assertive" : "polite");
+  elements["bundle-status-title"].textContent = title;
+  elements["bundle-status-detail"].textContent = detail;
+  if (file) elements["file-label"].textContent = file.name + " · " + formatSize(file.size);
+  const preparing = status === "preparing";
+  elements["bundle-upload"].dataset.busy = String(preparing);
+  elements["bundle-upload"].setAttribute("aria-busy", String(preparing));
+  target.hidden = false;
+}
+
 function importAvailable(plugin, kind) {
   if (plugin.manager_data) return kind === "data" && Boolean(plugin.data) && !plugin.problem;
   if (kind === "code") return !plugin.problem;
@@ -731,7 +745,7 @@ async function deleteJob(job) {
     if (preview?.job.id === job.id) {
       preview = null; importChoices.clear();
       elements["bundle-file"].value = "";
-      elements["file-label"].textContent = "预检任务已删除，请重新选择插件包。";
+      setImportStatus("failed", "预检结果已失效", "预检任务已删除，请重新选择插件包。");
       renderImportPreview();
     }
     if (manifestPreview?.job.id === job.id || pendingManifestId === job.id) {
@@ -929,12 +943,23 @@ function bindEvents() {
     const file = elements["bundle-file"].files[0];
     if (!file) return;
     preview = null;
+    importChoices.clear();
     elements["import-preview"].hidden = true;
-    if (file.size > state.limits.archive_bytes) throw new Error("文件超过上传限制，请减小插件包。");
-    elements["file-label"].textContent = "正在上传并校验：" + file.name;
-    preview = await bridge.upload("transfer/upload/" + encodeURIComponent(state.csrf), file);
-    importChoices = new Map(preview.plugins.map(plugin => [plugin.directory, {code: !plugin.exists && importAvailable(plugin, "code"), config: false, data: false}]));
-    elements["file-label"].textContent = "预检完成：" + file.name + " · " + formatSize(file.size);
+    message("");
+    setImportStatus("preparing", "正在上传并预检插件包…", "正在上传 ZIP、解析包内容并检查目标环境，大文件可能需要较长时间，请稍候。", file);
+    try {
+      if (file.size > state.limits.archive_bytes) throw new Error("文件超过上传限制，请减小插件包。");
+      preview = await bridge.upload("transfer/upload/" + encodeURIComponent(state.csrf), file);
+      importChoices = new Map(preview.plugins.map(plugin => [plugin.directory, {code: !plugin.exists && importAvailable(plugin, "code"), config: false, data: false}]));
+      setImportStatus("completed", "预检完成，请选择恢复内容", "已解析 " + preview.plugins.length + " 个插件，现有插件默认跳过。");
+    } catch (error) {
+      preview = null;
+      importChoices.clear();
+      setImportStatus("failed", "上传或预检失败", (error.message || "请检查服务端日志。") + " 可重新选择插件包重试。");
+      throw error;
+    } finally {
+      elements["bundle-file"].value = "";
+    }
     renderImportPreview();
     message("插件包已通过结构校验。请选择恢复内容，现有插件默认跳过。");
   }));
@@ -945,6 +970,7 @@ function bindEvents() {
     await post("import", {id: preview.job.id, selections: selected, acknowledged: true});
     preview = null;
     elements["import-preview"].hidden = true;
+    elements["bundle-status"].hidden = true;
     busy = true;
     showTab("history-panel");
     message("恢复任务已启动。请勿在任务运行期间手工修改插件文件。", false, {task: true});

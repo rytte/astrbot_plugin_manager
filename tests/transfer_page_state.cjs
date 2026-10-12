@@ -31,6 +31,7 @@ function descendants(element) {return element.children.flatMap(child => [child, 
 async function main() {
   const root = process.argv[2];
   const html = fs.readFileSync(path.join(root, "pages/transfer/index.html"), "utf8");
+  assert.ok(!html.includes("恢复资料使用说明"));
   const elements = Object.fromEntries(Array.from(html.matchAll(/id="([^"]+)"/g), match => {
     const element = new Element("div"); element.id = match[1]; return [match[1], element];
   }));
@@ -62,6 +63,7 @@ async function main() {
   let delayStatistics = true, delayManagement = true, failStatistics = false, failManagement = false;
   let failState = false, failMetadataSync = false, failDelete = false;
   let pendingDownload = null;
+  let pendingZipUpload = null;
   let delayedPreview, failPreview = false;
   let manifestResponse = null, failDraft = false;
   let updateRequests = 0, failUpdate = false;
@@ -183,7 +185,11 @@ async function main() {
     async upload(endpoint) {
       uploads.push(endpoint);
       assert.ok(!endpoint.includes("?"), "AstrBot native bridge rejects query strings in upload endpoints");
-      if (endpoint === "transfer/upload/zip-token") return {job: {id: "zip-id", warnings: []}, astrbot_version: "4.27", plugins: [{...plugin, exists: false, config: true, data: true, problem: ""}]};
+      if (endpoint === "transfer/upload/zip-token") {
+        const response = {job: {id: "zip-id", warnings: []}, astrbot_version: "4.27", plugins: [{...plugin, exists: false, config: true, data: true, problem: ""}]};
+        if (pendingZipUpload) return new Promise((resolve, reject) => Object.assign(pendingZipUpload, {resolve, reject, response}));
+        return response;
+      }
       assert.equal(endpoint, "manage/manifest-upload/source-token");
       manifestResponse = {ready: true, job: {id: "install-id", name: "生产环境备份", kind: "manifest_install", status: "preview", phase: "等待选择", preview_task: true, preview_expires_at: 2000000000, created_at: 100, results: [], warnings: []}, expires_at: 2000000000, plugins: [
         {id: "0", display_name: "新插件", market_plugin_id: "Alice/new", repo_url: "https://github.com/alice/new", default_source: "market", sources: [{kind: "market", name: "new", directory: "demo_dir", status: "install", version: "2.0", logo: "https://example.com/market.png"}, {kind: "repository", name: "new", directory: "demo_dir", status: "install", version: "2.1", logo: "/api/file/repository-icon"}]},
@@ -440,9 +446,51 @@ async function main() {
   assert.equal(vm.runInContext("bindingPreview", context), null);
   assert.equal(elements["source-dialog"].open, false);
 
-  // Both import formats keep their previews when users switch between them.
+  // ZIP preview stays visibly pending, clears failures, and can retry the same file.
+  elements["bundle-file"].files = [{name: "plugins.zip", size: 100}];
+  elements["bundle-file"].value = "plugins.zip";
+  pendingZipUpload = {};
+  let zipUploading = elements["bundle-file"].trigger("change");
+  assert.equal(elements["bundle-status"].hidden, false);
+  assert.equal(elements["bundle-status"].dataset.status, "preparing");
+  assert.match(elements["bundle-status-title"].textContent, /正在上传并预检/);
+  assert.equal(elements["file-label"].textContent, "plugins.zip · 100 B");
+  assert.equal(elements["bundle-upload"].attributes["aria-busy"], "true");
+  assert.equal(elements["bundle-file"].disabled, true);
+  assert.equal(elements["execute-import"].disabled, true);
+  pendingZipUpload.reject(new Error("ZIP 无效或已损坏。")); await zipUploading;
+  assert.equal(elements["bundle-status"].dataset.status, "failed");
+  assert.equal(elements["bundle-status"].attributes.role, "alert");
+  assert.match(elements["bundle-status-detail"].textContent, /ZIP 无效或已损坏.*重新选择/);
+  assert.equal(elements["bundle-upload"].attributes["aria-busy"], "false");
+  assert.equal(elements["bundle-file"].disabled, false);
+  assert.equal(elements["bundle-file"].value, "");
+  assert.equal(elements["import-preview"].hidden, true);
+  assert.equal(vm.runInContext("preview", context), null);
+  pendingZipUpload = {};
+  zipUploading = elements["bundle-file"].trigger("change");
+  assert.equal(elements["bundle-status"].dataset.status, "preparing");
+  assert.equal(elements.message.hidden, true);
+  pendingZipUpload.resolve(pendingZipUpload.response); await zipUploading;
+  assert.equal(elements["bundle-status"].dataset.status, "completed");
+  assert.equal(elements["bundle-status"].attributes.role, "status");
+  assert.match(elements["bundle-status-detail"].textContent, /已解析 1 个插件/);
+  assert.equal(elements["execute-import"].disabled, false);
+  const zipUploads = uploads.length;
+  elements["bundle-file"].files = [{name: "oversized.zip", size: state.limits.archive_bytes + 1}];
+  await elements["bundle-file"].trigger("change");
+  assert.equal(uploads.length, zipUploads);
+  assert.equal(elements["bundle-status"].dataset.status, "failed");
+  assert.match(elements["bundle-status-detail"].textContent, /超过上传限制/);
+  assert.equal(vm.runInContext("preview", context), null);
+  assert.equal(vm.runInContext("importChoices.size", context), 0);
+  assert.equal(elements["execute-import"].disabled, true);
+  assert.equal(elements["import-preview"].hidden, true);
+  pendingZipUpload = null;
   elements["bundle-file"].files = [{name: "plugins.zip", size: 100}];
   await elements["bundle-file"].trigger("change");
+
+  // Both import formats keep their previews when users switch between them.
   const zipPreview = vm.runInContext("preview.job.id", context);
   const zipIcon = descendants(elements["import-list"]).find(element => element.tagName === "img");
   assert.equal(zipIcon.src, plugin.logo);
@@ -753,6 +801,8 @@ async function main() {
   await elements["delete-job-form"].trigger("submit"); await deleting;
   assert.equal(elements["import-preview"].hidden, true);
   assert.equal(vm.runInContext("preview", context), null);
+  assert.equal(elements["bundle-status"].dataset.status, "failed");
+  assert.match(elements["bundle-status-title"].textContent, /已失效/);
 
   state.jobs.push({id: "manifest-preview-id", kind: "manifest_install", status: "preview", created_at: 100, warnings: [], results: []});
   await vm.runInContext("pollJobs()", context);

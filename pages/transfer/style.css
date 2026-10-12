@@ -59,8 +59,6 @@ dd{margin:0;font-weight:600}
 .export-limits p+p{margin-top:6px}
 summary{cursor:pointer;color:var(--text);font-size:14px;font-weight:600}
 summary::marker{color:var(--muted)}
-.help-details{border-top:1px solid var(--line);margin-top:18px;padding-top:14px}
-.help-details p{color:var(--muted);font-size:13px;line-height:1.8;margin-top:10px}
 .content{min-width:0}
 .tabs{display:flex;gap:3px;margin-bottom:16px;align-items:center;border-bottom:1px solid var(--line)}
 .tab{border:0;border-bottom:3px solid transparent;background:none;color:var(--muted);font-weight:600;padding:11px 18px 14px}
@@ -139,6 +137,19 @@ tr.selected{background:var(--accent-bg)}
 #file-label:empty{display:none}
 .upload-symbol{font-size:39px!important;color:var(--accent)!important;line-height:1}
 .upload-box input{max-width:100%;font-size:13px;margin:5px 0;color:var(--muted)}
+.upload-box[data-busy=true]{border-color:var(--accent);background:var(--accent-bg);cursor:progress}
+.import-status{--status-tone:var(--accent);display:flex;align-items:flex-start;gap:12px;margin-top:16px;padding:16px;border:1px solid var(--status-tone);border-radius:10px;background:var(--accent-bg);background:color-mix(in srgb,var(--status-tone) 8%,var(--surface))}
+.import-status[data-status=completed]{--status-tone:var(--message-success)}
+.import-status[data-status=failed]{--status-tone:var(--danger)}
+.import-status-icon{display:grid;place-items:center;flex-shrink:0;width:24px;height:24px;margin-top:2px;color:var(--status-tone);font-size:19px;font-weight:700;line-height:1}
+.import-status[data-status=preparing] .import-status-icon{border:3px solid var(--line);border-top-color:var(--status-tone);border-right-color:var(--status-tone);border-radius:50%;animation:import-spin .8s linear infinite}
+.import-status[data-status=completed] .import-status-icon::before{content:"✓"}
+.import-status[data-status=failed] .import-status-icon::before{content:"!"}
+.import-status-content{min-width:0;overflow-wrap:anywhere}
+.import-status-content strong{display:block;color:var(--status-tone);font-size:16px}
+.import-status-content p{margin-top:4px}
+@keyframes import-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.import-status[data-status=preparing] .import-status-icon{animation:none}}
 .section-heading{display:flex;align-items:center;justify-content:space-between;margin:24px 0 12px;gap:8px}
 .import-heading{flex-wrap:wrap}
 #execute-import{margin-top:18px;margin-bottom:8px}
