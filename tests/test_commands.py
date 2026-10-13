@@ -33,8 +33,6 @@ async def test_pm_is_the_only_registered_entry_point(env):
         "/pm",
         "/pm help",
         "/pm list",
-        "/pm cmds",
-        "/pm tools",
         "/pm search weather",
         "/pm refresh-market",
         "/pm check-update",
@@ -61,8 +59,6 @@ async def test_all_commands_require_admin_in_real_pipeline(env, command):
     [
         "",
         "list",
-        "cmds",
-        "tools",
         "search weather",
         "refresh-market",
         "check-update",
@@ -100,8 +96,6 @@ async def test_bare_entry_shows_help_without_calling_model(env, command):
     }
     assert commands == {
         "list",
-        "cmds",
-        "tools",
         "search",
         "refresh-market",
         "check-update",
@@ -125,6 +119,10 @@ async def test_bare_entry_shows_help_without_calling_model(env, command):
         "on demo_directory",
         "off demo_directory",
         "commands",
+        "cmds",
+        "cmds 2",
+        "tools",
+        "tools 2",
         "market weather",
         "source demo_plugin",
         "check",

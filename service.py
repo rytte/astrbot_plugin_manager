@@ -24,7 +24,6 @@ from .identity import authors_match
 from .redaction import redact
 
 PLUGIN_NAME_PREFIX = "astrbot_plugin_"
-CATALOG_PAGE_SIZE = 20
 MARKET_PAGE_SIZE = 20
 MARKET_QUERY_TIMEOUT_SECONDS = 60
 INSTALL_USAGE = (
@@ -327,34 +326,6 @@ class PluginOperations:
             + "\n\n使用 /pm info <插件名或目录名> 查看详情。"
         )
 
-    def list_catalog(self, kind: str, page: int) -> str:
-        """Page through registered commands or model tools without invoking them."""
-        if kind not in {"cmds", "tools"}:
-            raise ValueError("未知目录类型。")
-        if page < 1:
-            raise ValueError("页码必须为正整数。")
-        plugins = self.context.get_all_stars()
-        entries = (
-            command_entries(plugins)
-            if kind == "cmds"
-            else tool_entries(self.context.get_llm_tool_manager(), plugins)
-        )
-        title = "命令目录" if kind == "cmds" else "模型工具目录"
-        pages = max(1, (len(entries) + CATALOG_PAGE_SIZE - 1) // CATALOG_PAGE_SIZE)
-        if page > pages:
-            raise ValueError(f"页码超出范围，共 {pages} 页。")
-        selected = entries[(page - 1) * CATALOG_PAGE_SIZE : page * CATALOG_PAGE_SIZE]
-        parts = [
-            f"{title}｜共 {len(entries)} 项｜第 {page}/{pages} 页",
-            "状态来自全局注册信息；会话权限、其他过滤条件及实际请求仍需另行判定。",
-            *(entry.render() for entry in selected),
-        ]
-        if not selected:
-            parts.append("当前没有已注册的条目。")
-        if page < pages:
-            parts.append(f"下一页：/pm {kind} {page + 1}")
-        return "\n\n".join(parts)
-
     async def plugin_info(self, identifier: str) -> str:
         """Describe a plugin, its recorded sources and its commands and tools."""
         target = self.resolve(identifier)
@@ -393,11 +364,11 @@ class PluginOperations:
             "",
             "已注册指令：",
         ]
-        parts.extend(entry.render(compact=True) for entry in commands)
+        parts.extend(entry.render() for entry in commands)
         if not commands:
             parts.append("无已注册指令。")
         parts.extend(("", "模型工具："))
-        parts.extend(entry.render(compact=True) for entry in tools)
+        parts.extend(entry.render() for entry in tools)
         if not tools:
             parts.append(
                 "当前没有已注册的模型工具。"

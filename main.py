@@ -31,18 +31,16 @@ USAGE = (
     "插件管家\n"
     "查看帮助   /pm help\n"
     "插件列表   /pm list\n"
-    "刷新市场   /pm refresh-market\n"
-    "搜索插件   /pm search <关键词> [--page <页码>]\n"
     "安装插件   /pm add <仓库地址或市场ID>\n"
-    "检查更新   /pm check-update\n"
-    "更新插件   /pm update <插件名>\n"
     "卸载插件   /pm remove <插件名> [--all]\n"
     "插件信息   /pm info <插件名>\n"
     "启用插件   /pm enable <插件名>\n"
     "停用插件   /pm disable <插件名>\n"
     "重载插件   /pm reload <插件名>\n"
-    "命令列表   /pm cmds [页码]\n"
-    "工具列表   /pm tools [页码]\n"
+    "更新插件   /pm update <插件名>\n"
+    "检查更新   /pm check-update\n"
+    "刷新市场   /pm refresh-market\n"
+    "搜索插件   /pm search <关键词> [--page <页码>]\n"
     "\n"
     "市场 ID 为：作者/插件名\n"
     "--all 参数会同时删除配置与数据"
@@ -152,7 +150,7 @@ class Main(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command(
         "pm",
-        desc="管理员插件管理：list/cmds/tools/search/refresh-market/help/info/add/check-update/update/enable/disable/reload/remove。",
+        desc="管理员插件管理：list/search/refresh-market/help/info/add/check-update/update/enable/disable/reload/remove。",
     )
     async def plugin(
         self, event: AstrMessageEvent, arguments: GreedyStr
@@ -182,21 +180,6 @@ class Main(Star):
                 if args:
                     raise ValueError("用法：/pm list（不接受页码或其他参数）。")
                 await self.reply(event, self.service.list_plugins())
-                yield
-                return
-            if action in {"cmds", "tools"}:
-                usage = f"用法：/pm {action} [页码]；页码必须为正整数。"
-                if len(args) > 1 or (
-                    args and (not args[0].isascii() or not args[0].isdecimal())
-                ):
-                    raise ValueError(usage)
-                try:
-                    page = int(args[0]) if args else 1
-                except ValueError:
-                    raise ValueError(usage) from None
-                if page < 1:
-                    raise ValueError(usage)
-                await self.reply(event, self.service.list_catalog(action, page))
                 yield
                 return
             if action == "info":
@@ -354,8 +337,6 @@ class Main(Star):
                 if action
                 in {
                     "list",
-                    "cmds",
-                    "tools",
                     "info",
                     "search",
                     "refresh-market",

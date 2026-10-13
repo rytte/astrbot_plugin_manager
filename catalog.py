@@ -23,7 +23,7 @@ from .redaction import redact
 
 @dataclass(frozen=True)
 class Entry:
-    """A registration snapshot with explicit ownership and two display formats."""
+    """A registration snapshot with explicit ownership and a display summary."""
 
     kind: str
     name: str
@@ -34,14 +34,9 @@ class Entry:
     owner: StarMetadata | None
     summary: str
 
-    def render(self, *, compact: bool = False) -> str:
-        """Render sanitized metadata without evaluating runtime permissions."""
-        if compact:
-            return redact(self.summary)
-        return redact(
-            f"[{self.kind}] {self.name}\n"
-            f"来源：{self.source} / {self.plugin}；{self.status}\n{self.details}"
-        )
+    def render(self) -> str:
+        """Render a sanitized summary without evaluating runtime permissions."""
+        return redact(self.summary)
 
 
 def owner_for_module(
