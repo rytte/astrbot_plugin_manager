@@ -17,7 +17,11 @@ from astrbot.core.star.updater import _PluginUpdater
 
 
 @pytest.fixture
-def live_env(env, monkeypatch):
+async def live_env(env, monkeypatch):
+    monkeypatch.setattr(
+        "astrbot.dashboard.services.plugin_service.PluginService.get_online_plugins",
+        AsyncMock(return_value=({}, None)),
+    )
     stars = list(env.owners.values())
     for module_name in (
         "astrbot.core.star.star",
@@ -59,6 +63,10 @@ def live_env(env, monkeypatch):
     env.live_stars = stars
     env.live_root = root
     yield env
+    await env.plugin.sources.close()
+    for plugin in env.live_stars:
+        if plugin.name == "astrbot_plugin_manager" and plugin.star_cls:
+            await plugin.star_cls.sources.close()
     for module_name in list(sys.modules):
         if module_name.startswith(
             ("data.plugins.reload_probe", "data.plugins.astrbot_plugin_manager")

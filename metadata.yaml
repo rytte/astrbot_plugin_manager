@@ -1,6 +1,6 @@
 name: astrbot_plugin_manager
 display_name: 插件管家
-desc: 插件管理，支持插件搜索、安装、卸载、启停、更新、来源管理、清单分享，以及插件的选择性备份与迁移，提供易用的插件页面。
+desc: 插件管理，支持插件搜索、安装、卸载、启停、更新、来源绑定、清单分享，以及插件的选择性备份与迁移，提供易用的插件页面。
 version: 0.3.0
 author: rytte
 astrbot_version: ">=4.27,<5"

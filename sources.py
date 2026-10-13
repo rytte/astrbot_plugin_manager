@@ -6,6 +6,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import logging
 import time
 import uuid
 from datetime import datetime, timezone
@@ -37,6 +38,7 @@ METADATA_LABELS = {
     "version": "版本",
     "repo": "仓库地址",
 }
+logger = logging.getLogger("astrbot")
 
 
 def now() -> str:
@@ -87,9 +89,132 @@ class SourceService:
         self.path = safe_path(transfers.root.parent, "sources.json")
         self.previews = {}
         self.record_lock = asyncio.Lock()
+        self.auto_task: asyncio.Task | None = None
+        self.auto_pending: set[str] = set()
+        self.auto_in_critical = False
+        self.closing = False
 
     async def initialize(self) -> None:
-        await self.inventory()
+        await self.schedule_missing_bindings()
+
+    @staticmethod
+    def _auto_eligible(record: dict) -> bool:
+        local = record["local"]
+        return bool(
+            local["status"] in {"enabled", "disabled"}
+            and not local["reserved"]
+            and not local["problem"]
+            and not record["identity_changed"]
+            and not record["metadata_changed"]
+            and not record["current_source"]
+            and not record["pending_source"]
+        )
+
+    async def schedule_missing_bindings(self) -> None:
+        for record in await self.inventory():
+            if self._auto_eligible(record):
+                self.schedule_binding(record["local"]["directory"])
+
+    def schedule_binding(self, directory: str) -> None:
+        """Queue source discovery without blocking AstrBot's plugin load hook."""
+        if self.closing or not directory:
+            return
+        self.auto_pending.add(directory)
+        if self.auto_task is None or self.auto_task.done():
+            self.auto_task = asyncio.create_task(self._auto_bind())
+
+    async def _auto_bind(self) -> None:
+        market = None
+        try:
+            while self.auto_pending and not self.closing:
+                directories = self.auto_pending.copy()
+                self.auto_pending.clear()
+                records = [
+                    record
+                    for record in await self.inventory()
+                    if record["local"]["directory"] in directories
+                    and self._auto_eligible(record)
+                ]
+                if not records:
+                    continue
+                try:
+                    self.operations.ensure_writable()
+                    if market is None:
+                        market, notice = await self.official_market(fresh=True)
+                        if notice:
+                            raise ValueError(
+                                "市场联网校验失败，请稍后在来源详情中重试。"
+                            )
+                except Exception as exc:
+                    market = None
+                    for record in records:
+                        await self._auto_notice(record, str(exc))
+                    continue
+                for record in records:
+                    if self.closing:
+                        return
+                    try:
+                        binding = await self._discover_binding(record, market)
+                        if binding is None:
+                            raise ValueError(
+                                "市场中未找到匹配条目，插件也未声明仓库地址。"
+                            )
+                        async with (
+                            self.transfers.operation_lock,
+                            self.operations.manager._pm_lock,
+                        ):
+                            self.operations.ensure_writable()
+                            self.transfers._ensure_idle()
+                            current = await self.detail(record["local"]["directory"])
+                            if current["current_source"]:
+                                continue
+                            if (
+                                not self._auto_eligible(current)
+                                or current["revision"] != record["revision"]
+                            ):
+                                raise ValueError(
+                                    "插件信息或来源已变化，请在来源详情中重新校验。"
+                                )
+                            self.auto_in_critical = True
+                            try:
+                                await self._activate(
+                                    current,
+                                    binding,
+                                    "插件管家",
+                                    action="source_auto_bound",
+                                )
+                                await self._save_record(current)
+                            finally:
+                                self.auto_in_critical = False
+                    except Exception as exc:
+                        await self._auto_notice(record, str(exc))
+        except Exception:
+            logger.exception("Automatic plugin source binding failed")
+
+    async def _auto_notice(self, record: dict, message: str) -> None:
+        directory = record["local"]["directory"]
+        notice = "来源未自动绑定：" + redact(message)
+        logger.warning("%s: %s", directory, notice)
+        async with self.transfers.operation_lock:
+            current = next(
+                (
+                    item
+                    for item in await self.inventory()
+                    if item["local"]["directory"] == directory
+                ),
+                None,
+            )
+            if current and self._auto_eligible(current):
+                current["auto_binding_notice"] = notice
+                await self._save_record(current)
+
+    async def close(self) -> None:
+        self.closing = True
+        self.auto_pending.clear()
+        if self.auto_task and not self.auto_task.done():
+            if not self.auto_in_critical:
+                self.auto_task.cancel()
+            await asyncio.gather(self.auto_task, return_exceptions=True)
 
     def _store(self) -> dict:
         if not self.path.exists():
@@ -294,6 +419,7 @@ class SourceService:
         saved.update(
             local=local,
             current_source=active,
+            auto_binding_notice="" if active else saved.get("auto_binding_notice", ""),
             pending_source=None if active else saved["pending_source"],
             source_validation=validation if active else None,
             core_revision=fingerprint(core),
@@ -676,7 +802,9 @@ class SourceService:
         if written or any(not previous_repo for _, previous_repo in previous):
             record["metadata_snapshot"]["repo"] = local["repo"]
 
-    async def _activate(self, record: dict, binding: dict, owner: str) -> None:
+    async def _activate(
+        self, record: dict, binding: dict, owner: str, *, action="source_repaired"
+    ) -> None:
         records = await self.operations.web.get_plugin_install_sources()
         before_records = copy.deepcopy(records)
         local = record["local"]
@@ -722,7 +850,61 @@ class SourceService:
             "author": local["author"],
             "checked_at": binding["checked_at"],
         }
-        self._event(record, "source_repaired", owner, binding["id"])
+        record["auto_binding_notice"] = ""
+        self._event(record, action, owner, binding["id"])
+
+    async def _discover_binding(self, record: dict, market: object) -> dict | None:
+        """Match market identity and optional repo, then inspect unmatched repos."""
+        self._editable(record)
+        local = record["local"]
+        repo = repository_url(local["repo"]) if local["repo"] else ""
+        identities = [
+            (identifier, metadata)
+            for identifier, metadata in self.operations.web.iter_market_plugin_entries(
+                market
+            )
+            if metadata.get("name") == local["name"]
+            and authors_match(local["author"], metadata.get("author"), market=True)
+        ]
+        matches = [
+            (identifier, metadata)
+            for identifier, metadata in identities
+            if not repo or same_repository(repo, metadata.get("repo"))
+        ]
+        if len(matches) > 1:
+            raise ValueError("市场中有多个匹配条目，请在官方插件页面选择来源。")
+        if identities and not matches:
+            raise ValueError("市场条目的仓库地址与本机不一致，请在来源详情中检查。")
+        if matches:
+            identifier, metadata = matches[0]
+            if not is_market_id(identifier):
+                raise ValueError("市场条目的插件 ID 无效，拒绝自动绑定。")
+            binding = {
+                "kind": "market",
+                "market_plugin_id": identifier,
+                "registry_url": None,
+                "repo_url": repository_url(metadata.get("repo")),
+            }
+        elif repo:
+            metadata = await asyncio.wait_for(
+                self.operations.manager.inspect_plugin_repository(repo),
+                timeout=MARKET_QUERY_TIMEOUT_SECONDS,
+            )
+            if metadata.get("name") != local["name"] or not authors_match(
+                local["author"], metadata.get("author"), market=False
+            ):
+                raise ValueError("仓库中的作者或插件名与本机不一致，拒绝自动绑定。")
+            binding = {
+                "kind": "repository",
+                "market_plugin_id": "",
+                "registry_url": None,
+                "repo_url": repo,
+            }
+        else:
+            return None
+        binding["id"] = fingerprint(binding)[:24]
+        binding.update(verification="identity_matched", checked_at=now())
+        return binding
 
     async def bind_restored(self, directory: str, actor: str) -> list[str]:
         """Verify and bind a restored source while the transfer and core locks are held."""
@@ -736,32 +918,22 @@ class SourceService:
                     actor, directory, record["revision"]
                 )
             else:
-                local = record["local"]
-                if not local["repo"]:
-                    return []
-                repo_url = repository_url(local["repo"])
                 data, notice = await self.official_market(fresh=True)
                 if notice:
                     raise ValueError("市场联网校验失败，请稍后在来源详情中重试。")
-                matches = [
-                    identifier
-                    for identifier, metadata in self.operations.web.iter_market_plugin_entries(
-                        data
+                binding = await self._discover_binding(record, data)
+                current = await self.detail(directory)
+                if current["revision"] != record["revision"]:
+                    raise ValueError("插件身份或来源已变化，请在来源详情中重新校验。")
+                if binding is None:
+                    current["auto_binding_notice"] = (
+                        "来源未自动绑定：市场中未找到匹配条目，插件也未声明仓库地址。"
                     )
-                    if metadata.get("name") == local["name"]
-                    and authors_match(
-                        local["author"], metadata.get("author"), market=True
-                    )
-                    and same_repository(repo_url, metadata.get("repo"))
-                ]
-                if len(matches) > 1:
-                    raise ValueError("市场中有多个匹配条目，请在官方插件页面选择来源。")
-                preview = await self.preview_binding(
-                    actor,
-                    directory,
-                    "market" if matches else "repository",
-                    matches[0] if matches else repo_url,
-                )
+                    await self._save_record(current)
+                    return []
+                await self._activate(current, binding, actor)
+                await self._save_record(current)
+                return []
             record = await self.detail(directory)
             if record["revision"] != self.previews[preview["id"]]["revision"]:
                 raise ValueError("插件身份或来源已变化，请在来源详情中重新校验。")
@@ -790,6 +962,7 @@ class SourceService:
                 "history",
                 "last_core_revision",
                 "metadata_snapshot",
+                "auto_binding_notice",
             )
             if key in record
         }

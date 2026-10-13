@@ -274,7 +274,13 @@ async def test_info_uses_real_full_command_names_aliases_and_disabled_state(
     env, identifier
 ):
     target = env.add_target()
-    handler = copy.copy(next(iter(env.registry)))
+    handler = copy.copy(
+        next(
+            item
+            for item in env.registry
+            if item.event_type == EventType.AdapterMessageEvent
+        )
+    )
     handler.handler_module_path = target.module_path
     handler.handler_name = "child"
     handler.enabled = False
@@ -416,7 +422,13 @@ async def test_conflicting_active_namespace_fails_initialization_and_runtime(env
 
 @pytest.mark.parametrize("command", ["plugin", "plugin reload", "pm_tools"])
 async def test_unrelated_commands_do_not_conflict_with_pm(env, command):
-    handler = copy.copy(next(iter(env.registry)))
+    handler = copy.copy(
+        next(
+            item
+            for item in env.registry
+            if item.event_type == EventType.AdapterMessageEvent
+        )
+    )
     handler.handler_module_path = "foreign.main"
     handler.event_filters = [CommandFilter(command, None, handler)]
     env.registry.append(handler)
@@ -437,7 +449,13 @@ async def test_unrelated_commands_do_not_conflict_with_pm(env, command):
 async def test_disabled_foreign_commands_do_not_block_namespace(
     env, disabled_handler, disabled_plugin
 ):
-    handler = copy.copy(next(iter(env.registry)))
+    handler = copy.copy(
+        next(
+            item
+            for item in env.registry
+            if item.event_type == EventType.AdapterMessageEvent
+        )
+    )
     handler.handler_module_path = "foreign.main"
     handler.enabled = not disabled_handler
     env.registry.append(handler)

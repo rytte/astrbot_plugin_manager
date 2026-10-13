@@ -83,6 +83,8 @@ class PluginLoadService:
         self.transfers.loading_plugin = False
         if not task.cancelled() and (error := task.exception()) is not None:
             logger.warning("Pending plugin load failed: %s", redact(str(error)))
+        elif not task.cancelled():
+            self.sources.schedule_binding(task.result()["directory"])
 
     async def _run(self, directory: str, revision: str) -> dict:
         async with self.transfers.operation_lock:

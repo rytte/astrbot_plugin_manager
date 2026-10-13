@@ -105,6 +105,16 @@ class Main(Star):
         self.management_web.register()
         self.ready = True
 
+    @filter.on_plugin_loaded()
+    async def on_plugin_loaded(self, metadata) -> None:
+        if self.ready and not metadata.reserved and not self.transfers.busy:
+            self.sources.schedule_binding(metadata.root_dir_name)
+
+    @filter.on_astrbot_loaded()
+    async def on_astrbot_loaded(self) -> None:
+        if self.ready:
+            await self.sources.schedule_missing_bindings()
+
     async def reply(self, event: AstrMessageEvent, text: str) -> None:
         """Send plain text through AstrBot's normal response pipeline.
 
@@ -427,6 +437,7 @@ class Main(Star):
         """Invalidate pending requests and confirmations when unloading."""
         self.ready = False
         self._removals.clear()
+        await self.sources.close()
         await self.chat_updates.close()
         await self.management_web.close()
         await self.transfer_web.close()
