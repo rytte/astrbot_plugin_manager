@@ -6,7 +6,6 @@ import asyncio
 import copy
 import hashlib
 import json
-import logging
 import os
 import platform
 import shutil
@@ -16,6 +15,7 @@ import zipfile
 from pathlib import Path
 
 from astrbot import __version__ as ASTRBOT_VERSION
+from astrbot.api import logger
 
 from . import service as operation_module
 from .bytecode import clear_plugin_bytecode
@@ -53,7 +53,6 @@ from .transfer_bundle import (
     write_json,
 )
 
-logger = logging.getLogger("astrbot")
 PREVIEW_TTL = 3600
 SPACE_MARGIN = 64 * 1024 * 1024
 

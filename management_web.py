@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
-import logging
 
+from astrbot.api import logger
 from astrbot.api.web import error_response, file_response, json_response, request
 from astrbot.dashboard.services.plugin_service import (
     PluginServiceError,
@@ -231,9 +231,7 @@ class ManagementWeb(TransferWeb):
         except asyncio.TimeoutError:
             return error_response("来源校验超时，请稍后重试。", status_code=400)
         except Exception:
-            logging.getLogger("astrbot").error(
-                "Plugin management request failed: %s", action
-            )
+            logger.error("Plugin management request failed: %s", action)
             return error_response(
                 "插件管理请求失败，请检查服务端日志。", status_code=500
             )

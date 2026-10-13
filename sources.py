@@ -6,7 +6,6 @@ import asyncio
 import copy
 import hashlib
 import json
-import logging
 import time
 import uuid
 from datetime import datetime, timezone
@@ -14,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import yaml
+from astrbot.api import logger
 from astrbot.core.repository import normalize_repository_url, parse_repository_url
 
 from .identity import authors_match
@@ -38,7 +38,6 @@ METADATA_LABELS = {
     "version": "版本",
     "repo": "仓库地址",
 }
-logger = logging.getLogger("astrbot")
 
 
 def now() -> str:

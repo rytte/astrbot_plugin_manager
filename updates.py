@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import logging
 import uuid
 
+from astrbot.api import logger
 from astrbot.dashboard.services.plugin_service import PluginServiceError
 from packaging.version import InvalidVersion, Version
 
@@ -14,8 +14,6 @@ from .identity import authors_match
 from .redaction import redact
 from .service import MARKET_QUERY_TIMEOUT_SECONDS
 from .sources import fingerprint, now, same_repository
-
-logger = logging.getLogger("astrbot")
 
 
 class UpdateService:

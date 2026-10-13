@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from contextlib import nullcontext
 from pathlib import Path
+
+from astrbot.api import logger
 
 from .bytecode import clear_plugin_bytecode
 from .redaction import redact
 from .transfer_bundle import component, safe_path
-
-logger = logging.getLogger("astrbot")
 
 
 class PluginLoadService:
