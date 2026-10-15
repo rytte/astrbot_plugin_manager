@@ -2,7 +2,7 @@
 
 import asyncio
 import copy
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 import yaml
@@ -23,6 +23,9 @@ async def auto_env(transfer_env, monkeypatch):
     }
     env.fetch = AsyncMock(return_value=({env.identifier: env.remote}, None))
     env.inspect = AsyncMock(return_value=env.remote)
+    env.cache = {}
+    env.load_cache = Mock(side_effect=lambda path: copy.deepcopy(env.cache))
+    monkeypatch.setattr(env.plugin.service.web, "load_plugin_cache", env.load_cache)
     monkeypatch.setattr(env.plugin.service.web, "get_online_plugins", env.fetch)
     monkeypatch.setattr(
         env.manager, "inspect_plugin_repository", env.inspect, raising=False
@@ -75,6 +78,101 @@ async def test_market_autobind_checks_optional_repo(auto_env):
     record = await autobind(env)
     assert record["current_source"]["kind"] == "market"
     assert env.target.repo == env.repo + ".git"
+    env.inspect.assert_not_awaited()
+
+
+@pytest.mark.parametrize("trigger", ["background", "restore"])
+@pytest.mark.parametrize("has_repo", [False, True])
+async def test_matching_market_cache_binds_without_network(auto_env, trigger, has_repo):
+    env = auto_env
+    env.cache = {env.identifier: env.remote}
+    if has_repo:
+        set_repo(env, env.repo + ".git")
+    env.fetch.side_effect = AssertionError("Matched cache must not fetch remotely")
+    if trigger == "background":
+        record = await autobind(env)
+    else:
+        async with env.plugin.transfers.operation_lock, env.manager._pm_lock:
+            warnings = await env.sources.bind_restored(
+                env.target.root_dir_name, "admin"
+            )
+        assert not warnings
+        record = await env.sources.detail(env.target.root_dir_name)
+    assert record["current_source"]["kind"] == "market"
+    assert record["current_source"]["market_plugin_id"] == env.identifier
+    assert record["current_source"]["verification"] == "identity_matched"
+    assert not record["auto_binding_notice"]
+    assert (
+        env.prefs["plugin_install_sources"][env.target.root_dir_name][
+            "market_plugin_id"
+        ]
+        == env.identifier
+    )
+    env.load_cache.assert_called_once()
+    env.fetch.assert_not_awaited()
+    env.inspect.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "name", "author", "repo", "ambiguous", "invalid_repo"],
+)
+async def test_market_cache_miss_or_mismatch_refreshes_once(auto_env, case):
+    env = auto_env
+    set_repo(env, env.repo)
+    metadata = dict(env.remote)
+    identifier = env.identifier
+    if case == "name":
+        metadata["name"] = "other_plugin"
+    elif case == "author":
+        metadata["author"] = "Other"
+    elif case == "repo":
+        metadata["repo"] = "https://github.com/other/demo"
+    elif case == "invalid_repo":
+        metadata["repo"] = "not-a-repository"
+    if case != "missing":
+        env.cache = {identifier: metadata}
+    if case == "ambiguous":
+        env.cache["Other/demo_plugin"] = env.remote
+    record = await autobind(env)
+    assert record["current_source"]["kind"] == "market"
+    assert record["current_source"]["market_plugin_id"] == env.identifier
+    assert record["current_source"]["repo_url"] == env.repo
+    env.fetch.assert_awaited_once_with(custom_registry=None, force_refresh=True)
+    env.inspect.assert_not_awaited()
+
+
+async def test_cache_miss_rejects_network_failure_even_with_matching_fallback(auto_env):
+    env = auto_env
+    env.fetch.return_value = ({env.identifier: env.remote}, "stale cache")
+    record = await autobind(env)
+    assert record["current_source"] is None
+    assert "市场联网校验失败" in record["auto_binding_notice"]
+    env.fetch.assert_awaited_once_with(custom_registry=None, force_refresh=True)
+    env.preferences.global_put.assert_not_awaited()
+    env.inspect.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure", ["notice", "exception"])
+async def test_batch_network_failure_does_not_block_cached_matches(auto_env, failure):
+    env = auto_env
+    missing = [
+        env.make_transfer_plugin(name="first_plugin", directory="aaa"),
+        env.make_transfer_plugin(name="second_plugin", directory="bbb"),
+    ]
+    env.cache = {env.identifier: env.remote}
+    if failure == "notice":
+        env.fetch.return_value = ({}, "stale cache")
+    else:
+        env.fetch.side_effect = RuntimeError("Network unavailable")
+    record = await autobind(env)
+    assert record["current_source"]["market_plugin_id"] == env.identifier
+    assert not record["auto_binding_notice"]
+    for target in missing:
+        unbound = await env.sources.detail(target.root_dir_name)
+        assert unbound["current_source"] is None
+        assert unbound["auto_binding_notice"]
+    env.fetch.assert_awaited_once_with(custom_registry=None, force_refresh=True)
     env.inspect.assert_not_awaited()
 
 

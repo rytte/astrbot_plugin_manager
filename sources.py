@@ -8,6 +8,7 @@ import hashlib
 import json
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -78,6 +79,13 @@ def same_repository(first: str, second: str) -> bool:
         return False
 
 
+@dataclass
+class _BindingMarket:
+    data: dict
+    refreshed: bool = False
+    error: Exception | None = None
+
+
 class SourceService:
     """Preserve observations without inventing installation history or trust."""
 
@@ -139,11 +147,7 @@ class SourceService:
                 try:
                     self.operations.ensure_writable()
                     if market is None:
-                        market, notice = await self.official_market(fresh=True)
-                        if notice:
-                            raise ValueError(
-                                "市场联网校验失败，请稍后在来源详情中重试。"
-                            )
+                        market = self._binding_market()
                 except Exception as exc:
                     market = None
                     for record in records:
@@ -852,39 +856,75 @@ class SourceService:
         record["auto_binding_notice"] = ""
         self._event(record, action, owner, binding["id"])
 
-    async def _discover_binding(self, record: dict, market: object) -> dict | None:
-        """Match market identity and optional repo, then inspect unmatched repos."""
+    def _binding_market(self) -> _BindingMarket:
+        source = self.operations.web.build_registry_source(None)
+        return _BindingMarket(self.operations.web.load_plugin_cache(source.cache_file))
+
+    async def _refresh_binding_market(self, market: _BindingMarket) -> None:
+        if not market.refreshed:
+            market.refreshed = True
+            try:
+                data, notice = await self.official_market(fresh=True)
+                if notice:
+                    raise ValueError("市场联网校验失败，请稍后在来源详情中重试。")
+                market.data = data
+            except Exception as exc:
+                market.error = exc
+        if market.error is not None:
+            raise market.error
+
+    async def _discover_binding(
+        self, record: dict, market: _BindingMarket | None = None
+    ) -> dict | None:
+        """Match cached market entries, refresh mismatches, then inspect unmatched repos."""
         self._editable(record)
         local = record["local"]
         repo = repository_url(local["repo"]) if local["repo"] else ""
-        identities = [
-            (identifier, metadata)
-            for identifier, metadata in self.operations.web.iter_market_plugin_entries(
-                market
-            )
-            if metadata.get("name") == local["name"]
-            and authors_match(local["author"], metadata.get("author"), market=True)
-        ]
-        matches = [
-            (identifier, metadata)
-            for identifier, metadata in identities
-            if not repo or same_repository(repo, metadata.get("repo"))
-        ]
-        if len(matches) > 1:
-            raise ValueError("市场中有多个匹配条目，请在官方插件页面选择来源。")
-        if identities and not matches:
-            raise ValueError("市场条目的仓库地址与本机不一致，请在来源详情中检查。")
-        if matches:
-            identifier, metadata = matches[0]
-            if not is_market_id(identifier):
-                raise ValueError("市场条目的插件 ID 无效，拒绝自动绑定。")
-            binding = {
-                "kind": "market",
-                "market_plugin_id": identifier,
-                "registry_url": None,
-                "repo_url": repository_url(metadata.get("repo")),
-            }
-        elif repo:
+        if market is None:
+            market = self._binding_market()
+        for attempt in range(2):
+            if attempt:
+                await self._refresh_binding_market(market)
+            try:
+                identities = [
+                    (identifier, metadata)
+                    for identifier, metadata in self.operations.web.iter_market_plugin_entries(
+                        market.data
+                    )
+                    if metadata.get("name") == local["name"]
+                    and authors_match(
+                        local["author"], metadata.get("author"), market=True
+                    )
+                ]
+                matches = [
+                    (identifier, metadata)
+                    for identifier, metadata in identities
+                    if not repo or same_repository(repo, metadata.get("repo"))
+                ]
+                if len(matches) > 1:
+                    raise ValueError("市场中有多个匹配条目，请在官方插件页面选择来源。")
+                if identities and not matches:
+                    raise ValueError(
+                        "市场条目的仓库地址与本机不一致，请在来源详情中检查。"
+                    )
+                binding = None
+                if matches:
+                    identifier, metadata = matches[0]
+                    if not is_market_id(identifier):
+                        raise ValueError("市场条目的插件 ID 无效，拒绝自动绑定。")
+                    binding = {
+                        "kind": "market",
+                        "market_plugin_id": identifier,
+                        "registry_url": None,
+                        "repo_url": repository_url(metadata.get("repo")),
+                    }
+            except ValueError:
+                if market.refreshed and market.error is None:
+                    raise
+            else:
+                if binding is not None or (market.refreshed and market.error is None):
+                    break
+        if binding is None and repo:
             metadata = await asyncio.wait_for(
                 self.operations.manager.inspect_plugin_repository(repo),
                 timeout=MARKET_QUERY_TIMEOUT_SECONDS,
@@ -899,7 +939,7 @@ class SourceService:
                 "registry_url": None,
                 "repo_url": repo,
             }
-        else:
+        elif binding is None:
             return None
         binding["id"] = fingerprint(binding)[:24]
         binding.update(verification="identity_matched", checked_at=now())
@@ -917,10 +957,7 @@ class SourceService:
                     actor, directory, record["revision"]
                 )
             else:
-                data, notice = await self.official_market(fresh=True)
-                if notice:
-                    raise ValueError("市场联网校验失败，请稍后在来源详情中重试。")
-                binding = await self._discover_binding(record, data)
+                binding = await self._discover_binding(record)
                 current = await self.detail(directory)
                 if current["revision"] != record["revision"]:
                     raise ValueError("插件身份或来源已变化，请在来源详情中重新校验。")
