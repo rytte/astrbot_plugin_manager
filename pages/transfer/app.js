@@ -224,7 +224,7 @@ async function checkUpdates() {
 async function updatePlugin(record, binding, result) {
   const checkId = updateState.id;
   if (outdatedCheck(record, result) || !result.can_update || binding.id !== active(record)?.id) throw new Error("更新来源或插件信息已变化，请重新检查。");
-  if (!await confirmOperation("确认更新插件", [{...record.local, description: sourceText(binding) + " · " + result.local_version + " → " + result.remote_version}], "将通过 AstrBot 下载、处理依赖并加载插件，保持原来的启停状态。更新前会重新核对当前来源和版本。")) return;
+  if (!await confirmOperation("确认更新插件", [{...record.local, description: sourceText(binding) + " · " + result.local_version + " → " + result.remote_version}], "将通过 AstrBot 下载、处理依赖并加载插件，保持原来的启停状态。更新前会重新核对当前来源和版本。", false)) return;
   const job = await managementPost("update-plugin", {check_id: checkId, directory: record.local.directory, binding_id: binding.id, acknowledged: true});
   result.can_update = false; result.status = "updating"; result.message = "正在更新";
   busy = true;
@@ -1069,7 +1069,7 @@ async function syncMetadata(directory) {
   bindingPreview = null;
   await loadState(true);
   await loadManagement();
-  message("插件管家记录已更新，插件运行状态保持不变。");
+  message("插件管家记录已更新。");
 }
 async function openSource(directory) {
   await loadManagement();
