@@ -187,20 +187,35 @@ function checkedSource(record, binding) {
 function outdatedCheck(record, result) {
   return result.revision !== record.revision || result.binding_id !== active(record)?.id;
 }
-function sourceUpdate(record, binding) {
+function sourceUpdate(record, binding, compact = false) {
   const result = checkedSource(record, binding);
   if (!result || result.status === "no_update") return null;
   const outdated = outdatedCheck(record, result) && !["updated", "updating"].includes(result.status);
+  if (compact && !outdated && result.status === "update_available" && result.remote_version) return null;
   const container = node("div", "source-update " + (outdated ? "stale" : result.status));
-  const versions = result.remote_version ? "本机 " + result.local_version + " → 来源 " + result.remote_version + " · " : "";
+  const versions = !compact && result.remote_version ? "本机 " + result.local_version + " → 来源 " + result.remote_version + " · " : "";
   container.append(node("p", "update-result", versions + result.message + (outdated ? "；信息已变化，请重新检查" : "")));
-  if (result.can_update && !outdated && updateState.status === "completed") {
+  if (!compact && result.can_update && !outdated && updateState.status === "completed") {
     const action = button("更新", () => updatePlugin(record, binding, result), managementStatus !== "ready");
     action.className = "text-button update-plugin";
     action.setAttribute("aria-label", "更新 " + record.local.name + " 至 " + result.remote_version);
     container.append(action);
   }
   return container;
+}
+function pluginUpdateBadge(record) {
+  const binding = record && active(record);
+  const result = binding && checkedSource(record, binding);
+  if (!result || result.status !== "update_available" || !result.remote_version || outdatedCheck(record, result)) return null;
+  const badge = button("", () => updatePlugin(record, binding, result), !result.can_update || updateState.status !== "completed" || managementStatus !== "ready");
+  badge.type = "button";
+  badge.className = "plugin-update-badge";
+  badge.title = result.can_update ? "发现新版本 " + result.remote_version + "，点击更新" : result.message;
+  badge.setAttribute("aria-label", "更新 " + record.local.name + " 至 " + result.remote_version);
+  const icon = node("span", "plugin-update-icon");
+  icon.setAttribute("aria-hidden", "true");
+  badge.append(icon, document.createTextNode(result.remote_version));
+  return badge;
 }
 function renderUpdateSummary() {
   const checking = updateState.status === "running";
@@ -224,7 +239,8 @@ async function checkUpdates() {
 async function updatePlugin(record, binding, result) {
   const checkId = updateState.id;
   if (outdatedCheck(record, result) || !result.can_update || binding.id !== active(record)?.id) throw new Error("更新来源或插件信息已变化，请重新检查。");
-  if (!await confirmOperation("确认更新插件", [{...record.local, description: sourceText(binding) + " · " + result.local_version + " → " + result.remote_version}], "将通过 AstrBot 下载、处理依赖并加载插件，保持原来的启停状态。更新前会重新核对当前来源和版本。", false)) return;
+  const summary = {...record.local, description: sourceText(binding), versionChange: {current: result.local_version, target: result.remote_version}};
+  if (!await confirmOperation("确认更新插件", [summary], "将通过 AstrBot 下载、处理依赖并加载插件，保持原来的运行状态。", false)) return;
   const job = await managementPost("update-plugin", {check_id: checkId, directory: record.local.directory, binding_id: binding.id, acknowledged: true});
   result.can_update = false; result.status = "updating"; result.message = "正在更新";
   busy = true;
@@ -297,11 +313,12 @@ function checkbox(label, checked, disabled, changed) {
   return wrapper;
 }
 
-function titleCell(plugin, showIcon = false, iconKey = plugin.directory) {
+function titleCell(plugin, showIcon = false, iconKey = plugin.directory, updateBadge = null) {
   const cell = node("td");
   const details = node("div", "plugin-copy");
   const heading = node("div", "plugin-heading");
   heading.append(node("span", "plugin-title", plugin.display_name || plugin.name));
+  const badges = node("span", "plugin-badges");
   const statuses = {enabled: "已打开", disabled: "已关闭", failed: "加载失败", pending: "待加载"};
   if (statuses[plugin.status]) {
     const record = sourceRecord(plugin.directory);
@@ -317,8 +334,10 @@ function titleCell(plugin, showIcon = false, iconKey = plugin.directory) {
     const icon = node("span", "plugin-status-icon");
     icon.setAttribute("aria-hidden", "true");
     status.append(icon, document.createTextNode(loadingDirectory === plugin.directory ? "加载中…" : statuses[plugin.status]));
-    heading.append(status);
+    badges.append(status);
   }
+  if (updateBadge) badges.append(updateBadge);
+  if (badges.childNodes.length) heading.append(badges);
   const metadata = node("div", "plugin-meta");
   metadata.append(node("span", "plugin-id", plugin.name + (plugin.directory !== plugin.name ? " / " + plugin.directory : "")));
   if (plugin.version) metadata.append(node("span", "plugin-version", "v" + plugin.version.replace(/^v/i, "")));
@@ -366,7 +385,7 @@ function renderPlugins() {
     const row = node("tr", choice.selected ? "selected" : "");
     const selectCell = node("td", "check-cell");
     selectCell.append(checkbox("选择插件 " + plugin.name, choice.selected, blocked && !choice.selected, checked => {if (manifestMode()) {checked ? manifestSelections.add(plugin.directory) : manifestSelections.delete(plugin.directory);} else choice.selected = checked; renderPlugins(); renderSummary();}));
-    const title = titleCell(plugin, true);
+    const title = titleCell(plugin, true, plugin.directory, pluginUpdateBadge(record));
     if (manifestMode()) title.append(node("div", eligible(record) ? "plugin-detail" : "plugin-error", eligible(record) ? "可分享 · " + (official(record) ? "官方市场来源" : "仓库来源") : "暂不能分享 · 请在来源详情中补充或校验来源"));
     else if (plugin.blocked) title.append(node("div", "plugin-error", plugin.blocked));
     const notice = metadataNotice(plugin, record);
@@ -394,7 +413,7 @@ function renderPlugins() {
     manageButton.setAttribute("aria-label", "查看 " + plugin.name + " 的插件来源");
     sourceCell.append(sourceLabel, manageButton);
     if (binding) {
-      const result = sourceUpdate(record, binding);
+      const result = sourceUpdate(record, binding, true);
       if (result) sourceCell.append(result);
     }
     row.append(selectCell, title, dataCell, configCell, sizeCell, sourceCell);
@@ -465,7 +484,15 @@ function confirmOperation(title, plugins, notices, requireAcknowledgement = true
   elements["confirmation-list"].replaceChildren();
   for (const plugin of plugins) {
     const row = node("div", "confirmation-row");
-    row.append(node("strong", "", plugin.display_name || plugin.name), node("p", "", (plugin.directory || plugin.name) + " · " + plugin.description));
+    row.append(node("strong", "", plugin.display_name || plugin.name));
+    if (plugin.versionChange) {
+      row.append(node("p", "confirmation-plugin-id", plugin.directory || plugin.name));
+      const details = node("div", "confirmation-update-details");
+      const versions = node("span", "confirmation-versions");
+      versions.append(node("span", "confirmation-version-current", plugin.versionChange.current), node("span", "confirmation-version-arrow", "→"), node("span", "confirmation-version-target", plugin.versionChange.target));
+      details.append(node("span", "confirmation-update-source", plugin.description), versions);
+      row.append(details);
+    } else row.append(node("p", "", (plugin.directory || plugin.name) + " · " + plugin.description));
     elements["confirmation-list"].append(row);
   }
   elements["confirmation-notices"].textContent = notices;
@@ -824,7 +851,7 @@ function renderJobs(jobs) {
     panel.append(remove); menu.append(toggle, panel);
     jobMenus.set(job.id, {menu, toggle, panel, remove});
     heading.append(title, menu);
-    card.append(heading, node("div", "job-meta", new Date(job.created_at * 1000).toLocaleString("zh-CN") + " · " + job.id.slice(0, 8)), node("div", "job-phase", job.phase));
+    card.append(heading, node("div", "job-meta", new Date(job.created_at * 1000).toLocaleString("zh-CN")), node("div", "job-phase", job.phase));
     if (job.results.length) {
       const results = node("ul", "job-results");
       for (const result of job.results) results.append(node("li", "", result.directory + "：" + (result.message || "快照完成")));
