@@ -572,6 +572,77 @@ async def test_directory_reuse_never_inherits_trust(env):
     ] == first["record_id"]
 
 
+@pytest.mark.parametrize("method", ["market", "repository", None])
+@pytest.mark.parametrize("active", [False, True])
+async def test_version_only_changes_sync_automatically_and_persist(
+    transfer_env, method, active
+):
+    env = transfer_env
+    target = env.make_transfer_plugin(active=active)
+    sources = env.plugin.sources
+    if method:
+        env.prefs["plugin_install_sources"] = {
+            target.root_dir_name: core_source(target, method)
+        }
+    before = await sources.detail(target.root_dir_name)
+    core_before = copy.deepcopy(env.prefs)
+    path = sources.root / target.root_dir_name / "metadata.yaml"
+    metadata = yaml.safe_load(path.read_text(encoding="utf-8"))
+    target.version = metadata["version"] = "2.0.0"
+    path.write_text(yaml.safe_dump(metadata), encoding="utf-8")
+    changed = await sources.detail(target.root_dir_name)
+    assert changed["local"]["version"] == "2.0.0"
+    assert changed["metadata_snapshot"]["version"] == "2.0.0"
+    assert not changed["metadata_changed"] and not changed["metadata_notice"]
+    assert not changed["identity_changed"]
+    assert changed["revision"] != before["revision"]
+    for field in ("record_id", "identity", "provenance", "current_source", "history"):
+        assert changed[field] == before[field]
+    assert (
+        sources._store()["plugins"][target.root_dir_name]["metadata_snapshot"][
+            "version"
+        ]
+        == "2.0.0"
+    )
+    restarted = SourceService(env.plugin.service, env.plugin.transfers)
+    current = await restarted.detail(target.root_dir_name)
+    assert current["revision"] == changed["revision"]
+    assert not current["metadata_changed"] and not current["metadata_notice"]
+    assert env.prefs == core_before
+    assert target.activated is active
+    env.manager.load.assert_not_awaited()
+
+
+@pytest.mark.parametrize("field", ["author", "repo", "display_name"])
+async def test_version_change_with_other_metadata_still_requires_confirmation(
+    transfer_env, field
+):
+    env = transfer_env
+    target = env.make_transfer_plugin(active=True)
+    sources = env.plugin.sources
+    env.prefs["plugin_install_sources"] = {target.root_dir_name: core_source(target)}
+    before = await sources.detail(target.root_dir_name)
+    path = sources.root / target.root_dir_name / "metadata.yaml"
+    metadata = yaml.safe_load(path.read_text(encoding="utf-8"))
+    target.version = metadata["version"] = "2.0.0"
+    metadata[field] = "https://github.com/other/demo" if field == "repo" else "Changed"
+    path.write_text(yaml.safe_dump(metadata), encoding="utf-8")
+    changed = await sources.detail(target.root_dir_name)
+    assert changed["metadata_changed"]
+    assert "版本" in changed["metadata_notice"]
+    assert changed["metadata_snapshot"] == before["metadata_snapshot"]
+    assert (
+        sources._store()["plugins"][target.root_dir_name]["metadata_snapshot"]
+        == before["metadata_snapshot"]
+    )
+    synced = await sources.sync_metadata(
+        "admin", target.root_dir_name, changed["revision"]
+    )
+    assert not synced["metadata_changed"] and not synced["metadata_notice"]
+    assert synced["metadata_snapshot"]["version"] == "2.0.0"
+    assert synced["metadata_snapshot"][field] == metadata[field]
+
+
 @pytest.mark.parametrize("first_seen_after_edit", [False, True])
 async def test_author_edit_can_sync_records_without_reloading_or_losing_sources(
     transfer_env, first_seen_after_edit, monkeypatch

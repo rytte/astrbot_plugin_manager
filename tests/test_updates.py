@@ -102,6 +102,19 @@ async def test_checks_only_current_sources_and_deduplicates_market(registered):
     assert env.plugin.updates.state("other")["status"] == "idle"
 
 
+async def test_external_version_update_does_not_require_metadata_sync(registered):
+    env, target, _, _ = registered
+    target.version = "1.5.0"
+    report = await check(env)
+    result = report["results"][0]
+    assert result["status"] == "update_available" and result["can_update"]
+    assert result["local_version"] == "1.5.0"
+    assert "更新信息" not in result["message"]
+    record = await env.plugin.sources.detail(target.root_dir_name)
+    assert not record["metadata_changed"] and not record["metadata_notice"]
+    assert record["metadata_snapshot"]["version"] == "1.5.0"
+
+
 async def test_custom_markets_are_checked_independently(registered):
     env, target, market, _ = registered
     second = env.add_target(name="second", directory="second")

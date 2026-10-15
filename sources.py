@@ -404,6 +404,9 @@ class SourceService:
             for field in METADATA_FIELDS
             if saved["metadata_snapshot"].get(field, "") != local[field]
         ]
+        if changes == ["version"] and not mismatch and not local["problem"]:
+            saved["metadata_snapshot"]["version"] = local["version"]
+            changes = []
         active = self._binding(core)
         validation = saved.get("source_validation")
         if active:
@@ -463,6 +466,9 @@ class SourceService:
                     if previous:
                         self._event(record, "core_observed", "AstrBot")
                     record["last_core_revision"] = fingerprint(core)
+                    store["plugins"][local["directory"]] = self._stored_record(record)
+                    changed = True
+                elif previous.get("metadata_snapshot") != record["metadata_snapshot"]:
                     store["plugins"][local["directory"]] = self._stored_record(record)
                     changed = True
             if changed:
