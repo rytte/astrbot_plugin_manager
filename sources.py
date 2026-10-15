@@ -20,7 +20,12 @@ from astrbot.core.repository import normalize_repository_url, parse_repository_u
 from .identity import authors_match
 from .redaction import redact
 from .service import MARKET_QUERY_TIMEOUT_SECONDS, is_market_id
-from .source_bundle import METHODS, portable_binding, validate_sources
+from .source_bundle import (
+    METHODS,
+    canonical_repository_url,
+    portable_binding,
+    validate_sources,
+)
 from .transfer_bundle import MAX_JSON, component, load_json, safe_path, write_json
 
 SOURCE_LABELS = {
@@ -60,14 +65,14 @@ def repository_url(value: str) -> str:
     if parsed.scheme != "https" or parsed.username or parsed.password:
         raise ValueError("页面绑定仅支持不含凭据的 HTTPS Git 仓库地址。")
     parse_repository_url(normalized)
-    return normalized
+    return canonical_repository_url(normalized)
 
 
 def same_repository(first: str, second: str) -> bool:
     """Compare host, port and repository path; never compare owner/repo alone."""
     try:
         left, right = urlsplit(repository_url(first)), urlsplit(repository_url(second))
-        paths = [url.path.rstrip("/").removesuffix(".git") for url in (left, right)]
+        paths = [url.path.rstrip("/") for url in (left, right)]
         if left.hostname in {"github.com", "www.github.com"}:
             paths = [path.casefold() for path in paths]
         return (
@@ -331,7 +336,7 @@ class SourceService:
             return None
         binding = {
             "kind": kind,
-            "repo_url": str(core.get("repo") or ""),
+            "repo_url": canonical_repository_url(str(core.get("repo") or "")),
             "registry_url": core.get("registry_url") if kind == "market" else None,
             "market_plugin_id": str(core.get("market_plugin_id") or "")
             if kind == "market"
@@ -410,6 +415,14 @@ class SourceService:
         active = self._binding(core)
         validation = saved.get("source_validation")
         if active:
+            if validation and validation["id"] != active["id"]:
+                original = {
+                    field: active[field]
+                    for field in ("kind", "repo_url", "registry_url", "market_plugin_id")
+                }
+                original["repo_url"] = str(core.get("repo") or "")
+                if validation["id"] == fingerprint(original)[:24]:
+                    validation["id"] = active["id"]
             if not validation or validation["id"] != active["id"]:
                 validation = {
                     "id": active["id"],
@@ -468,7 +481,10 @@ class SourceService:
                     record["last_core_revision"] = fingerprint(core)
                     store["plugins"][local["directory"]] = self._stored_record(record)
                     changed = True
-                elif previous.get("metadata_snapshot") != record["metadata_snapshot"]:
+                elif (
+                    previous.get("metadata_snapshot") != record["metadata_snapshot"]
+                    or previous.get("source_validation") != record["source_validation"]
+                ):
                     store["plugins"][local["directory"]] = self._stored_record(record)
                     changed = True
             if changed:
@@ -555,6 +571,8 @@ class SourceService:
         local = record["local"]
         if record["identity"]["author"] != local["author"]:
             raise ValueError("作者信息已变更，请先点击「更新信息」，再校验来源。")
+        if kind == "repository":
+            value = repository_url(value)
         current = record["current_source"]
         if current and (
             kind != current["kind"]
@@ -575,14 +593,13 @@ class SourceService:
             source = self.operations.web.build_registry_source(registry_url)
             data = self.operations.web.load_plugin_cache(source.cache_file)
         elif kind == "repository":
-            url = repository_url(value)
             metadata = await asyncio.wait_for(
-                self.operations.manager.inspect_plugin_repository(url),
+                self.operations.manager.inspect_plugin_repository(value),
                 timeout=MARKET_QUERY_TIMEOUT_SECONDS,
             )
             binding = {
                 "kind": kind,
-                "repo_url": url,
+                "repo_url": value,
                 "registry_url": None,
                 "market_plugin_id": "",
             }
@@ -1124,13 +1141,14 @@ class SourceService:
         await self.operations.web.save_plugin_install_sources(records)
         record["provenance"] = {
             **copy.deepcopy(incoming["provenance"]),
+            "source": portable_binding(incoming["provenance"]["source"]),
             "evidence": "bundle_record",
         }
         record["identity"] = self._identity(record["local"])
         record["metadata_snapshot"] = {
             field: record["local"][field] for field in METADATA_FIELDS
         }
-        record["pending_source"] = copy.deepcopy(incoming["source"])
+        record["pending_source"] = portable_binding(incoming["source"])
         record["last_core_revision"] = fingerprint(None)
         self._event(record, "bundle_imported", actor)
         self._event(record, "bundle_sources_imported", actor)

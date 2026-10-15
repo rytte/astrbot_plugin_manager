@@ -72,11 +72,15 @@ async def test_market_autobind_accepts_missing_repo_and_preserves_provenance(
     env.manager.load.assert_not_awaited()
 
 
-async def test_market_autobind_checks_optional_repo(auto_env):
+@pytest.mark.parametrize("remote_suffix", ["", ".git"])
+async def test_market_autobind_checks_optional_repo(auto_env, remote_suffix):
     env = auto_env
     set_repo(env, env.repo + ".git")
+    env.remote["repo"] = env.repo + remote_suffix
     record = await autobind(env)
     assert record["current_source"]["kind"] == "market"
+    assert record["current_source"]["repo_url"] == env.repo
+    assert env.prefs["plugin_install_sources"][env.target.root_dir_name]["repo"] == env.repo
     assert env.target.repo == env.repo + ".git"
     env.inspect.assert_not_awaited()
 

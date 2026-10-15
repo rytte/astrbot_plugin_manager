@@ -303,8 +303,16 @@ async function main() {
   management.updates.results[0].can_update = true;
   await vm.runInContext("loadManagement()", context);
   assert.equal(updateButtons()[0].disabled, false);
+  record.history = [
+    {at: "2026-10-15T15:35:00Z", action: "metadata_synced", actor: "astrbot"},
+    {at: "2026-10-15T15:34:00Z", action: "core_observed", actor: "AstrBot"},
+    {at: "2026-10-15T15:33:00Z", action: "source_repaired", actor: "admin"},
+  ];
   await vm.runInContext("openSource('demo_dir')", context);
   assert.match(elements["source-summary"].textContent, /来源 2.0.0/);
+  assert.match(elements["source-history"].textContent, /AstrBot/);
+  assert.doesNotMatch(elements["source-history"].textContent, / · astrbot/);
+  assert.match(elements["source-history"].textContent, / · admin/);
   assert.equal(elements["source-repair"].hidden, true);
   assert.equal(descendants(elements["source-summary"]).filter(element => element.tagName === "button" && element.textContent === "更新").length, 1);
   await elements["close-source"].trigger("click");

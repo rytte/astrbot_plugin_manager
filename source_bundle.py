@@ -26,6 +26,23 @@ def _keys(value, expected: set[str]) -> None:
         raise ValueError("来源快照字段缺失、未知或格式不正确。")
 
 
+def canonical_repository_url(value: str) -> str:
+    """Omit GitHub clone suffixes without rewriting branches or Git transports."""
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
+            "github.com",
+            "www.github.com",
+        }:
+            return value
+        parse_repository_url(value)
+    except ValueError:
+        return value
+    parts = [part for part in parsed.path.split("/") if part]
+    parts[1] = parts[1].removesuffix(".git")
+    return urlunsplit(parsed._replace(path="/" + "/".join(parts)))
+
+
 def _url(value: str, *, repository=False, sanitize=False) -> str:
     if not isinstance(value, str) or len(value) > 2048:
         raise ValueError("来源地址无效。")
@@ -57,7 +74,7 @@ def _url(value: str, *, repository=False, sanitize=False) -> str:
     return value
 
 
-def portable_binding(value: dict | None) -> dict | None:
+def portable_binding(value: dict | None, *, canonicalize: bool = True) -> dict | None:
     """Normalize locators and deliberately omit all validation/actor fields."""
     if (
         not isinstance(value, dict)
@@ -75,6 +92,8 @@ def portable_binding(value: dict | None) -> dict | None:
     registry = value.get("registry_url") if kind == "market" else None
     if repo:
         repo = _url(repo, repository=True, sanitize=True)
+        if canonicalize:
+            repo = canonical_repository_url(repo)
     if kind == "repository" and not repo:
         raise ValueError("仓库来源缺少地址。")
     if registry is not None:
@@ -114,7 +133,7 @@ def _binding(value) -> None:
         raise ValueError("来源仓库地址无效。")
     if value["registry_url"] is not None:
         _url(value["registry_url"])
-    if portable_binding(value) != value:
+    if portable_binding(value, canonicalize=False) != value:
         raise ValueError("来源标识与地址不一致。")
 
 

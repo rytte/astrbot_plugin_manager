@@ -8,7 +8,12 @@ from unittest.mock import AsyncMock
 import pytest
 import yaml
 from astrbot.dashboard.services.plugin_service import PluginService, PluginServiceError
-from astrbot_plugin_manager.sources import SourceService, same_repository
+from astrbot_plugin_manager.sources import (
+    SourceService,
+    fingerprint,
+    repository_url,
+    same_repository,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -308,6 +313,83 @@ async def test_observation_does_not_invent_original_install_fact_and_survives_re
     assert (await restarted.detail(target.root_dir_name))["record_id"] == record[
         "record_id"
     ]
+
+
+@pytest.mark.parametrize("method", ["market", "repository"])
+async def test_observed_github_sources_use_canonical_repository_and_id(env, method):
+    target = env.add_target()
+    repo = "https://github.com/test/demo/tree/release.git"
+    core = core_source(target, method)
+    core["repo"] = "https://github.com/test/demo.git/tree/release.git/"
+    env.prefs["plugin_install_sources"] = {target.root_dir_name: core}
+    sources = env.plugin.sources
+    record = await sources.detail(target.root_dir_name)
+    expected = sources._binding({**core, "repo": repo})
+    assert record["current_source"]["repo_url"] == repo
+    assert record["current_source"]["id"] == expected["id"]
+    assert record["provenance"]["source"]["repo_url"] == repo
+    assert env.prefs["plugin_install_sources"][target.root_dir_name] == core
+    env.preferences.global_put.assert_not_awaited()
+    core["repo"] = repo
+    changed = await sources.detail(target.root_dir_name)
+    assert changed["current_source"]["id"] == record["current_source"]["id"]
+
+
+@pytest.mark.parametrize("method", ["market", "repository"])
+async def test_git_suffix_normalization_preserves_existing_source_validation(
+    env, method
+):
+    target = env.add_target()
+    core = core_source(target, method)
+    core["repo"] += ".git"
+    env.prefs["plugin_install_sources"] = {target.root_dir_name: core}
+    sources = env.plugin.sources
+    record = await sources.detail(target.root_dir_name)
+    legacy = {
+        field: record["current_source"][field]
+        for field in ("kind", "repo_url", "registry_url", "market_plugin_id")
+    }
+    legacy["repo_url"] = core["repo"]
+    checked_at = "2026-10-11T12:00:00Z"
+    record["source_validation"] = {
+        "id": fingerprint(legacy)[:24],
+        "author": target.author,
+        "checked_at": checked_at,
+    }
+    await sources._save_record(record)
+    saved = await sources.detail(target.root_dir_name)
+    assert saved["current_source"]["verification"] == "identity_matched"
+    assert saved["current_source"]["checked_at"] == checked_at
+    assert saved["source_validation"]["id"] == saved["current_source"]["id"]
+    assert sources._store()["plugins"][target.root_dir_name]["source_validation"] == saved["source_validation"]
+    assert saved["history"] == record["history"]
+    assert env.prefs["plugin_install_sources"][target.root_dir_name] == core
+    env.preferences.global_put.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("https://github.com/test/demo.git/tree/release.git", "https://github.com/test/demo/tree/release.git"),
+        ("https://example.com/test/demo.git", "https://example.com/test/demo.git"),
+    ],
+)
+async def test_repository_binding_records_canonical_url_and_accepts_original_input(
+    env, monkeypatch, value, expected
+):
+    target = env.add_target()
+    inspect = AsyncMock(return_value={"name": target.name, "author": target.author})
+    monkeypatch.setattr(env.manager, "inspect_plugin_repository", inspect, raising=False)
+    sources = env.plugin.sources
+    preview = await sources.preview_binding("admin", target.root_dir_name, "repository", value)
+    assert preview["binding"]["repo_url"] == expected
+    inspect.assert_awaited_once_with(expected)
+    record = await sources.bind("admin", preview["id"], True)
+    assert record["current_source"]["repo_url"] == expected
+    assert env.prefs["plugin_install_sources"][target.root_dir_name]["repo"] == expected
+    assert target.repo == expected
+    repeated = await sources.preview_binding("admin", target.root_dir_name, "repository", value)
+    assert repeated["binding"]["id"] == record["current_source"]["id"]
 
 
 async def test_existing_source_cannot_be_switched_by_manager(env, monkeypatch):
@@ -735,8 +817,9 @@ async def test_metadata_sync_rejects_changes_since_display(transfer_env):
     env.manager.load.assert_not_awaited()
 
 
+@pytest.mark.parametrize("git_suffix", [False, True])
 async def test_bundle_import_invalidates_source_trust_and_can_restore_source_snapshot(
-    env,
+    env, git_suffix,
 ):
     target = env.add_target()
     env.prefs["plugin_install_sources"] = {target.root_dir_name: core_source(target)}
@@ -748,9 +831,17 @@ async def test_bundle_import_invalidates_source_trust_and_can_restore_source_sna
     incoming, _ = await env.plugin.sources.export_sources(
         target.root_dir_name, original["local"]
     )
+    if git_suffix:
+        for binding in (incoming["source"], incoming["provenance"]["source"]):
+            binding["repo_url"] += ".git"
+            binding["id"] = fingerprint({field: value for field, value in binding.items() if field != "id"})[:24]
+    before_import = copy.deepcopy(incoming)
     await env.plugin.sources.note_bundle(target.root_dir_name, "admin", incoming)
     modified = await env.plugin.sources.detail(target.root_dir_name)
     assert modified["pending_source"]["id"] == original["current_source"]["id"]
+    assert modified["pending_source"]["repo_url"] == original["current_source"]["repo_url"]
+    assert modified["provenance"]["source"]["repo_url"] == original["current_source"]["repo_url"]
+    assert incoming == before_import
     assert "verification" not in modified["pending_source"]
     assert not modified["current_source"]
     assert target.root_dir_name not in env.prefs["plugin_install_sources"]
@@ -775,9 +866,30 @@ async def test_bundle_import_rejects_missing_source_snapshot_before_writing(env)
 
 
 @pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("https://github.com/test/demo.git", "https://github.com/test/demo"),
+        ("https://github.com/test/demo.git/", "https://github.com/test/demo"),
+        ("https://www.github.com/test/demo.git", "https://www.github.com/test/demo"),
+        ("https://github.com:8443/test/demo.git", "https://github.com:8443/test/demo"),
+        ("https://github.com/test/demo.git/tree/dev", "https://github.com/test/demo/tree/dev"),
+        ("https://github.com/test/demo/tree/dev.git", "https://github.com/test/demo/tree/dev.git"),
+        ("https://github.com/test/demo.git/tree/feature/release.git", "https://github.com/test/demo/tree/feature/release.git"),
+        ("https://example.com/test/demo.git", "https://example.com/test/demo.git"),
+        ("https://github.com.example/test/demo.git", "https://github.com.example/test/demo.git"),
+    ],
+)
+def test_repository_url_only_removes_github_repository_suffix(value, expected):
+    assert repository_url(value) == expected
+    assert repository_url(expected) == expected
+
+
+@pytest.mark.parametrize(
     "first,second,expected",
     [
         ("https://github.com/Test/Demo.git", "https://github.com/test/demo", True),
+        ("https://github.com/test/demo.git/tree/dev", "https://github.com/test/demo/tree/dev", True),
+        ("https://github.com/test/demo/tree/dev.git", "https://github.com/test/demo/tree/dev", False),
         ("https://github.com/test/demo", "https://evil.example/test/demo", False),
         ("https://example.com/test/demo", "https://example.com:444/test/demo", False),
         ("https://example.com/Test/demo", "https://example.com/test/demo", False),

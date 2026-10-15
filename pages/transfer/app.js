@@ -167,6 +167,10 @@ function sourceTime(value) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("zh-CN", {year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false});
 }
+function sourceActor(value) {
+  const actor = String(value || "");
+  return actor.toLowerCase() === "astrbot" ? "AstrBot" : actor || "未知";
+}
 function sourceAddress(className, value) {
   const element = node("p", className), parts = String(value || "").split("/");
   parts.forEach((part, index) => {
@@ -1173,7 +1177,7 @@ function renderSource() {
   const history = elements["source-history"]; history.replaceChildren();
   elements["source-history-count"].textContent = record.history.length;
   const labels = {installed: "管家安装", updated: "更新插件", uninstalled: "管家卸载", source_repaired: "校验并保存更新源", source_auto_bound: "根据插件元数据自动绑定更新源", core_observed: "观察到 AstrBot 来源变更", metadata_synced: "同步插件信息", bundle_imported: "从迁移包恢复代码", bundle_sources_imported: "恢复来源信息"};
-  for (const event of record.history.slice().reverse()) {const row = node("div", "history-row"); row.append(node("span", "history-event", labels[event.action] || event.action), node("span", "history-meta", sourceTime(event.at) + " · " + event.actor)); history.append(row);}
+  for (const event of record.history.slice().reverse()) {const row = node("div", "history-row"); row.append(node("span", "history-event", labels[event.action] || event.action), node("span", "history-meta", sourceTime(event.at) + " · " + sourceActor(event.actor))); history.append(row);}
   if (!record.history.length) history.append(node("p", "source-empty", "暂无管家操作记录。"));
 }
 
